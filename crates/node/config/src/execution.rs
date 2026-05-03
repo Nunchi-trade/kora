@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Default gas limit per block.
-pub const DEFAULT_GAS_LIMIT: u64 = 30_000_000;
+pub const DEFAULT_GAS_LIMIT: u64 = 250_000_000;
 
 /// Default block time in seconds.
 pub const DEFAULT_BLOCK_TIME: u64 = 2;
@@ -47,7 +47,7 @@ mod tests {
 
     #[test]
     fn test_execution_config_serde_roundtrip() {
-        let config = ExecutionConfig { gas_limit: 50_000_000, block_time: 5 };
+        let config = ExecutionConfig { gas_limit: 300_000_000, block_time: 5 };
         let serialized = serde_json::to_string(&config).expect("serialize");
         let deserialized: ExecutionConfig = serde_json::from_str(&serialized).expect("deserialize");
         assert_eq!(config, deserialized);
@@ -55,7 +55,7 @@ mod tests {
 
     #[test]
     fn test_execution_config_toml_roundtrip() {
-        let config = ExecutionConfig { gas_limit: 15_000_000, block_time: 1 };
+        let config = ExecutionConfig { gas_limit: 150_000_000, block_time: 1 };
         let serialized = toml::to_string(&config).expect("serialize toml");
         let deserialized: ExecutionConfig = toml::from_str(&serialized).expect("deserialize toml");
         assert_eq!(config, deserialized);

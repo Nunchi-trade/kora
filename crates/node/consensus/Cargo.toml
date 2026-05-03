@@ -18,6 +18,7 @@ kora-traits = { path = "../../storage/traits" }
 # Alloy
 alloy-primitives.workspace = true
 alloy-consensus.workspace = true
+alloy-eips.workspace = true
 
 # Commonware
 commonware-cryptography.workspace = true

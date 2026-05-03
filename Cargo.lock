@@ -3147,6 +3147,7 @@ dependencies = [
 name = "keygen"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "clap",
  "commonware-codec",
  "commonware-cryptography",
@@ -3154,6 +3155,7 @@ dependencies = [
  "ed25519-consensus",
  "eyre",
  "hex",
+ "k256",
  "kora-config",
  "kora-dkg",
  "kora-domain",
@@ -3264,6 +3266,7 @@ name = "kora-consensus"
 version = "0.1.0"
 dependencies = [
  "alloy-consensus 1.8.3",
+ "alloy-eips 1.8.3",
  "alloy-primitives",
  "commonware-cryptography",
  "futures",

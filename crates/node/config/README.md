@@ -25,7 +25,7 @@ listen_addr = "0.0.0.0:30303"
 bootstrap_peers = ["peer1:30303", "peer2:30303"]
 
 [execution]
-gas_limit = 30000000
+gas_limit = 250000000
 block_time = 2
 
 [rpc]

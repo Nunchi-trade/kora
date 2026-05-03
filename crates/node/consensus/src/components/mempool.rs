@@ -2,6 +2,9 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
+use alloy_consensus::{Transaction as _, TxEnvelope, transaction::SignerRecoverable as _};
+use alloy_eips::eip2718::Decodable2718 as _;
+use alloy_primitives::Address;
 use kora_domain::Tx;
 use parking_lot::RwLock;
 
@@ -27,6 +30,16 @@ impl Default for InMemoryMempool {
     }
 }
 
+fn tx_order_key(tx: &Tx) -> (u8, Address, u64) {
+    let Ok(envelope) = TxEnvelope::decode_2718(&mut tx.bytes.as_ref()) else {
+        return (1, Address::ZERO, u64::MAX);
+    };
+    let Ok(sender) = envelope.recover_signer() else {
+        return (1, Address::ZERO, u64::MAX);
+    };
+    (0, sender, envelope.nonce())
+}
+
 impl Mempool for InMemoryMempool {
     fn insert(&self, tx: Tx) -> bool {
         let id = tx.id();
@@ -36,12 +49,13 @@ impl Mempool for InMemoryMempool {
 
     fn build(&self, max_txs: usize, excluded: &std::collections::BTreeSet<TxId>) -> Vec<Tx> {
         let inner = self.inner.read();
-        inner
+        let mut candidates: Vec<_> = inner
             .iter()
             .filter(|(id, _)| !excluded.contains(id))
-            .take(max_txs)
-            .map(|(_, tx)| tx.clone())
-            .collect()
+            .map(|(id, tx)| (tx_order_key(tx), *id, tx.clone()))
+            .collect();
+        candidates.sort_by_key(|(order, id, _)| (*order, *id));
+        candidates.into_iter().take(max_txs).map(|(_, _, tx)| tx).collect()
     }
 
     fn prune(&self, tx_ids: &[TxId]) {
