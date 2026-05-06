@@ -133,6 +133,7 @@ impl SenderQueue {
         if confirmed_nonce >= self.next_nonce {
             self.next_nonce = confirmed_nonce + 1;
         }
+        self.promote_queued();
     }
 
     /// Returns the count of pending transactions.

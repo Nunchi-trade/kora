@@ -21,6 +21,43 @@ use crate::{
 };
 
 #[derive(Debug)]
+struct BuildSenderState {
+    txs: Vec<OrderedTransaction>,
+    index: usize,
+    expected_nonce: u64,
+}
+
+impl BuildSenderState {
+    fn next_candidate(&mut self, excluded: &BTreeSet<TxId>) -> Option<OrderedTransaction> {
+        while let Some(tx) = self.txs.get(self.index) {
+            if tx.nonce < self.expected_nonce {
+                self.index += 1;
+                continue;
+            }
+
+            if tx.nonce > self.expected_nonce {
+                return None;
+            }
+
+            if excluded.contains(&TxId(tx.hash)) {
+                self.expected_nonce = tx.nonce + 1;
+                self.index += 1;
+                continue;
+            }
+
+            return Some(tx.clone());
+        }
+
+        None
+    }
+
+    const fn consume(&mut self) {
+        self.expected_nonce = self.expected_nonce.saturating_add(1);
+        self.index += 1;
+    }
+}
+
+#[derive(Debug)]
 struct PoolInner {
     by_hash: HashMap<B256, OrderedTransaction>,
     by_sender: HashMap<Address, SenderQueue>,
@@ -278,33 +315,37 @@ impl Mempool for TransactionPool {
 
     fn build(&self, max_txs: usize, excluded: &BTreeSet<TxId>) -> Vec<Tx> {
         let inner = self.inner.read();
-
-        let mut candidates: Vec<_> = inner
+        let mut senders: HashMap<Address, BuildSenderState> = inner
             .by_sender
-            .values()
-            .flat_map(|q| q.pending.iter())
-            .filter(|tx| !excluded.contains(&TxId(tx.hash)))
-            .cloned()
+            .iter()
+            .filter(|(_, queue)| !queue.pending.is_empty())
+            .map(|(sender, queue)| {
+                (
+                    *sender,
+                    BuildSenderState {
+                        txs: queue.pending.clone(),
+                        index: 0,
+                        expected_nonce: queue.next_nonce,
+                    },
+                )
+            })
             .collect();
+        let pending_count = senders.values().map(|state| state.txs.len()).sum();
+        let mut result = Vec::with_capacity(max_txs.min(pending_count));
 
-        candidates.sort();
-
-        let mut result = Vec::with_capacity(max_txs.min(candidates.len()));
-        let mut included_senders: HashMap<Address, u64> = HashMap::new();
-
-        for tx in candidates {
-            if result.len() >= max_txs {
+        while result.len() < max_txs {
+            let Some((sender, tx)) = senders
+                .iter_mut()
+                .filter_map(|(sender, state)| {
+                    state.next_candidate(excluded).map(|tx| (*sender, tx))
+                })
+                .min_by(|(_, left), (_, right)| left.cmp(right))
+            else {
                 break;
-            }
+            };
 
-            let expected_nonce = included_senders
-                .get(&tx.sender)
-                .copied()
-                .or_else(|| inner.by_sender.get(&tx.sender).map(|q| q.next_nonce))
-                .unwrap_or(0);
-
-            if tx.nonce == expected_nonce {
-                included_senders.insert(tx.sender, tx.nonce + 1);
+            if let Some(state) = senders.get_mut(&sender) {
+                state.consume();
                 let mut raw = Vec::new();
                 tx.envelope.encode_2718(&mut raw);
                 result.push(Tx::new(Bytes::from(raw)));
@@ -317,16 +358,35 @@ impl Mempool for TransactionPool {
     fn prune(&self, tx_ids: &[TxId]) {
         let mut inner = self.inner.write();
 
-        let mut senders_to_check: Vec<Address> = Vec::new();
-
+        let mut confirmed_by_sender: HashMap<Address, u64> = HashMap::new();
         for id in tx_ids {
-            if let Some(tx) = inner.by_hash.remove(&id.0) {
-                senders_to_check.push(tx.sender);
-                if let Some(queue) = inner.by_sender.get_mut(&tx.sender) {
-                    queue.pending.retain(|t| t.hash != id.0);
-                    queue.queued.retain(|t| t.hash != id.0);
-                }
+            if let Some(tx) = inner.by_hash.get(&id.0) {
+                confirmed_by_sender
+                    .entry(tx.sender)
+                    .and_modify(|nonce| *nonce = (*nonce).max(tx.nonce))
+                    .or_insert(tx.nonce);
             }
+        }
+
+        let mut senders_to_check: Vec<Address> = Vec::with_capacity(confirmed_by_sender.len());
+        let mut hashes_to_remove = Vec::new();
+        for (sender, confirmed_nonce) in confirmed_by_sender {
+            if let Some(queue) = inner.by_sender.get_mut(&sender) {
+                hashes_to_remove.extend(
+                    queue
+                        .pending
+                        .iter()
+                        .chain(queue.queued.iter())
+                        .filter(|tx| tx.nonce <= confirmed_nonce)
+                        .map(|tx| tx.hash),
+                );
+                queue.remove_confirmed(confirmed_nonce);
+                senders_to_check.push(sender);
+            }
+        }
+
+        for hash in hashes_to_remove {
+            inner.by_hash.remove(&hash);
         }
 
         for sender in senders_to_check {
@@ -381,6 +441,11 @@ mod tests {
         let signed = inner.into_signed(sig);
         let envelope = TxEnvelope::from(signed);
         OrderedTransaction::new(random_b256(), sender, nonce, gas_price, 0, envelope)
+    }
+
+    fn tx_nonce(tx: &Tx) -> u64 {
+        let mut data = tx.bytes.as_ref();
+        TxEnvelope::decode_2718(&mut data).unwrap().nonce()
     }
 
     #[test]
@@ -457,5 +522,69 @@ mod tests {
 
         pool.clear();
         assert!(pool.is_empty());
+    }
+
+    #[test]
+    fn pool_prune_advances_sender_nonce() {
+        let pool = TransactionPool::new(PoolConfig::default());
+        let sender = random_address();
+        let tx0 = make_ordered_tx(sender, 0, 100);
+        let tx1 = make_ordered_tx(sender, 1, 100);
+        let tx2 = make_ordered_tx(sender, 2, 100);
+        let tx3 = make_ordered_tx(sender, 3, 100);
+
+        pool.add(tx0.clone()).unwrap();
+        pool.add(tx1.clone()).unwrap();
+        pool.add(tx2.clone()).unwrap();
+        pool.add(tx3.clone()).unwrap();
+
+        pool.prune(&[TxId(tx0.hash), TxId(tx1.hash)]);
+
+        let txs = pool.build(10, &BTreeSet::new());
+        assert_eq!(txs.len(), 2);
+        assert_eq!(tx_nonce(&txs[0]), tx2.nonce);
+        assert_eq!(tx_nonce(&txs[1]), tx3.nonce);
+    }
+
+    #[test]
+    fn pool_build_treats_excluded_ancestors_as_nonce_progress() {
+        let pool = TransactionPool::new(PoolConfig::default());
+        let sender = random_address();
+        let tx0 = make_ordered_tx(sender, 0, 100);
+        let tx1 = make_ordered_tx(sender, 1, 100);
+        let tx2 = make_ordered_tx(sender, 2, 100);
+
+        pool.add(tx0.clone()).unwrap();
+        pool.add(tx1.clone()).unwrap();
+        pool.add(tx2.clone()).unwrap();
+
+        let excluded = BTreeSet::from([TxId(tx0.hash)]);
+        let txs = pool.build(10, &excluded);
+
+        assert_eq!(txs.len(), 2);
+        assert_eq!(tx_nonce(&txs[0]), tx1.nonce);
+        assert_eq!(tx_nonce(&txs[1]), tx2.nonce);
+    }
+
+    #[test]
+    fn pool_prune_promotes_queued_transactions_after_gap_fills() {
+        let pool = TransactionPool::new(PoolConfig::default());
+        let sender = random_address();
+        let tx0 = make_ordered_tx(sender, 0, 100);
+        let tx2 = make_ordered_tx(sender, 2, 100);
+
+        pool.add(tx0.clone()).unwrap();
+        pool.add(tx2.clone()).unwrap();
+        pool.prune(&[TxId(tx0.hash)]);
+
+        assert!(pool.build(10, &BTreeSet::new()).is_empty());
+
+        let tx1 = make_ordered_tx(sender, 1, 100);
+        pool.add(tx1.clone()).unwrap();
+
+        let txs = pool.build(10, &BTreeSet::new());
+        assert_eq!(txs.len(), 2);
+        assert_eq!(tx_nonce(&txs[0]), tx1.nonce);
+        assert_eq!(tx_nonce(&txs[1]), tx2.nonce);
     }
 }
