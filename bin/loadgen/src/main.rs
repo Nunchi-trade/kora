@@ -29,6 +29,14 @@ struct Args {
     #[arg(long, default_value = "http://127.0.0.1:8545")]
     rpc_url: String,
 
+    /// Additional RPC endpoint URLs to broadcast each transaction to.
+    ///
+    /// Kora's current devnet mempools are validator-local, so devnet load tests
+    /// should submit to all validator RPCs to ensure the active proposer has the
+    /// transaction in its local mempool.
+    #[arg(long, value_delimiter = ',')]
+    broadcast_rpc_urls: Vec<String>,
+
     /// Number of accounts to use for sending transactions.
     #[arg(long, default_value = "10")]
     accounts: usize,
@@ -72,6 +80,10 @@ impl Account {
 
     fn next_nonce(&self) -> u64 {
         self.nonce.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn set_nonce(&self, nonce: u64) {
+        self.nonce.store(nonce, Ordering::Relaxed);
     }
 }
 
@@ -149,6 +161,55 @@ impl RpcClient {
 
         Ok(json["result"].as_str().unwrap_or("").to_string())
     }
+
+    async fn get_transaction_count(&self, address: Address) -> Result<u64> {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "eth_getTransactionCount",
+            "params": [address.to_string(), "latest"],
+            "id": 1
+        });
+
+        let resp = self.client.post(&self.url).json(&body).send().await?;
+        let json: serde_json::Value = resp.json().await?;
+
+        if let Some(error) = json.get("error") {
+            eyre::bail!("RPC error: {}", error);
+        }
+
+        let nonce_hex =
+            json["result"].as_str().ok_or_else(|| eyre::eyre!("missing nonce result"))?;
+        let nonce = nonce_hex.strip_prefix("0x").unwrap_or(nonce_hex);
+        u64::from_str_radix(nonce, 16).map_err(Into::into)
+    }
+}
+
+async fn send_raw_transaction_to_any(clients: &[RpcClient], raw_tx: Bytes) -> Result<String> {
+    let mut sends = FuturesUnordered::new();
+
+    for client in clients {
+        let client = client.clone();
+        let tx = raw_tx.clone();
+        sends.push(async move { client.send_raw_transaction(&tx).await });
+    }
+
+    let mut first_hash = None;
+    let mut errors = Vec::new();
+
+    while let Some(result) = sends.next().await {
+        match result {
+            Ok(hash) => {
+                first_hash.get_or_insert(hash);
+            }
+            Err(error) => errors.push(error.to_string()),
+        }
+    }
+
+    if let Some(hash) = first_hash {
+        Ok(hash)
+    } else {
+        eyre::bail!("all RPC endpoints rejected transaction: {}", errors.join("; "))
+    }
 }
 
 #[tokio::main]
@@ -160,9 +221,13 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
+    let mut rpc_urls = Vec::with_capacity(args.broadcast_rpc_urls.len() + 1);
+    rpc_urls.push(args.rpc_url.clone());
+    rpc_urls.extend(args.broadcast_rpc_urls.iter().cloned());
 
     info!(
         rpc_url = %args.rpc_url,
+        broadcast_rpc_urls = ?args.broadcast_rpc_urls,
         accounts = args.accounts,
         total_txs = args.total_txs,
         concurrency = args.concurrency,
@@ -183,7 +248,14 @@ async fn main() -> Result<()> {
     let transfer_amount = U256::from(1u64);
     let gas_limit = 21_000u64;
 
-    let client = RpcClient::new(args.rpc_url.clone());
+    let clients: Arc<Vec<RpcClient>> = Arc::new(rpc_urls.into_iter().map(RpcClient::new).collect());
+
+    if !args.dry_run {
+        for account in &accounts {
+            let nonce = clients[0].get_transaction_count(account.address).await?;
+            account.set_nonce(nonce);
+        }
+    }
 
     let success_count = Arc::new(AtomicU64::new(0));
     let failure_count = Arc::new(AtomicU64::new(0));
@@ -212,7 +284,7 @@ async fn main() -> Result<()> {
 
         for i in 0..args.total_txs {
             let account = accounts[i as usize % accounts.len()].clone();
-            let client = client.clone();
+            let clients = clients.clone();
             let success = success_count.clone();
             let failure = failure_count.clone();
             let verbose = args.verbose;
@@ -228,7 +300,7 @@ async fn main() -> Result<()> {
             );
 
             let fut = async move {
-                match client.send_raw_transaction(&tx).await {
+                match send_raw_transaction_to_any(&clients, tx).await {
                     Ok(hash) => {
                         success.fetch_add(1, Ordering::Relaxed);
                         if verbose {

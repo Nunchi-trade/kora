@@ -2,12 +2,17 @@
 
 use std::{collections::BTreeMap, fs, path::PathBuf};
 
+use alloy_primitives::{Address, keccak256};
 use clap::Args;
 use commonware_codec::Encode;
 use commonware_cryptography::{Signer, ed25519};
 use eyre::{Result, WrapErr};
+use k256::ecdsa::SigningKey;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+
+const GENESIS_BALANCE: &str = "1000000000000000000000000";
+const LOADGEN_ACCOUNT_COUNT: u8 = 50;
 
 #[derive(Args, Debug)]
 pub(crate) struct SetupArgs {
@@ -57,6 +62,21 @@ struct NodeSetupConfig {
     validator_index: usize,
     public_key: String,
     port: u16,
+}
+
+fn funded_allocation(address: impl Into<String>) -> GenesisAllocation {
+    GenesisAllocation { address: address.into(), balance: GENESIS_BALANCE.to_string() }
+}
+
+fn loadgen_address(seed: u8) -> Address {
+    let mut secret = [0u8; 32];
+    secret[31] = seed;
+    let key = SigningKey::from_bytes((&secret).into())
+        .expect("loadgen seed should produce valid secp256k1 key");
+    let encoded = key.verifying_key().to_encoded_point(false);
+    let pubkey = encoded.as_bytes();
+    let hash = keccak256(&pubkey[1..]);
+    Address::from_slice(&hash[12..])
 }
 
 pub(crate) fn run(args: SetupArgs) -> Result<()> {
@@ -152,42 +172,27 @@ pub(crate) fn run(args: SetupArgs) -> Result<()> {
     fs::write(&peers_path, serde_json::to_string_pretty(&peers)?)?;
     tracing::info!(path = ?peers_path, "Wrote peers configuration");
 
+    let mut allocations = vec![
+        funded_allocation("0x0000000000000000000000000000000000000001"),
+        funded_allocation("0xEb1Ba7Fc58b3416361a0EE07d140c91410c0AA8c"),
+        funded_allocation("0xa883208a74152107475a3Fa6b0c21121894B647F"),
+        funded_allocation("0x105be5081ceba05be11976150abc277ee365fc3f"),
+        funded_allocation("0x30b68d56AE9173566055a69ee7cCB0E755B6a201"),
+        funded_allocation("0xDdE169289B51C512268D0b11EE2b15160b1e1793"),
+        funded_allocation("0xde738C4084dDE5083A7959235Fd230e27eAFC63B"),
+    ];
+    allocations.extend(
+        (1..=LOADGEN_ACCOUNT_COUNT)
+            .map(|seed| funded_allocation(loadgen_address(seed).to_string())),
+    );
+
     let genesis = GenesisConfig {
         chain_id: args.chain_id,
         timestamp: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs(),
-        allocations: vec![
-            GenesisAllocation {
-                address: "0x0000000000000000000000000000000000000001".to_string(),
-                balance: "1000000000000000000000000".to_string(),
-            },
-            GenesisAllocation {
-                address: "0xEb1Ba7Fc58b3416361a0EE07d140c91410c0AA8c".to_string(),
-                balance: "1000000000000000000000000".to_string(),
-            },
-            GenesisAllocation {
-                address: "0xa883208a74152107475a3Fa6b0c21121894B647F".to_string(),
-                balance: "1000000000000000000000000".to_string(),
-            },
-            GenesisAllocation {
-                address: "0x105be5081ceba05be11976150abc277ee365fc3f".to_string(),
-                balance: "1000000000000000000000000".to_string(),
-            },
-            GenesisAllocation {
-                address: "0x30b68d56AE9173566055a69ee7cCB0E755B6a201".to_string(),
-                balance: "1000000000000000000000000".to_string(),
-            },
-            GenesisAllocation {
-                address: "0xDdE169289B51C512268D0b11EE2b15160b1e1793".to_string(),
-                balance: "1000000000000000000000000".to_string(),
-            },
-            GenesisAllocation {
-                address: "0xde738C4084dDE5083A7959235Fd230e27eAFC63B".to_string(),
-                balance: "1000000000000000000000000".to_string(),
-            },
-        ],
+        allocations,
     };
     let genesis_path = args.output_dir.join("genesis.json");
     fs::write(&genesis_path, serde_json::to_string_pretty(&genesis)?)?;

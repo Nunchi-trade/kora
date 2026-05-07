@@ -75,12 +75,12 @@ docker-build:
 
 # Run load generator against devnet
 loadgen *args:
-    cargo run --release --bin loadgen -- {{args}}
+    cargo run --release -p loadgen --bin loadgen -- {{args}}
 
 # Quick load test (1000 txs)
 loadtest:
-    cargo run --release --bin loadgen -- --total-txs 1000
+    cargo run --release -p loadgen --bin loadgen -- --total-txs 1000 --broadcast-rpc-urls http://127.0.0.1:8546,http://127.0.0.1:8547,http://127.0.0.1:8548
 
 # Stress test (10000 txs with 50 accounts)
 stresstest:
-    cargo run --release --bin loadgen -- --total-txs 10000 --accounts 50
+    cargo run --release -p loadgen --bin loadgen -- --total-txs 10000 --accounts 50 --broadcast-rpc-urls http://127.0.0.1:8546,http://127.0.0.1:8547,http://127.0.0.1:8548

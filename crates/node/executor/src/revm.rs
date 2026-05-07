@@ -7,7 +7,7 @@ use alloy_primitives::{B256, Bytes, U256, keccak256};
 use kora_qmdb::{AccountUpdate, ChangeSet};
 use kora_traits::StateDb;
 use revm::{
-    Context, ExecuteEvm, Journal, MainBuilder,
+    Context, DatabaseCommit as _, ExecuteEvm, Journal, MainBuilder,
     bytecode::Bytecode,
     context::{
         block::BlockEnv,
@@ -401,7 +401,9 @@ impl<S: StateDb> BlockExecutor<S> for RevmExecutor {
                 build_receipt(&result_and_state.result, tx_hash, gas_used, cumulative_gas);
             outcome.receipts.push(receipt);
 
-            let changes = extract_changes(result_and_state.state);
+            let state = result_and_state.state;
+            let changes = extract_changes(state.clone());
+            evm.ctx.modify_db(|db| db.commit(state));
             outcome.changes.merge(changes);
         }
 
@@ -433,10 +435,10 @@ impl<S: StateDb> BlockExecutor<S> for RevmExecutor {
 /// Currently supports basic transaction decoding for all Ethereum transaction types.
 fn decode_tx_env(tx_bytes: &Bytes, _chain_id: u64) -> Result<revm::context::TxEnv, ExecutionError> {
     use alloy_consensus::TxEnvelope;
-    use alloy_rlp::Decodable;
+    use alloy_eips::eip2718::Decodable2718 as _;
 
-    // Decode the transaction envelope
-    let envelope = TxEnvelope::decode(&mut tx_bytes.as_ref())
+    // Decode both legacy RLP transactions and typed EIP-2718 envelopes.
+    let envelope = TxEnvelope::decode_2718(&mut tx_bytes.as_ref())
         .map_err(|e| ExecutionError::TxDecode(format!("{}", e)))?;
 
     // Build TxEnv using the builder pattern

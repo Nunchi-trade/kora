@@ -265,6 +265,22 @@ impl LedgerView {
         inner.snapshots.clear_persisting_chain(&chain);
         match result {
             Ok(_) => {
+                if let Some(tip) = chain.last()
+                    && let Some(snapshot) = inner.snapshots.get(tip)
+                {
+                    let compact_state =
+                        OverlayState::new(inner.qmdb.state(), QmdbChangeSet::default());
+                    inner.snapshots.insert(
+                        *tip,
+                        Snapshot::new(
+                            snapshot.parent,
+                            compact_state,
+                            snapshot.state_root,
+                            QmdbChangeSet::default(),
+                            snapshot.tx_ids,
+                        ),
+                    );
+                }
                 inner.snapshots.mark_persisted(&chain);
                 Ok(true)
             }

@@ -122,7 +122,19 @@ where
         let txs_bytes: Vec<Bytes> = txs.iter().map(|tx| tx.bytes.clone()).collect();
 
         let exec_start = Instant::now();
-        let outcome = self.executor.execute(&parent_snapshot.state, &context, &txs_bytes).ok()?;
+        let outcome = match self.executor.execute(&parent_snapshot.state, &context, &txs_bytes) {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                warn!(
+                    parent = ?parent_digest,
+                    height,
+                    txs = txs.len(),
+                    error = ?err,
+                    "build_block: execution failed"
+                );
+                return None;
+            }
+        };
         let exec_elapsed = exec_start.elapsed();
 
         let root_start = Instant::now();
@@ -135,20 +147,7 @@ where
 
         let block = Block { parent: parent.id(), height, prevrandao, state_root, txs };
 
-        let merged_changes = parent_snapshot.state.merge_changes(outcome.changes.clone());
-        let next_state = OverlayState::new(parent_snapshot.state.base(), merged_changes);
         let block_digest = block.commitment();
-
-        self.ledger
-            .insert_snapshot(
-                block_digest,
-                parent_digest,
-                next_state,
-                state_root,
-                outcome.changes,
-                &block.txs,
-            )
-            .await;
 
         let total_elapsed = start.elapsed();
         info!(
