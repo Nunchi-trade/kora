@@ -49,6 +49,9 @@ peers are authenticated Commonware P2P nodes that follow validator traffic witho
 participating in consensus. See the [Docker devnet README](./docker/README.md#secondary-peers)
 for how a secondary peer joins the network.
 
+For a multi-host public testnet with validator public IP addresses, see the
+[public testnet standup runbook](./docs/public-testnet.md).
+
 > [!TIP]
 > See the [Justfile](./Justfile) for other useful commands.
 
