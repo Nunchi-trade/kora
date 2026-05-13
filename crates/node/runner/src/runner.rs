@@ -149,7 +149,13 @@ where
 {
     let block_ranges: Vec<_> = finalized_blocks.ranges().collect();
     let finalization_ranges: Vec<_> = finalizations_by_height.ranges().collect();
+    info!(
+        block_ranges = block_ranges.len(),
+        finalization_ranges = finalization_ranges.len(),
+        "recovering finalized state from archives"
+    );
 
+    let mut last_finalized_digest = None;
     for (start, end) in finalization_ranges {
         for height in start..=end {
             if let Some(finalization) = finalizations_by_height
@@ -157,6 +163,7 @@ where
                 .await
                 .with_context(|| format!("load finalization at height {height}"))?
             {
+                last_finalized_digest = Some(finalization.proposal.payload);
                 ledger
                     .set_seed(finalization.proposal.payload, seed_hash(finalization.seed()))
                     .await;
@@ -191,6 +198,12 @@ where
             blocks = recovered,
             "recovered finalized ledger head from archive"
         );
+    } else if let Some(digest) = last_finalized_digest {
+        let root = ledger
+            .restore_persisted_digest(digest)
+            .await
+            .context("restore finalized digest from current state")?;
+        info!(?digest, ?root, "recovered finalized ledger head from finalization archive");
     }
 
     Ok(())
@@ -320,7 +333,8 @@ impl NodeRunner for ProductionRunner {
         .await
         .context("init blocks archive")?;
 
-        let has_finalized_history = finalized_blocks.last_index().is_some();
+        let has_finalized_history = finalized_blocks.last_index().is_some()
+            || finalizations_by_height.last_index().is_some();
         let state = LedgerView::init_with_genesis(
             context.with_label("state"),
             format!("{}-qmdb", self.partition_prefix),
