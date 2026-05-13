@@ -16,8 +16,9 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519};
 use commonware_p2p::{Manager, TrackedPeers};
-use commonware_parallel::Sequential;
-use commonware_runtime::{Metrics as _, Spawner, buffer::paged::CacheRef, tokio};
+use commonware_runtime::{
+    Metrics as _, Spawner, ThreadPooler as _, buffer::paged::CacheRef, tokio,
+};
 use commonware_storage::archive::{Archive, Identifier as ArchiveId};
 use commonware_utils::{NZU64, NZUsize, acknowledgement::Exact, ordered::Set};
 use futures::StreamExt;
@@ -43,8 +44,9 @@ const CONSENSUS_LEADER_TIMEOUT: Duration = Duration::from_secs(2);
 const CONSENSUS_CERTIFICATION_TIMEOUT: Duration = Duration::from_secs(4);
 const CONSENSUS_TIMEOUT_RETRY: Duration = Duration::from_secs(1);
 const CONSENSUS_FETCH_TIMEOUT: Duration = Duration::from_secs(1);
-const CONSENSUS_ACTIVITY_TIMEOUT: ViewDelta = ViewDelta::new(20);
-const CONSENSUS_SKIP_TIMEOUT: ViewDelta = ViewDelta::new(10);
+const CONSENSUS_ACTIVITY_TIMEOUT: ViewDelta = ViewDelta::new(256);
+const CONSENSUS_SKIP_TIMEOUT: ViewDelta = ViewDelta::new(32);
+const SIGNATURE_THREADS: usize = 2;
 const EPOCH_LENGTH: u64 = u64::MAX;
 const PARTITION_PREFIX: &str = "kora";
 
@@ -308,6 +310,9 @@ impl NodeRunner for ProductionRunner {
         let page_cache = default_page_cache(&context);
         let block_cfg = block_codec_cfg();
         let partition_prefix = &self.partition_prefix;
+        let strategy = context
+            .create_strategy(NZUsize!(SIGNATURE_THREADS))
+            .map_err(|e| anyhow::anyhow!("failed to create signature strategy: {e}"))?;
 
         <ThresholdScheme as commonware_cryptography::certificate::Scheme>::certificate_codec_config_unbounded();
         let finalizations_by_height = ArchiveInitializer::init::<_, ConsensusDigest, CertArchive>(
@@ -432,13 +437,14 @@ impl NodeRunner for ProductionRunner {
         broadcast_engine.start(transport.marshal.blocks);
 
         let (actor, marshal_mailbox, _last_processed_height) =
-            kora_marshal::ActorInitializer::init::<_, Block, _, _, _, Exact>(
+            kora_marshal::ActorInitializer::init_with_strategy::<_, Block, _, _, _, Exact, _>(
                 context.clone(),
                 finalizations_by_height,
                 finalized_blocks,
                 scheme_provider,
                 page_cache.clone(),
                 block_cfg,
+                strategy.clone(),
             )
             .await;
         actor.start(finalized_reporter, buffer, resolver);
@@ -479,7 +485,7 @@ impl NodeRunner for ProductionRunner {
                 automaton: marshaled.clone(),
                 relay: marshaled,
                 reporter,
-                strategy: Sequential,
+                strategy,
                 partition: self.partition_prefix.clone(),
                 mailbox_size: MAILBOX_SIZE,
                 epoch: Epoch::zero(),
@@ -491,7 +497,7 @@ impl NodeRunner for ProductionRunner {
                 fetch_timeout: CONSENSUS_FETCH_TIMEOUT,
                 activity_timeout: CONSENSUS_ACTIVITY_TIMEOUT,
                 skip_timeout: CONSENSUS_SKIP_TIMEOUT,
-                fetch_concurrent: 8,
+                fetch_concurrent: 32,
                 page_cache,
                 forwarding: simplex::ForwardingPolicy::SilentLeader,
             },
