@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use alloy_consensus::Header;
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, B256, keccak256};
 use anyhow::Context as _;
 use commonware_consensus::{
     Reporters,
@@ -9,17 +9,21 @@ use commonware_consensus::{
         core::Mailbox,
         standard::{Inline, Standard},
     },
-    simplex::{self, elector::Random, types::Finalization},
+    simplex::{
+        self, elector::Random, scheme::bls12381_threshold::vrf::Seedable as _, types::Finalization,
+    },
     types::{Epoch, FixedEpocher, ViewDelta},
 };
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519};
 use commonware_p2p::{Manager, TrackedPeers};
 use commonware_parallel::Sequential;
 use commonware_runtime::{Metrics as _, Spawner, buffer::paged::CacheRef, tokio};
+use commonware_storage::archive::{Archive, Identifier as ArchiveId};
 use commonware_utils::{NZU64, NZUsize, acknowledgement::Exact, ordered::Set};
 use futures::StreamExt;
 use kora_domain::{Block, BlockCfg, BootstrapConfig, ConsensusDigest, LedgerEvent, Tx, TxCfg};
 use kora_executor::{BlockContext, RevmExecutor};
+use kora_indexer::{BlockIndex, IndexedBlock};
 use kora_ledger::{LedgerService, LedgerView};
 use kora_marshal::{ArchiveInitializer, BroadcastInitializer, PeerInitializer};
 use kora_reporters::{BlockContextProvider, FinalizedReporter, NodeStateReporter, SeedReporter};
@@ -109,6 +113,87 @@ fn spawn_ledger_observers<S: Spawner>(service: LedgerService, spawner: S) {
             }
         }
     });
+}
+
+fn seed_hash(seed: impl commonware_codec::Encode) -> B256 {
+    keccak256(seed.encode())
+}
+
+fn index_recovered_block(index: &BlockIndex, block: &Block, provider: &RevmContextProvider) {
+    let block_context = provider.context(block);
+    let transaction_hashes = block.txs.iter().map(|tx| keccak256(&tx.bytes)).collect();
+    let indexed_block = IndexedBlock {
+        hash: block.id().0,
+        number: block.height,
+        parent_hash: block.parent.0,
+        state_root: block.state_root.0,
+        timestamp: block_context.header.timestamp,
+        gas_limit: block_context.header.gas_limit,
+        gas_used: 0,
+        base_fee_per_gas: block_context.header.base_fee_per_gas,
+        transaction_hashes,
+    };
+    index.insert_block(indexed_block, Vec::new(), Vec::new());
+}
+
+async fn recover_finalized_state<FB, FC>(
+    ledger: &LedgerService,
+    block_index: Option<&Arc<BlockIndex>>,
+    finalized_blocks: &FB,
+    finalizations_by_height: &FC,
+    provider: &RevmContextProvider,
+) -> anyhow::Result<()>
+where
+    FB: Archive<Key = ConsensusDigest, Value = Block>,
+    FC: Archive<Key = ConsensusDigest, Value = CertArchive>,
+{
+    let block_ranges: Vec<_> = finalized_blocks.ranges().collect();
+    let finalization_ranges: Vec<_> = finalizations_by_height.ranges().collect();
+
+    for (start, end) in finalization_ranges {
+        for height in start..=end {
+            if let Some(finalization) = finalizations_by_height
+                .get(ArchiveId::Index(height))
+                .await
+                .with_context(|| format!("load finalization at height {height}"))?
+            {
+                ledger
+                    .set_seed(finalization.proposal.payload, seed_hash(finalization.seed()))
+                    .await;
+            }
+        }
+    }
+
+    let mut recovered = 0u64;
+    let mut head = None;
+    for (start, end) in block_ranges {
+        for height in start..=end {
+            let Some(block) = finalized_blocks
+                .get(ArchiveId::Index(height))
+                .await
+                .with_context(|| format!("load finalized block at height {height}"))?
+            else {
+                continue;
+            };
+
+            if let Some(index) = block_index {
+                index_recovered_block(index, &block, provider);
+            }
+            head = Some(block);
+            recovered += 1;
+        }
+    }
+
+    if let Some(head) = head {
+        ledger.restore_persisted_snapshot(&head).await;
+        info!(
+            height = head.height,
+            blocks = recovered,
+            "recovered finalized ledger head from archive"
+        );
+    }
+
+    Ok(())
 }
 
 /// Production validator node runner.
@@ -216,11 +301,31 @@ impl NodeRunner for ProductionRunner {
 
         let page_cache = default_page_cache(&context);
         let block_cfg = block_codec_cfg();
+        let partition_prefix = &self.partition_prefix;
 
-        let state = LedgerView::init(
+        <ThresholdScheme as commonware_cryptography::certificate::Scheme>::certificate_codec_config_unbounded();
+        let finalizations_by_height = ArchiveInitializer::init::<_, ConsensusDigest, CertArchive>(
+            context.with_label("finalizations_by_height"),
+            format!("{partition_prefix}-finalizations-by-height"),
+            (),
+        )
+        .await
+        .context("init finalizations archive")?;
+
+        let finalized_blocks = ArchiveInitializer::init::<_, ConsensusDigest, Block>(
+            context.with_label("finalized_blocks"),
+            format!("{partition_prefix}-finalized-blocks"),
+            block_cfg,
+        )
+        .await
+        .context("init blocks archive")?;
+
+        let has_finalized_history = finalized_blocks.last_index().is_some();
+        let state = LedgerView::init_with_genesis(
             context.with_label("state"),
             format!("{}-qmdb", self.partition_prefix),
             self.bootstrap.genesis_alloc.clone(),
+            !has_finalized_history,
         )
         .await
         .context("init qmdb")?;
@@ -229,6 +334,18 @@ impl NodeRunner for ProductionRunner {
             self.rpc_config.as_ref().map(|_| Arc::new(kora_indexer::BlockIndex::new()));
         let ledger = LedgerService::new(state.clone());
         spawn_ledger_observers(ledger.clone(), context.clone());
+
+        let executor = RevmExecutor::new(self.chain_id);
+        let context_provider = RevmContextProvider { gas_limit: self.gas_limit };
+        recover_finalized_state(
+            &ledger,
+            block_index.as_ref(),
+            &finalized_blocks,
+            &finalizations_by_height,
+            &context_provider,
+        )
+        .await
+        .context("recover finalized state")?;
 
         if let Some((node_state, addr)) = &self.rpc_config {
             let qmdb_state = state.qmdb_state().await;
@@ -284,8 +401,6 @@ impl NodeRunner for ProductionRunner {
             .map_err(|e| anyhow::anyhow!("failed to load validator key: {}", e))?;
         let my_pk = commonware_cryptography::Signer::public_key(&validator_key);
 
-        let executor = RevmExecutor::new(self.chain_id);
-        let context_provider = RevmContextProvider { gas_limit: self.gas_limit };
         let mut finalized_reporter =
             FinalizedReporter::new(ledger.clone(), context.clone(), executor, context_provider);
         if let Some(block_index) = block_index {
@@ -309,24 +424,6 @@ impl NodeRunner for ProductionRunner {
             block_cfg,
         );
         broadcast_engine.start(transport.marshal.blocks);
-
-        let partition_prefix = &self.partition_prefix;
-        <ThresholdScheme as commonware_cryptography::certificate::Scheme>::certificate_codec_config_unbounded();
-        let finalizations_by_height = ArchiveInitializer::init::<_, ConsensusDigest, CertArchive>(
-            context.with_label("finalizations_by_height"),
-            format!("{partition_prefix}-finalizations-by-height"),
-            (),
-        )
-        .await
-        .context("init finalizations archive")?;
-
-        let finalized_blocks = ArchiveInitializer::init::<_, ConsensusDigest, Block>(
-            context.with_label("finalized_blocks"),
-            format!("{partition_prefix}-finalized-blocks"),
-            block_cfg,
-        )
-        .await
-        .context("init blocks archive")?;
 
         let (actor, marshal_mailbox, _last_processed_height) =
             kora_marshal::ActorInitializer::init::<_, Block, _, _, _, Exact>(

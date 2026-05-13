@@ -54,12 +54,24 @@ impl QmdbLedger {
         config: QmdbConfig,
         genesis_alloc: Vec<(Address, U256)>,
     ) -> Result<Self, Error> {
+        Self::init_with_genesis(context, config, genesis_alloc, true).await
+    }
+
+    /// Initializes the QMDB partitions, optionally applying the genesis allocation.
+    pub async fn init_with_genesis(
+        context: Context,
+        config: QmdbConfig,
+        genesis_alloc: Vec<(Address, U256)>,
+        apply_genesis: bool,
+    ) -> Result<Self, Error> {
         let backend = CommonwareBackend::open(context.clone(), config.clone()).await?;
         let root_provider = CommonwareRootProvider::new(context, config);
         let (accounts, storage, code) = backend.into_stores();
         let handle = Handle::new(accounts, storage, code)
             .with_root_provider(Arc::new(RwLock::new(root_provider)));
-        handle.init_genesis(genesis_alloc).await?;
+        if apply_genesis {
+            handle.init_genesis(genesis_alloc).await?;
+        }
         Ok(Self { handle })
     }
 

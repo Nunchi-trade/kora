@@ -31,6 +31,7 @@ commonware-cryptography.workspace = true
 commonware-p2p.workspace = true
 commonware-parallel.workspace = true
 commonware-runtime.workspace = true
+commonware-storage.workspace = true
 commonware-utils.workspace = true
 
 alloy-consensus = { workspace = true }
