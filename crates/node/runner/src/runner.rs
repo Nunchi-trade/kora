@@ -39,6 +39,12 @@ const BLOCK_CODEC_MAX_TXS: usize = 10_000;
 // Large enough for a devnet stress batch of 10k signed transfers while still
 // preserving the per-transaction 128 KiB admission limit in the tx validator.
 const BLOCK_CODEC_MAX_TX_BYTES: usize = 8 * 1024 * 1024;
+const CONSENSUS_LEADER_TIMEOUT: Duration = Duration::from_secs(2);
+const CONSENSUS_CERTIFICATION_TIMEOUT: Duration = Duration::from_secs(4);
+const CONSENSUS_TIMEOUT_RETRY: Duration = Duration::from_secs(1);
+const CONSENSUS_FETCH_TIMEOUT: Duration = Duration::from_secs(1);
+const CONSENSUS_ACTIVITY_TIMEOUT: ViewDelta = ViewDelta::new(20);
+const CONSENSUS_SKIP_TIMEOUT: ViewDelta = ViewDelta::new(10);
 const EPOCH_LENGTH: u64 = u64::MAX;
 const PARTITION_PREFIX: &str = "kora";
 
@@ -479,15 +485,15 @@ impl NodeRunner for ProductionRunner {
                 epoch: Epoch::zero(),
                 replay_buffer: NZUsize!(16 * 1024 * 1024),
                 write_buffer: NZUsize!(16 * 1024 * 1024),
-                leader_timeout: Duration::from_secs(5),
-                certification_timeout: Duration::from_secs(10),
-                timeout_retry: Duration::from_secs(2),
-                fetch_timeout: Duration::from_secs(5),
-                activity_timeout: ViewDelta::new(20),
-                skip_timeout: ViewDelta::new(10),
+                leader_timeout: CONSENSUS_LEADER_TIMEOUT,
+                certification_timeout: CONSENSUS_CERTIFICATION_TIMEOUT,
+                timeout_retry: CONSENSUS_TIMEOUT_RETRY,
+                fetch_timeout: CONSENSUS_FETCH_TIMEOUT,
+                activity_timeout: CONSENSUS_ACTIVITY_TIMEOUT,
+                skip_timeout: CONSENSUS_SKIP_TIMEOUT,
                 fetch_concurrent: 8,
                 page_cache,
-                forwarding: simplex::ForwardingPolicy::Disabled,
+                forwarding: simplex::ForwardingPolicy::SilentLeader,
             },
         );
         engine.start(transport.simplex.votes, transport.simplex.certs, transport.simplex.resolver);
