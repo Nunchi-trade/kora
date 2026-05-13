@@ -251,20 +251,6 @@ impl LedgerView {
         inner.snapshots.mark_persisted(&[digest]);
     }
 
-    /// Restore a finalized digest as the current persisted QMDB state.
-    pub async fn restore_persisted_digest(
-        &self,
-        digest: ConsensusDigest,
-    ) -> LedgerResult<StateRoot> {
-        let inner = self.inner.lock().await;
-        let root = inner.qmdb.root().await?;
-        let state = OverlayState::new(inner.qmdb.state(), QmdbChangeSet::default());
-        let snapshot = Snapshot::new(None, state, root, QmdbChangeSet::default(), BTreeSet::new());
-        inner.snapshots.insert(digest, snapshot);
-        inner.snapshots.mark_persisted(&[digest]);
-        Ok(root)
-    }
-
     /// Fetch the components needed to build a proposal.
     pub async fn proposal_components(
         &self,
@@ -449,14 +435,6 @@ impl LedgerService {
     /// Restore a finalized block as an already-persisted snapshot.
     pub async fn restore_persisted_snapshot(&self, block: &Block) {
         self.view.restore_persisted_snapshot(block).await;
-    }
-
-    /// Restore a finalized digest as the current persisted QMDB state.
-    pub async fn restore_persisted_digest(
-        &self,
-        digest: ConsensusDigest,
-    ) -> LedgerResult<StateRoot> {
-        self.view.restore_persisted_digest(digest).await
     }
 
     /// Fetch proposal components.
