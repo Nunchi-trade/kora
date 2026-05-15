@@ -257,7 +257,7 @@ fn index_finalized_block(
         number: block.height,
         parent_hash: block.parent.0,
         state_root: block.state_root.0,
-        timestamp: block_context.header.timestamp,
+        timestamp: block.timestamp,
         gas_limit: block_context.header.gas_limit,
         gas_used: outcome.gas_used,
         base_fee_per_gas: block_context.header.base_fee_per_gas,

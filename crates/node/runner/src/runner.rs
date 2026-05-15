@@ -82,7 +82,7 @@ impl BlockContextProvider for RevmContextProvider {
     fn context(&self, block: &Block) -> BlockContext {
         let header = Header {
             number: block.height,
-            timestamp: block.height,
+            timestamp: block.timestamp,
             gas_limit: self.gas_limit,
             beneficiary: Address::ZERO,
             base_fee_per_gas: Some(0),
@@ -217,10 +217,11 @@ impl NodeRunner for ProductionRunner {
         let page_cache = default_page_cache(&context);
         let block_cfg = block_codec_cfg();
 
-        let state = LedgerView::init(
+        let state = LedgerView::init_with_genesis_timestamp(
             context.with_label("state"),
             format!("{}-qmdb", self.partition_prefix),
             self.bootstrap.genesis_alloc.clone(),
+            self.bootstrap.genesis_timestamp,
         )
         .await
         .context("init qmdb")?;

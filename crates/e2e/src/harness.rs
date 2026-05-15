@@ -2,7 +2,7 @@
 
 use std::{
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, UNIX_EPOCH},
 };
 
 use alloy_consensus::Header;
@@ -232,7 +232,7 @@ impl BlockContextProvider for TestContextProvider {
     fn context(&self, block: &Block) -> BlockContext {
         let header = Header {
             number: block.height,
-            timestamp: block.height,
+            timestamp: block.timestamp,
             gas_limit: self.gas_limit,
             beneficiary: Address::ZERO,
             base_fee_per_gas: Some(0),
@@ -310,10 +310,11 @@ async fn start_single_node(
         .map_err(|e| anyhow::anyhow!("channel registration failed: {e}"))?;
 
     // Initialize ledger
-    let state = LedgerView::init(
+    let state = LedgerView::init_with_genesis_timestamp(
         context.with_label(&format!("state_{index}")),
         format!("{partition_prefix}-qmdb-{index}"),
         bootstrap.genesis_alloc.clone(),
+        bootstrap.genesis_timestamp,
     )
     .await
     .context("init qmdb")?;
@@ -687,10 +688,10 @@ impl<S> TestApplication<S> {
         }
     }
 
-    fn block_context(&self, height: u64, prevrandao: B256) -> BlockContext {
+    fn block_context(&self, height: u64, timestamp: u64, prevrandao: B256) -> BlockContext {
         let header = Header {
             number: height,
-            timestamp: height,
+            timestamp,
             gas_limit: self.gas_limit,
             beneficiary: Address::ZERO,
             base_fee_per_gas: Some(0),
@@ -703,7 +704,7 @@ impl<S> TestApplication<S> {
         self.ledger.seed_for_parent(parent_digest).await.unwrap_or(B256::ZERO)
     }
 
-    async fn build_block(&self, parent: &Block) -> Option<Block> {
+    async fn build_block(&self, parent: &Block, timestamp: u64) -> Option<Block> {
         let parent_digest = parent.commitment();
         let parent_snapshot = self.ledger.parent_snapshot(parent_digest).await?;
 
@@ -713,7 +714,7 @@ impl<S> TestApplication<S> {
 
         let prevrandao = self.get_prevrandao(parent_digest).await;
         let height = parent.height + 1;
-        let context = self.block_context(height, prevrandao);
+        let context = self.block_context(height, timestamp, prevrandao);
         let txs_bytes: Vec<Bytes> = txs.iter().map(|tx| tx.bytes.clone()).collect();
 
         let outcome = self.executor.execute(&parent_snapshot.state, &context, &txs_bytes).ok()?;
@@ -724,7 +725,7 @@ impl<S> TestApplication<S> {
             .await
             .ok()?;
 
-        let block = Block { parent: parent.id(), height, prevrandao, state_root, txs };
+        let block = Block { parent: parent.id(), height, timestamp, prevrandao, state_root, txs };
 
         let merged_changes = parent_snapshot.state.merge_changes(outcome.changes.clone());
         let next_state = OverlayState::new(parent_snapshot.state.base(), merged_changes);
@@ -756,7 +757,7 @@ impl<S> TestApplication<S> {
             return false;
         };
 
-        let context = self.block_context(block.height, block.prevrandao);
+        let context = self.block_context(block.height, block.timestamp, block.prevrandao);
         let execution =
             match BlockExecution::execute(&parent_snapshot, &self.executor, &context, &block.txs)
                 .await
@@ -833,12 +834,16 @@ where
 
     fn propose<A: BlockProvider<Block = Self::Block>>(
         &mut self,
-        _context: (Env, Self::Context),
+        context: (Env, Self::Context),
         mut ancestry: AncestorStream<A, Self::Block>,
     ) -> impl std::future::Future<Output = Option<Self::Block>> + Send {
+        let env = context.0;
         async move {
             let parent = ancestry.next().await?;
-            self.build_block(&parent).await
+            let now_secs =
+                env.current().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            let timestamp = Block::next_timestamp(now_secs, parent.timestamp);
+            self.build_block(&parent, timestamp).await
         }
     }
 }

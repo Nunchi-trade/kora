@@ -11,10 +11,10 @@ use kora_traits::StateDb;
 
 use crate::{ConsensusError, Digest, Mempool, Snapshot, SnapshotStore, TxId};
 
-fn block_context(height: u64, prevrandao: B256) -> BlockContext {
+fn block_context(height: u64, timestamp: u64, prevrandao: B256) -> BlockContext {
     let header = Header {
         number: height,
-        timestamp: height,
+        timestamp,
         gas_limit: kora_config::DEFAULT_GAS_LIMIT,
         beneficiary: Address::ZERO,
         base_fee_per_gas: Some(0),
@@ -95,7 +95,8 @@ where
         let txs = self.mempool.build(self.max_txs, &excluded);
 
         let height = parent.height + 1;
-        let context = block_context(height, prevrandao);
+        let timestamp = Block::next_timestamp(0, parent.timestamp);
+        let context = block_context(height, timestamp, prevrandao);
         let txs_bytes: Vec<Bytes> = txs.iter().map(|tx| tx.bytes.clone()).collect();
         let outcome = self
             .executor
@@ -108,7 +109,7 @@ where
             .map_err(ConsensusError::StateDb)?;
         let state_root = StateRoot(state_root);
 
-        let block = Block { parent: parent.id(), height, prevrandao, state_root, txs };
+        let block = Block { parent: parent.id(), height, timestamp, prevrandao, state_root, txs };
         let tx_ids = self.tx_ids_from_block(&block);
         let snapshot = Snapshot::new(
             Some(parent_digest),
@@ -137,7 +138,8 @@ where
         let txs = self.mempool.build(self.max_txs, &excluded);
 
         let height = parent.height + 1;
-        let context = block_context(height, prevrandao);
+        let timestamp = Block::next_timestamp(0, parent.timestamp);
+        let context = block_context(height, timestamp, prevrandao);
         let txs_bytes: Vec<Bytes> = txs.iter().map(|tx| tx.bytes.clone()).collect();
         let outcome = self
             .executor
@@ -150,7 +152,7 @@ where
             self.state.compute_root(&merged_changes).await.map_err(ConsensusError::StateDb)?;
         let state_root = StateRoot(state_root);
 
-        let block = Block { parent: parent.id(), height, prevrandao, state_root, txs };
+        let block = Block { parent: parent.id(), height, timestamp, prevrandao, state_root, txs };
         let tx_ids = self.tx_ids_from_block(&block);
         let snapshot = Snapshot::new(
             Some(parent_digest),
@@ -397,6 +399,7 @@ mod tests {
         Block {
             parent: kora_domain::BlockId(B256::ZERO),
             height: 0,
+            timestamp: 0,
             prevrandao: B256::ZERO,
             state_root: StateRoot(B256::ZERO),
             txs: Vec::new(),
@@ -615,6 +618,7 @@ mod tests {
         let parent = Block {
             parent: kora_domain::BlockId(B256::ZERO),
             height: 0,
+            timestamp: 0,
             prevrandao: B256::ZERO,
             state_root: StateRoot(B256::ZERO),
             txs: vec![tx.clone()],
