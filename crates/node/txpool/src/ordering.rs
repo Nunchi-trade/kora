@@ -93,11 +93,11 @@ impl SenderQueue {
             return Some(tx);
         }
 
-        if tx.nonce == self.next_nonce + self.pending.len() as u64 {
+        if tx.nonce == self.next_pending_nonce() {
             self.pending.push(tx);
             self.promote_queued();
             None
-        } else if tx.nonce > self.next_nonce + self.pending.len() as u64 {
+        } else if tx.nonce > self.next_pending_nonce() {
             let pos =
                 self.queued.binary_search_by(|q| q.nonce.cmp(&tx.nonce)).unwrap_or_else(|p| p);
             self.queued.insert(pos, tx);
@@ -117,7 +117,7 @@ impl SenderQueue {
 
     fn promote_queued(&mut self) {
         while let Some(first) = self.queued.first() {
-            if first.nonce == self.next_nonce + self.pending.len() as u64 {
+            if first.nonce == self.next_pending_nonce() {
                 let tx = self.queued.remove(0);
                 self.pending.push(tx);
             } else {
@@ -131,9 +131,13 @@ impl SenderQueue {
         self.pending.retain(|tx| tx.nonce > confirmed_nonce);
         self.queued.retain(|tx| tx.nonce > confirmed_nonce);
         if confirmed_nonce >= self.next_nonce {
-            self.next_nonce = confirmed_nonce + 1;
+            self.next_nonce = confirmed_nonce.saturating_add(1);
         }
         self.promote_queued();
+    }
+
+    const fn next_pending_nonce(&self) -> u64 {
+        self.next_nonce.saturating_add(self.pending.len() as u64)
     }
 
     /// Returns the count of pending transactions.

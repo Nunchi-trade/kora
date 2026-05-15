@@ -3270,6 +3270,7 @@ dependencies = [
  "alloy-primitives",
  "commonware-cryptography",
  "futures",
+ "k256",
  "kora-config",
  "kora-domain",
  "kora-executor",
