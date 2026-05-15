@@ -20,6 +20,7 @@ use commonware_utils::{NZU64, NZUsize, acknowledgement::Exact, ordered::Set};
 use futures::StreamExt;
 use kora_domain::{Block, BlockCfg, BootstrapConfig, ConsensusDigest, LedgerEvent, Tx, TxCfg};
 use kora_executor::{BlockContext, RevmExecutor};
+use kora_indexer::{BlockIndex, IndexedBlock};
 use kora_ledger::{LedgerService, LedgerView};
 use kora_marshal::{ArchiveInitializer, BroadcastInitializer, PeerInitializer};
 use kora_reporters::{BlockContextProvider, FinalizedReporter, NodeStateReporter, SeedReporter};
@@ -109,6 +110,24 @@ fn spawn_ledger_observers<S: Spawner>(service: LedgerService, spawner: S) {
             }
         }
     });
+}
+
+fn seed_genesis_block_index(index: &BlockIndex, genesis: &Block, gas_limit: u64) {
+    index.insert_block(
+        IndexedBlock {
+            hash: genesis.id().0,
+            number: 0,
+            parent_hash: genesis.parent.0,
+            state_root: genesis.state_root.0,
+            timestamp: 0,
+            gas_limit,
+            gas_used: 0,
+            base_fee_per_gas: Some(0),
+            transaction_hashes: Vec::new(),
+        },
+        Vec::new(),
+        Vec::new(),
+    );
 }
 
 /// Production validator node runner.
@@ -225,9 +244,12 @@ impl NodeRunner for ProductionRunner {
         .await
         .context("init qmdb")?;
 
-        let block_index =
-            self.rpc_config.as_ref().map(|_| Arc::new(kora_indexer::BlockIndex::new()));
         let ledger = LedgerService::new(state.clone());
+        let block_index = self.rpc_config.as_ref().map(|_| {
+            let index = Arc::new(BlockIndex::new());
+            seed_genesis_block_index(&index, &ledger.genesis_block(), self.gas_limit);
+            index
+        });
         spawn_ledger_observers(ledger.clone(), context.clone());
 
         if let Some((node_state, addr)) = &self.rpc_config {
@@ -397,5 +419,38 @@ impl NodeRunner for ProductionRunner {
 
         info!("Validator started successfully");
         Ok(ledger)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use kora_domain::{BlockId, StateRoot};
+
+    use super::*;
+
+    #[test]
+    fn seed_genesis_block_index_indexes_real_genesis_metadata() {
+        let index = BlockIndex::new();
+        let genesis = Block {
+            parent: BlockId(B256::repeat_byte(0x11)),
+            height: 0,
+            prevrandao: B256::repeat_byte(0x22),
+            state_root: StateRoot(B256::repeat_byte(0x33)),
+            txs: Vec::new(),
+        };
+        let gas_limit = 45_000_000;
+
+        seed_genesis_block_index(&index, &genesis, gas_limit);
+
+        let indexed = index.get_block_by_number(0).expect("genesis indexed");
+        assert_eq!(indexed.hash, genesis.id().0);
+        assert_eq!(indexed.number, 0);
+        assert_eq!(indexed.parent_hash, genesis.parent.0);
+        assert_eq!(indexed.state_root, genesis.state_root.0);
+        assert_eq!(indexed.timestamp, 0);
+        assert_eq!(indexed.gas_limit, gas_limit);
+        assert_eq!(indexed.gas_used, 0);
+        assert_eq!(indexed.transaction_hashes, Vec::<B256>::new());
+        assert_eq!(index.get_block_by_hash(&genesis.id().0).expect("genesis by hash").number, 0);
     }
 }
