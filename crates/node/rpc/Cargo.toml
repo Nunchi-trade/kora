@@ -47,6 +47,7 @@ kora-traits = { path = "../../storage/traits" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }
+tower = { version = "0.5", features = ["util"] }
 serde_json.workspace = true
 k256.workspace = true
 sha3.workspace = true
