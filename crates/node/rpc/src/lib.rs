@@ -17,6 +17,9 @@ pub use eth::{
     TxSubmitFuture, Web3ApiImpl, Web3ApiServer,
 };
 
+mod filters;
+pub use filters::FilterChanges;
+
 mod kora;
 pub use kora::{KoraApiImpl, KoraApiServer};
 

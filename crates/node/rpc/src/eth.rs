@@ -1,6 +1,11 @@
 //! Ethereum JSON-RPC API implementation.
 
-use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+};
 
 use alloy_consensus::{Transaction as _, TxEnvelope, transaction::SignerRecoverable as _};
 use alloy_eips::eip2718::Decodable2718 as _;
@@ -10,6 +15,7 @@ use tokio::sync::RwLock;
 
 use crate::{
     error::RpcError,
+    filters::{Filter, FilterChanges, FilterStore},
     state_provider::StateProvider,
     types::{
         BlockNumberOrTag, CallRequest, RpcBlock, RpcLog, RpcLogFilter, RpcTransaction,
@@ -134,6 +140,30 @@ pub trait EthApi {
     /// Returns logs matching the given filter.
     #[method(name = "getLogs")]
     async fn get_logs(&self, filter: RpcLogFilter) -> RpcResult<Vec<RpcLog>>;
+
+    /// Creates a log filter.
+    #[method(name = "newFilter")]
+    async fn new_filter(&self, filter: RpcLogFilter) -> RpcResult<U256>;
+
+    /// Creates a block filter.
+    #[method(name = "newBlockFilter")]
+    async fn new_block_filter(&self) -> RpcResult<U256>;
+
+    /// Creates a pending transaction filter.
+    #[method(name = "newPendingTransactionFilter")]
+    async fn new_pending_transaction_filter(&self) -> RpcResult<U256>;
+
+    /// Returns changes since the last poll for the given filter.
+    #[method(name = "getFilterChanges")]
+    async fn get_filter_changes(&self, filter_id: U256) -> RpcResult<FilterChanges>;
+
+    /// Returns all logs matching the given log filter.
+    #[method(name = "getFilterLogs")]
+    async fn get_filter_logs(&self, filter_id: U256) -> RpcResult<Vec<RpcLog>>;
+
+    /// Removes a filter.
+    #[method(name = "uninstallFilter")]
+    async fn uninstall_filter(&self, filter_id: U256) -> RpcResult<bool>;
 }
 
 /// Net namespace API.
@@ -195,6 +225,7 @@ pub struct EthApiImpl<S: StateProvider> {
     tx_submit: Option<TxSubmitCallback>,
     state_provider: Arc<RwLock<S>>,
     pending_txs: Arc<RwLock<HashMap<B256, RpcTransaction>>>,
+    filter_store: Arc<FilterStore>,
 }
 
 impl<S: StateProvider> std::fmt::Debug for EthApiImpl<S> {
@@ -216,6 +247,7 @@ impl<S: StateProvider + 'static> EthApiImpl<S> {
             tx_submit: None,
             state_provider: Arc::new(RwLock::new(state_provider)),
             pending_txs: Arc::new(RwLock::new(HashMap::new())),
+            filter_store: Arc::new(FilterStore::default()),
         }
     }
 
@@ -227,6 +259,7 @@ impl<S: StateProvider + 'static> EthApiImpl<S> {
             tx_submit: Some(tx_submit),
             state_provider: Arc::new(RwLock::new(state_provider)),
             pending_txs: Arc::new(RwLock::new(HashMap::new())),
+            filter_store: Arc::new(FilterStore::default()),
         }
     }
 
@@ -239,6 +272,14 @@ impl<S: StateProvider + 'static> EthApiImpl<S> {
     pub fn set_block_height(&self, height: u64) {
         self.block_height.store(height, std::sync::atomic::Ordering::Relaxed);
     }
+
+    async fn current_block_number(&self) -> u64 {
+        let provider = self.state_provider.read().await;
+        provider
+            .block_number()
+            .await
+            .unwrap_or_else(|_| self.block_height.load(std::sync::atomic::Ordering::Relaxed))
+    }
 }
 
 #[jsonrpsee::core::async_trait]
@@ -248,14 +289,7 @@ impl<S: StateProvider + 'static> EthApiServer for EthApiImpl<S> {
     }
 
     async fn block_number(&self) -> RpcResult<U64> {
-        let provider = self.state_provider.read().await;
-        provider.block_number().await.map_or_else(
-            |_| {
-                let height = self.block_height.load(std::sync::atomic::Ordering::Relaxed);
-                Ok(U64::from(height))
-            },
-            |height| Ok(U64::from(height)),
-        )
+        Ok(U64::from(self.current_block_number().await))
     }
 
     async fn get_balance(
@@ -417,6 +451,110 @@ impl<S: StateProvider + 'static> EthApiServer for EthApiImpl<S> {
         let provider = self.state_provider.read().await;
         provider.get_logs(filter).await.map_err(Into::into)
     }
+
+    async fn new_filter(&self, filter: RpcLogFilter) -> RpcResult<U256> {
+        let head = self.current_block_number().await;
+        let id = self.filter_store.create(Filter::Log { criteria: filter, last_poll_block: head });
+        Ok(U256::from(id))
+    }
+
+    async fn new_block_filter(&self) -> RpcResult<U256> {
+        let head = self.current_block_number().await;
+        let id = self.filter_store.create(Filter::Block { last_poll_block: head });
+        Ok(U256::from(id))
+    }
+
+    async fn new_pending_transaction_filter(&self) -> RpcResult<U256> {
+        let known_hashes = self.pending_txs.read().await.keys().copied().collect();
+        let id = self.filter_store.create(Filter::PendingTransaction { known_hashes });
+        Ok(U256::from(id))
+    }
+
+    async fn get_filter_changes(&self, filter_id: U256) -> RpcResult<FilterChanges> {
+        let id = filter_id_to_u64(filter_id).ok_or(RpcError::FilterNotFound)?;
+        let entry = self.filter_store.get(id).ok_or(RpcError::FilterNotFound)?;
+        let mut filter = entry.lock().await;
+
+        match &mut *filter {
+            Filter::Log { criteria, last_poll_block } => {
+                let head = self.current_block_number().await;
+                if head <= *last_poll_block {
+                    entry.touch();
+                    return Ok(FilterChanges::Logs(Vec::new()));
+                }
+
+                let mut changes_filter = criteria.clone();
+                changes_filter.from_block =
+                    Some(BlockNumberOrTag::Number(U64::from(last_poll_block.saturating_add(1))));
+                changes_filter.to_block = Some(BlockNumberOrTag::Number(U64::from(head)));
+                changes_filter.block_hash = None;
+
+                let provider = self.state_provider.read().await;
+                let logs = provider.get_logs(changes_filter).await?;
+                *last_poll_block = head;
+                entry.touch();
+                Ok(FilterChanges::Logs(logs))
+            }
+            Filter::Block { last_poll_block } => {
+                let head = self.current_block_number().await;
+                if head <= *last_poll_block {
+                    entry.touch();
+                    return Ok(FilterChanges::Hashes(Vec::new()));
+                }
+
+                let provider = self.state_provider.read().await;
+                let mut hashes = Vec::new();
+                for block_num in last_poll_block.saturating_add(1)..=head {
+                    if let Some(block) = provider
+                        .block_by_number(BlockNumberOrTag::Number(U64::from(block_num)), false)
+                        .await?
+                    {
+                        hashes.push(block.hash);
+                    }
+                }
+
+                *last_poll_block = head;
+                entry.touch();
+                Ok(FilterChanges::Hashes(hashes))
+            }
+            Filter::PendingTransaction { known_hashes } => {
+                let current_hashes: HashSet<B256> =
+                    self.pending_txs.read().await.keys().copied().collect();
+                let mut new_hashes =
+                    current_hashes.difference(known_hashes).copied().collect::<Vec<_>>();
+                new_hashes.sort_unstable();
+                *known_hashes = current_hashes;
+                entry.touch();
+                Ok(FilterChanges::Hashes(new_hashes))
+            }
+        }
+    }
+
+    async fn get_filter_logs(&self, filter_id: U256) -> RpcResult<Vec<RpcLog>> {
+        let id = filter_id_to_u64(filter_id).ok_or(RpcError::FilterNotFound)?;
+        let entry = self.filter_store.get(id).ok_or(RpcError::FilterNotFound)?;
+        let criteria = {
+            let filter = entry.lock().await;
+            match &*filter {
+                Filter::Log { criteria, .. } => criteria.clone(),
+                Filter::Block { .. } | Filter::PendingTransaction { .. } => {
+                    return Err(RpcError::FilterNotFound.into());
+                }
+            }
+        };
+
+        let provider = self.state_provider.read().await;
+        let logs = provider.get_logs(criteria).await?;
+        entry.touch();
+        Ok(logs)
+    }
+
+    async fn uninstall_filter(&self, filter_id: U256) -> RpcResult<bool> {
+        let Some(id) = filter_id_to_u64(filter_id) else {
+            return Ok(false);
+        };
+        Ok(self.filter_store.remove(id))
+    }
 }
 
 /// Net API implementation.
@@ -485,6 +623,13 @@ impl Web3ApiServer for Web3ApiImpl {
     fn sha3(&self, data: Bytes) -> RpcResult<B256> {
         Ok(alloy_primitives::keccak256(&data))
     }
+}
+
+fn filter_id_to_u64(filter_id: U256) -> Option<u64> {
+    if filter_id > U256::from(u64::MAX) {
+        return None;
+    }
+    Some(filter_id.to::<u64>())
 }
 
 fn raw_tx_to_pending_rpc(data: &Bytes) -> Result<RpcTransaction, RpcError> {
@@ -565,7 +710,10 @@ mod tests {
     use sha3::{Digest as _, Keccak256};
 
     use super::*;
-    use crate::state_provider::NoopStateProvider;
+    use crate::{
+        state_provider::NoopStateProvider,
+        types::{AddressFilter, BlockTag, TopicFilter},
+    };
 
     fn signed_test_tx(chain_id: u64, nonce: u64) -> Bytes {
         let mut secret = [0u8; 32];
@@ -589,6 +737,188 @@ mod tests {
         let mut raw = Vec::new();
         envelope.encode_2718(&mut raw);
         Bytes::from(raw)
+    }
+
+    #[derive(Clone, Default)]
+    struct TestStateProvider {
+        inner: Arc<RwLock<TestState>>,
+    }
+
+    #[derive(Default)]
+    struct TestState {
+        head: u64,
+        blocks: HashMap<u64, RpcBlock>,
+        logs: Vec<RpcLog>,
+    }
+
+    impl TestStateProvider {
+        async fn insert_block(&self, number: u64, hash: B256) {
+            let mut inner = self.inner.write().await;
+            inner.head = inner.head.max(number);
+            inner.blocks.insert(
+                number,
+                RpcBlock { hash, number: U64::from(number), ..RpcBlock::default() },
+            );
+        }
+
+        async fn insert_log(
+            &self,
+            block_number: u64,
+            address: Address,
+            topics: Vec<B256>,
+        ) -> RpcLog {
+            let mut inner = self.inner.write().await;
+            let block_hash = inner.blocks.get(&block_number).map_or(B256::ZERO, |block| block.hash);
+            let log = RpcLog {
+                address,
+                topics,
+                data: Bytes::new(),
+                block_number: U64::from(block_number),
+                transaction_hash: B256::ZERO,
+                transaction_index: U64::ZERO,
+                block_hash,
+                log_index: U64::from(inner.logs.len() as u64),
+                removed: false,
+            };
+            inner.logs.push(log.clone());
+            log
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StateProvider for TestStateProvider {
+        async fn balance(
+            &self,
+            _address: Address,
+            _block: Option<BlockNumberOrTag>,
+        ) -> Result<U256, RpcError> {
+            Ok(U256::ZERO)
+        }
+
+        async fn nonce(
+            &self,
+            _address: Address,
+            _block: Option<BlockNumberOrTag>,
+        ) -> Result<u64, RpcError> {
+            Ok(0)
+        }
+
+        async fn code(
+            &self,
+            _address: Address,
+            _block: Option<BlockNumberOrTag>,
+        ) -> Result<Bytes, RpcError> {
+            Ok(Bytes::new())
+        }
+
+        async fn storage(
+            &self,
+            _address: Address,
+            _slot: U256,
+            _block: Option<BlockNumberOrTag>,
+        ) -> Result<U256, RpcError> {
+            Ok(U256::ZERO)
+        }
+
+        async fn block_by_number(
+            &self,
+            block: BlockNumberOrTag,
+            _full_transactions: bool,
+        ) -> Result<Option<RpcBlock>, RpcError> {
+            let inner = self.inner.read().await;
+            let number = resolve_test_block_number(&block, inner.head);
+            Ok(inner.blocks.get(&number).cloned())
+        }
+
+        async fn block_by_hash(
+            &self,
+            hash: B256,
+            _full_transactions: bool,
+        ) -> Result<Option<RpcBlock>, RpcError> {
+            let inner = self.inner.read().await;
+            Ok(inner.blocks.values().find(|block| block.hash == hash).cloned())
+        }
+
+        async fn transaction_by_hash(
+            &self,
+            _hash: B256,
+        ) -> Result<Option<RpcTransaction>, RpcError> {
+            Ok(None)
+        }
+
+        async fn receipt_by_hash(
+            &self,
+            _hash: B256,
+        ) -> Result<Option<RpcTransactionReceipt>, RpcError> {
+            Ok(None)
+        }
+
+        async fn block_number(&self) -> Result<u64, RpcError> {
+            Ok(self.inner.read().await.head)
+        }
+
+        async fn get_logs(&self, filter: RpcLogFilter) -> Result<Vec<RpcLog>, RpcError> {
+            let inner = self.inner.read().await;
+            let from = filter
+                .from_block
+                .as_ref()
+                .map_or(0, |block| resolve_test_block_number(block, inner.head));
+            let to = filter
+                .to_block
+                .as_ref()
+                .map_or(inner.head, |block| resolve_test_block_number(block, inner.head));
+            let addresses = filter.address.clone().map(AddressFilter::into_vec);
+
+            Ok(inner
+                .logs
+                .iter()
+                .filter(|log| {
+                    if let Some(block_hash) = filter.block_hash
+                        && log.block_hash != block_hash
+                    {
+                        return false;
+                    }
+                    if filter.block_hash.is_none()
+                        && (log.block_number.to::<u64>() < from
+                            || log.block_number.to::<u64>() > to)
+                    {
+                        return false;
+                    }
+                    if let Some(addresses) = &addresses
+                        && !addresses.contains(&log.address)
+                    {
+                        return false;
+                    }
+                    topics_match(log, filter.topics.as_ref())
+                })
+                .cloned()
+                .collect())
+        }
+    }
+
+    fn resolve_test_block_number(block: &BlockNumberOrTag, head: u64) -> u64 {
+        match block {
+            BlockNumberOrTag::Number(number) => number.to::<u64>(),
+            BlockNumberOrTag::Tag(BlockTag::Earliest) => 0,
+            BlockNumberOrTag::Tag(_) | BlockNumberOrTag::Latest => head,
+        }
+    }
+
+    fn topics_match(log: &RpcLog, filters: Option<&Vec<Option<TopicFilter>>>) -> bool {
+        let Some(filters) = filters else {
+            return true;
+        };
+
+        for (index, filter) in filters.iter().enumerate() {
+            let Some(filter) = filter else {
+                continue;
+            };
+            let allowed = filter.clone().into_vec();
+            if !log.topics.get(index).is_some_and(|topic| allowed.contains(topic)) {
+                return false;
+            }
+        }
+        true
     }
 
     #[test]
@@ -716,5 +1046,100 @@ mod tests {
             &tx_data[..],
             "callback receives the caller's tx bytes verbatim — no re-encoding, no truncation"
         );
+    }
+
+    #[tokio::test]
+    async fn eth_block_filter_lifecycle() {
+        let provider = TestStateProvider::default();
+        provider.insert_block(1, B256::repeat_byte(1)).await;
+        let api = EthApiImpl::new(1, provider.clone());
+
+        let filter_id = EthApiServer::new_block_filter(&api).await.unwrap();
+        provider.insert_block(2, B256::repeat_byte(2)).await;
+        provider.insert_block(3, B256::repeat_byte(3)).await;
+
+        let changes = EthApiServer::get_filter_changes(&api, filter_id).await.unwrap();
+        let FilterChanges::Hashes(hashes) = changes else {
+            panic!("block filter should return hashes");
+        };
+        assert_eq!(hashes, vec![B256::repeat_byte(2), B256::repeat_byte(3)]);
+
+        let changes = EthApiServer::get_filter_changes(&api, filter_id).await.unwrap();
+        let FilterChanges::Hashes(hashes) = changes else {
+            panic!("block filter should return hashes");
+        };
+        assert!(hashes.is_empty());
+
+        assert!(EthApiServer::uninstall_filter(&api, filter_id).await.unwrap());
+        assert!(!EthApiServer::uninstall_filter(&api, filter_id).await.unwrap());
+        let err = EthApiServer::get_filter_changes(&api, filter_id).await.unwrap_err();
+        assert_eq!(err.code(), crate::error_codes::SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn eth_log_filter_lifecycle() {
+        let provider = TestStateProvider::default();
+        let target = Address::repeat_byte(0x11);
+        let other = Address::repeat_byte(0x22);
+        let topic = B256::repeat_byte(0xaa);
+
+        provider.insert_block(1, B256::repeat_byte(1)).await;
+        provider.insert_log(1, target, vec![topic]).await;
+        let api = EthApiImpl::new(1, provider.clone());
+        let filter_id = EthApiServer::new_filter(
+            &api,
+            RpcLogFilter {
+                address: Some(AddressFilter::Single(target)),
+                topics: Some(vec![Some(TopicFilter::Single(topic))]),
+                ..RpcLogFilter::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        provider.insert_block(2, B256::repeat_byte(2)).await;
+        provider.insert_log(2, target, vec![topic]).await;
+        provider.insert_log(2, other, vec![topic]).await;
+
+        let changes = EthApiServer::get_filter_changes(&api, filter_id).await.unwrap();
+        let FilterChanges::Logs(logs) = changes else {
+            panic!("log filter should return logs");
+        };
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].address, target);
+        assert_eq!(logs[0].block_number, U64::from(2));
+
+        let changes = EthApiServer::get_filter_changes(&api, filter_id).await.unwrap();
+        let FilterChanges::Logs(logs) = changes else {
+            panic!("log filter should return logs");
+        };
+        assert!(logs.is_empty());
+
+        let all_logs = EthApiServer::get_filter_logs(&api, filter_id).await.unwrap();
+        assert_eq!(all_logs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn eth_pending_transaction_filter_lifecycle() {
+        let callback: TxSubmitCallback = Arc::new(move |_| Box::pin(async { Ok(()) }));
+        let api = EthApiImpl::with_tx_submit(1, NoopStateProvider, callback);
+
+        let existing =
+            EthApiServer::send_raw_transaction(&api, signed_test_tx(1, 0)).await.unwrap();
+        let filter_id = EthApiServer::new_pending_transaction_filter(&api).await.unwrap();
+        let new = EthApiServer::send_raw_transaction(&api, signed_test_tx(1, 1)).await.unwrap();
+
+        let changes = EthApiServer::get_filter_changes(&api, filter_id).await.unwrap();
+        let FilterChanges::Hashes(hashes) = changes else {
+            panic!("pending transaction filter should return hashes");
+        };
+        assert_eq!(hashes, vec![new]);
+        assert!(!hashes.contains(&existing));
+
+        let changes = EthApiServer::get_filter_changes(&api, filter_id).await.unwrap();
+        let FilterChanges::Hashes(hashes) = changes else {
+            panic!("pending transaction filter should return hashes");
+        };
+        assert!(hashes.is_empty());
     }
 }
