@@ -81,6 +81,11 @@ EXPOSE 30303 8545 8546 9002
 # Default volumes
 VOLUME ["/data", "/shared"]
 
+# Runtime health check shared with Compose. The mode can be switched with
+# HEALTHCHECK_MODE for validator, DKG, and setup-style containers.
+HEALTHCHECK --interval=10s --timeout=5s --retries=3 --start-period=30s \
+    CMD /scripts/healthcheck.sh
+
 # Default entrypoint - can be overridden for different modes
 ENTRYPOINT ["/scripts/entrypoint.sh"]
 CMD ["validator"]
