@@ -13,8 +13,8 @@ pub use error::{RpcError, codes as error_codes};
 
 mod eth;
 pub use eth::{
-    EthApiImpl, EthApiServer, FeeHistory, NetApiImpl, NetApiServer, TxSubmitCallback,
-    TxSubmitFuture, Web3ApiImpl, Web3ApiServer,
+    EthApiImpl, EthApiServer, FeeHistory, GasOracleConfig, NetApiImpl, NetApiServer,
+    TxSubmitCallback, TxSubmitFuture, Web3ApiImpl, Web3ApiServer,
 };
 
 mod kora;
