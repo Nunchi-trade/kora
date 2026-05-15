@@ -1,6 +1,6 @@
 //! Indexed types for blocks, transactions, receipts, and logs.
 
-use alloy_primitives::{Address, B256, Bytes, U256};
+use alloy_primitives::{Address, B256, Bloom, Bytes, U256};
 
 /// An indexed block containing header information and transaction hashes.
 #[derive(Debug, Clone)]
@@ -46,6 +46,20 @@ pub struct IndexedTransaction {
     pub gas_limit: u64,
     /// Gas price.
     pub gas_price: u128,
+    /// EIP-2718 transaction type.
+    pub tx_type: u8,
+    /// Chain ID.
+    pub chain_id: Option<u64>,
+    /// Max fee per gas (EIP-1559 and later typed transactions).
+    pub max_fee_per_gas: Option<u128>,
+    /// Max priority fee per gas (EIP-1559 and later typed transactions).
+    pub max_priority_fee_per_gas: Option<u128>,
+    /// V component of the transaction signature.
+    pub v: u64,
+    /// R component of the transaction signature.
+    pub r: U256,
+    /// S component of the transaction signature.
+    pub s: U256,
     /// Input data.
     pub input: Bytes,
     /// Sender nonce.
@@ -75,6 +89,12 @@ pub struct IndexedReceipt {
     pub contract_address: Option<Address>,
     /// Logs emitted by this transaction.
     pub logs: Vec<IndexedLog>,
+    /// Logs bloom filter for this receipt.
+    pub logs_bloom: Bloom,
+    /// EIP-2718 transaction type.
+    pub tx_type: u8,
+    /// Effective gas price paid by this transaction.
+    pub effective_gas_price: u128,
     /// Transaction status (true = success, false = revert).
     pub status: bool,
 }
@@ -90,6 +110,14 @@ pub struct IndexedLog {
     pub data: Bytes,
     /// Log index within the block.
     pub log_index: u64,
+    /// Number of the block containing this log.
+    pub block_number: u64,
+    /// Hash of the block containing this log.
+    pub block_hash: B256,
+    /// Hash of the transaction that emitted this log.
+    pub transaction_hash: B256,
+    /// Index of the transaction that emitted this log.
+    pub transaction_index: u64,
 }
 
 /// Statistics about the block index.
