@@ -3427,6 +3427,7 @@ dependencies = [
  "kora-qmdb",
  "kora-qmdb-ledger",
  "kora-traits",
+ "kora-txpool",
  "thiserror 2.0.18",
 ]
 
@@ -3524,6 +3525,7 @@ dependencies = [
  "kora-executor",
  "kora-indexer",
  "kora-traits",
+ "kora-txpool",
  "parking_lot",
  "serde",
  "serde_json",

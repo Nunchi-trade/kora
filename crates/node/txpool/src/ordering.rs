@@ -98,10 +98,21 @@ impl SenderQueue {
             self.promote_queued();
             None
         } else if tx.nonce > self.next_nonce + self.pending.len() as u64 {
-            let pos =
-                self.queued.binary_search_by(|q| q.nonce.cmp(&tx.nonce)).unwrap_or_else(|p| p);
-            self.queued.insert(pos, tx);
-            None
+            match self.queued.binary_search_by(|q| q.nonce.cmp(&tx.nonce)) {
+                Ok(pos) => {
+                    let existing = &self.queued[pos];
+                    if tx.effective_gas_price > existing.effective_gas_price {
+                        let old = std::mem::replace(&mut self.queued[pos], tx);
+                        Some(old)
+                    } else {
+                        Some(tx)
+                    }
+                }
+                Err(pos) => {
+                    self.queued.insert(pos, tx);
+                    None
+                }
+            }
         } else {
             let idx = (tx.nonce - self.next_nonce) as usize;
             if idx < self.pending.len() {
@@ -113,6 +124,20 @@ impl SenderQueue {
             }
             Some(tx)
         }
+    }
+
+    /// Removes a transaction by hash while preserving nonce executability.
+    pub fn remove_by_hash(&mut self, hash: &B256) -> Option<OrderedTransaction> {
+        if let Some(idx) = self.pending.iter().position(|tx| tx.hash == *hash) {
+            let removed = self.pending.remove(idx);
+            let mut moved = self.pending.split_off(idx);
+            self.queued.append(&mut moved);
+            self.queued.sort_by_key(|tx| tx.nonce);
+            return Some(removed);
+        }
+
+        let idx = self.queued.iter().position(|tx| tx.hash == *hash)?;
+        Some(self.queued.remove(idx))
     }
 
     fn promote_queued(&mut self) {
@@ -235,6 +260,45 @@ mod tests {
 
         assert_eq!(queue.pending_count(), 3);
         assert_eq!(queue.queued_count(), 0);
+    }
+
+    #[test]
+    fn sender_queue_replaces_queued_transaction() {
+        let sender = random_address();
+        let mut queue = SenderQueue::new(sender, 0);
+
+        let tx0 = make_tx(0, 100);
+        let tx2_low = make_tx(2, 100);
+        let tx2_high = make_tx(2, 200);
+
+        assert!(queue.insert(tx0).is_none());
+        assert!(queue.insert(tx2_low.clone()).is_none());
+
+        let replaced = queue.insert(tx2_high.clone()).expect("queued tx should be replaced");
+        assert_eq!(replaced.hash, tx2_low.hash);
+        assert_eq!(queue.queued_count(), 1);
+        assert_eq!(queue.queued[0].hash, tx2_high.hash);
+    }
+
+    #[test]
+    fn sender_queue_remove_pending_moves_tail_to_queued() {
+        let sender = random_address();
+        let mut queue = SenderQueue::new(sender, 0);
+
+        let tx0 = make_tx(0, 100);
+        let tx1 = make_tx(1, 100);
+        let tx2 = make_tx(2, 100);
+
+        assert!(queue.insert(tx0.clone()).is_none());
+        assert!(queue.insert(tx1.clone()).is_none());
+        assert!(queue.insert(tx2.clone()).is_none());
+
+        let removed = queue.remove_by_hash(&tx1.hash).expect("tx should be removed");
+        assert_eq!(removed.hash, tx1.hash);
+        assert_eq!(queue.pending.len(), 1);
+        assert_eq!(queue.pending[0].hash, tx0.hash);
+        assert_eq!(queue.queued.len(), 1);
+        assert_eq!(queue.queued[0].hash, tx2.hash);
     }
 
     #[test]

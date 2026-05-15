@@ -2,6 +2,7 @@
 
 use std::{
     collections::{BTreeSet, HashMap},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -39,7 +40,7 @@ impl BuildSenderState {
                 return None;
             }
 
-            if excluded.contains(&TxId(tx.hash)) {
+            if excluded.contains(&ordered_tx_id(tx)) {
                 self.expected_nonce = tx.nonce + 1;
                 self.index += 1;
                 continue;
@@ -60,6 +61,7 @@ impl BuildSenderState {
 #[derive(Debug)]
 struct PoolInner {
     by_hash: HashMap<B256, OrderedTransaction>,
+    by_id: HashMap<TxId, B256>,
     by_sender: HashMap<Address, SenderQueue>,
     pending_count: usize,
     queued_count: usize,
@@ -69,6 +71,7 @@ impl PoolInner {
     fn new() -> Self {
         Self {
             by_hash: HashMap::new(),
+            by_id: HashMap::new(),
             by_sender: HashMap::new(),
             pending_count: 0,
             queued_count: 0,
@@ -79,12 +82,53 @@ impl PoolInner {
         self.pending_count = self.by_sender.values().map(|q| q.pending_count()).sum();
         self.queued_count = self.by_sender.values().map(|q| q.queued_count()).sum();
     }
+
+    fn remove_by_hash(&mut self, hash: &B256) -> Option<OrderedTransaction> {
+        let tx = self.by_hash.remove(hash)?;
+        self.by_id.remove(&ordered_tx_id(&tx));
+
+        if let Some(queue) = self.by_sender.get_mut(&tx.sender) {
+            queue.remove_by_hash(hash);
+            if queue.is_empty() {
+                self.by_sender.remove(&tx.sender);
+            }
+        }
+
+        Some(tx)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InsertionTarget {
+    Pending,
+    Queued,
+    Replacement,
+}
+
+fn existing_nonce_tx(queue: &SenderQueue, nonce: u64) -> Option<&OrderedTransaction> {
+    queue.pending.iter().chain(queue.queued.iter()).find(|tx| tx.nonce == nonce)
+}
+
+fn insertion_target(queue: Option<&SenderQueue>, tx: &OrderedTransaction) -> InsertionTarget {
+    let Some(queue) = queue else {
+        return InsertionTarget::Pending;
+    };
+
+    if existing_nonce_tx(queue, tx.nonce).is_some() {
+        return InsertionTarget::Replacement;
+    }
+
+    if tx.nonce == queue.next_nonce + queue.pending.len() as u64 {
+        InsertionTarget::Pending
+    } else {
+        InsertionTarget::Queued
+    }
 }
 
 /// A thread-safe transaction pool with nonce ordering and fee prioritization.
 #[derive(Debug)]
 pub struct TransactionPool {
-    inner: RwLock<PoolInner>,
+    inner: Arc<RwLock<PoolInner>>,
     config: PoolConfig,
 }
 
@@ -92,41 +136,85 @@ impl TransactionPool {
     /// Creates a new transaction pool with the given configuration.
     #[must_use]
     pub fn new(config: PoolConfig) -> Self {
-        Self { inner: RwLock::new(PoolInner::new()), config }
+        Self { inner: Arc::new(RwLock::new(PoolInner::new())), config }
     }
 
     /// Adds a validated transaction to the pool.
     pub fn add(&self, tx: OrderedTransaction) -> Result<(), TxPoolError> {
         let mut inner = self.inner.write();
+        let tx_id = ordered_tx_id(&tx);
 
-        if inner.by_hash.contains_key(&tx.hash) {
+        if inner.by_hash.contains_key(&tx.hash) || inner.by_id.contains_key(&tx_id) {
             return Err(TxPoolError::AlreadyExists);
         }
 
         let sender = tx.sender;
+        let target = insertion_target(inner.by_sender.get(&sender), &tx);
+
+        if let Some(queue) = inner.by_sender.get(&sender) {
+            if tx.nonce < queue.next_nonce {
+                return Err(TxPoolError::NonceTooLow { got: tx.nonce, expected: queue.next_nonce });
+            }
+
+            if target != InsertionTarget::Replacement
+                && queue.total_count() >= self.config.max_txs_per_sender
+            {
+                return Err(TxPoolError::SenderFull(sender));
+            }
+        }
+
+        self.reject_underpriced_when_full(&inner, &tx, target)?;
+
         let queue =
             inner.by_sender.entry(sender).or_insert_with(|| SenderQueue::new(sender, tx.nonce));
 
-        if queue.total_count() >= self.config.max_txs_per_sender {
-            return Err(TxPoolError::SenderFull(sender));
-        }
-
         if let Some(replaced) = queue.insert(tx.clone()) {
             if replaced.hash == tx.hash {
-                return Err(TxPoolError::AlreadyExists);
+                return Err(TxPoolError::ReplacementUnderpriced);
             }
-            inner.by_hash.remove(&replaced.hash);
+            inner.remove_by_hash(&replaced.hash);
             debug!(hash = ?replaced.hash, "replaced transaction");
         }
 
+        let inserted_hash = tx.hash;
         inner.by_hash.insert(tx.hash, tx);
+        inner.by_id.insert(tx_id, inserted_hash);
         inner.update_counts();
+
+        let mut inserted_evicted = false;
+        while inner.pending_count > self.config.max_pending_txs {
+            let Some(evicted) = Self::evict_lowest_pending(&mut inner) else {
+                break;
+            };
+            inserted_evicted |= evicted.hash == inserted_hash;
+            debug!(
+                hash = ?evicted.hash,
+                sender = ?evicted.sender,
+                nonce = evicted.nonce,
+                gas_price = evicted.effective_gas_price,
+                "evicted lowest-fee pending transaction"
+            );
+        }
+
+        while inner.queued_count > self.config.max_queued_txs {
+            let Some(evicted) = Self::evict_lowest_queued(&mut inner) else {
+                break;
+            };
+            inserted_evicted |= evicted.hash == inserted_hash;
+            debug!(
+                hash = ?evicted.hash,
+                sender = ?evicted.sender,
+                nonce = evicted.nonce,
+                gas_price = evicted.effective_gas_price,
+                "evicted lowest-fee queued transaction"
+            );
+        }
 
         if inner.pending_count > self.config.max_pending_txs {
             warn!(
                 count = inner.pending_count,
                 max = self.config.max_pending_txs,
-                "pool exceeds pending limit"
+                "pool still exceeds pending limit after eviction"
             );
         }
 
@@ -134,11 +222,90 @@ impl TransactionPool {
             warn!(
                 count = inner.queued_count,
                 max = self.config.max_queued_txs,
-                "pool exceeds queued limit"
+                "pool still exceeds queued limit after eviction"
             );
         }
 
+        if inserted_evicted {
+            return Err(TxPoolError::PoolFull);
+        }
+
         Ok(())
+    }
+
+    fn reject_underpriced_when_full(
+        &self,
+        inner: &PoolInner,
+        tx: &OrderedTransaction,
+        target: InsertionTarget,
+    ) -> Result<(), TxPoolError> {
+        match target {
+            InsertionTarget::Pending => {
+                if self.config.max_pending_txs == 0 {
+                    return Err(TxPoolError::PoolFull);
+                }
+                if inner.pending_count >= self.config.max_pending_txs
+                    && let Some(min_price) = Self::min_pending_price(inner)
+                    && tx.effective_gas_price <= min_price
+                {
+                    return Err(TxPoolError::PoolFull);
+                }
+            }
+            InsertionTarget::Queued => {
+                if self.config.max_queued_txs == 0 {
+                    return Err(TxPoolError::PoolFull);
+                }
+                if inner.queued_count >= self.config.max_queued_txs
+                    && let Some(min_price) = Self::min_queued_price(inner)
+                    && tx.effective_gas_price <= min_price
+                {
+                    return Err(TxPoolError::PoolFull);
+                }
+            }
+            InsertionTarget::Replacement => {}
+        }
+
+        Ok(())
+    }
+
+    fn min_pending_price(inner: &PoolInner) -> Option<u128> {
+        inner
+            .by_sender
+            .values()
+            .flat_map(|queue| queue.pending.iter().map(|tx| tx.effective_gas_price))
+            .min()
+    }
+
+    fn min_queued_price(inner: &PoolInner) -> Option<u128> {
+        inner
+            .by_sender
+            .values()
+            .flat_map(|queue| queue.queued.iter().map(|tx| tx.effective_gas_price))
+            .min()
+    }
+
+    fn evict_lowest_pending(inner: &mut PoolInner) -> Option<OrderedTransaction> {
+        let hash = inner
+            .by_sender
+            .values()
+            .flat_map(|queue| queue.pending.iter())
+            .min_by_key(|tx| (tx.effective_gas_price, std::cmp::Reverse(tx.timestamp), tx.hash))
+            .map(|tx| tx.hash)?;
+        let removed = inner.remove_by_hash(&hash);
+        inner.update_counts();
+        removed
+    }
+
+    fn evict_lowest_queued(inner: &mut PoolInner) -> Option<OrderedTransaction> {
+        let hash = inner
+            .by_sender
+            .values()
+            .flat_map(|queue| queue.queued.iter())
+            .min_by_key(|tx| (tx.effective_gas_price, std::cmp::Reverse(tx.timestamp), tx.hash))
+            .map(|tx| tx.hash)?;
+        let removed = inner.remove_by_hash(&hash);
+        inner.update_counts();
+        removed
     }
 
     /// Returns pending transactions sorted by effective gas price.
@@ -167,19 +334,7 @@ impl TransactionPool {
     /// Removes a transaction by its hash.
     pub fn remove(&self, hash: &B256) -> Option<OrderedTransaction> {
         let mut inner = self.inner.write();
-
-        let tx = inner.by_hash.remove(hash)?;
-        let sender = tx.sender;
-
-        if let Some(queue) = inner.by_sender.get_mut(&sender) {
-            queue.pending.retain(|t| t.hash != *hash);
-            queue.queued.retain(|t| t.hash != *hash);
-
-            if queue.is_empty() {
-                inner.by_sender.remove(&sender);
-            }
-        }
-
+        let tx = inner.remove_by_hash(hash)?;
         inner.update_counts();
         Some(tx)
     }
@@ -195,6 +350,7 @@ impl TransactionPool {
                 queue
                     .pending
                     .iter()
+                    .chain(queue.queued.iter())
                     .filter(|tx| tx.nonce <= confirmed_nonce)
                     .map(|tx| tx.hash)
                     .collect()
@@ -202,7 +358,7 @@ impl TransactionPool {
             .unwrap_or_default();
 
         for hash in hashes_to_remove {
-            inner.by_hash.remove(&hash);
+            inner.remove_by_hash(&hash);
         }
 
         if let Some(queue) = inner.by_sender.get_mut(sender) {
@@ -245,10 +401,56 @@ impl TransactionPool {
         self.inner.read().by_hash.contains_key(hash)
     }
 
+    /// Returns all sender queues for pool introspection.
+    pub fn snapshot(&self) -> HashMap<Address, (Vec<OrderedTransaction>, Vec<OrderedTransaction>)> {
+        self.inner
+            .read()
+            .by_sender
+            .iter()
+            .map(|(sender, queue)| (*sender, (queue.pending.clone(), queue.queued.clone())))
+            .collect()
+    }
+
+    /// Removes expired transactions and returns the number removed.
+    pub fn cleanup(&self) -> usize {
+        let now = current_timestamp();
+        let mut inner = self.inner.write();
+        let expired: Vec<B256> = inner
+            .by_sender
+            .values()
+            .flat_map(|queue| {
+                let pending = queue.pending.iter().filter_map(|tx| {
+                    (now.saturating_sub(tx.timestamp) > self.config.pending_ttl_secs)
+                        .then_some(tx.hash)
+                });
+                let queued = queue.queued.iter().filter_map(|tx| {
+                    (now.saturating_sub(tx.timestamp) > self.config.queued_ttl_secs)
+                        .then_some(tx.hash)
+                });
+                pending.chain(queued)
+            })
+            .collect();
+
+        let mut removed = 0;
+        for hash in expired {
+            if inner.remove_by_hash(&hash).is_some() {
+                removed += 1;
+            }
+        }
+        inner.update_counts();
+        removed
+    }
+
+    /// Returns the pool configuration.
+    pub const fn config(&self) -> &PoolConfig {
+        &self.config
+    }
+
     /// Removes all transactions from the pool.
     pub fn clear(&self) {
         let mut inner = self.inner.write();
         inner.by_hash.clear();
+        inner.by_id.clear();
         inner.by_sender.clear();
         inner.pending_count = 0;
         inner.queued_count = 0;
@@ -257,21 +459,22 @@ impl TransactionPool {
 
 impl Clone for TransactionPool {
     fn clone(&self) -> Self {
-        let inner = self.inner.read();
-        Self {
-            inner: RwLock::new(PoolInner {
-                by_hash: inner.by_hash.clone(),
-                by_sender: inner.by_sender.clone(),
-                pending_count: inner.pending_count,
-                queued_count: inner.queued_count,
-            }),
-            config: self.config.clone(),
-        }
+        Self { inner: self.inner.clone(), config: self.config.clone() }
     }
 }
 
 fn current_timestamp() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+fn ordered_to_tx(tx: &OrderedTransaction) -> Tx {
+    let mut raw = Vec::new();
+    tx.envelope.encode_2718(&mut raw);
+    Tx::new(Bytes::from(raw))
+}
+
+fn ordered_tx_id(tx: &OrderedTransaction) -> TxId {
+    ordered_to_tx(tx).id()
 }
 
 fn tx_to_ordered(tx: &Tx) -> Option<OrderedTransaction> {
@@ -346,9 +549,7 @@ impl Mempool for TransactionPool {
 
             if let Some(state) = senders.get_mut(&sender) {
                 state.consume();
-                let mut raw = Vec::new();
-                tx.envelope.encode_2718(&mut raw);
-                result.push(Tx::new(Bytes::from(raw)));
+                result.push(ordered_to_tx(&tx));
             }
         }
 
@@ -360,7 +561,10 @@ impl Mempool for TransactionPool {
 
         let mut confirmed_by_sender: HashMap<Address, u64> = HashMap::new();
         for id in tx_ids {
-            if let Some(tx) = inner.by_hash.get(&id.0) {
+            let Some(hash) = inner.by_id.get(id) else {
+                continue;
+            };
+            if let Some(tx) = inner.by_hash.get(hash) {
                 confirmed_by_sender
                     .entry(tx.sender)
                     .and_modify(|nonce| *nonce = (*nonce).max(tx.nonce))
@@ -386,7 +590,7 @@ impl Mempool for TransactionPool {
         }
 
         for hash in hashes_to_remove {
-            inner.by_hash.remove(&hash);
+            inner.remove_by_hash(&hash);
         }
 
         for sender in senders_to_check {
@@ -457,8 +661,8 @@ mod tests {
         let tx0 = make_ordered_tx(sender, 0, 100);
         let tx1 = make_ordered_tx(sender, 1, 100);
 
-        pool.add(tx0.clone()).unwrap();
-        pool.add(tx1.clone()).unwrap();
+        pool.add(tx0).unwrap();
+        pool.add(tx1).unwrap();
 
         assert_eq!(pool.pending_count(), 2);
         assert_eq!(pool.len(), 2);
@@ -493,6 +697,125 @@ mod tests {
             pool.add(make_ordered_tx(sender, 2, 100)),
             Err(TxPoolError::SenderFull(_))
         ));
+    }
+
+    #[test]
+    fn pool_evicts_lowest_fee_pending_on_overflow() {
+        let config = PoolConfig::default().with_max_pending_txs(3);
+        let pool = TransactionPool::new(config);
+
+        let tx_low = make_ordered_tx(random_address(), 0, 10);
+        let tx_med = make_ordered_tx(random_address(), 0, 20);
+        let tx_high = make_ordered_tx(random_address(), 0, 30);
+        let tx_new = make_ordered_tx(random_address(), 0, 15);
+
+        pool.add(tx_low.clone()).unwrap();
+        pool.add(tx_med.clone()).unwrap();
+        pool.add(tx_high.clone()).unwrap();
+        pool.add(tx_new.clone()).unwrap();
+
+        assert_eq!(pool.pending_count(), 3);
+        assert!(!pool.contains(&tx_low.hash));
+        assert!(pool.contains(&tx_new.hash));
+        assert!(pool.contains(&tx_med.hash));
+        assert!(pool.contains(&tx_high.hash));
+    }
+
+    #[test]
+    fn pool_rejects_low_fee_pending_when_full() {
+        let config = PoolConfig::default().with_max_pending_txs(2);
+        let pool = TransactionPool::new(config);
+
+        pool.add(make_ordered_tx(random_address(), 0, 100)).unwrap();
+        pool.add(make_ordered_tx(random_address(), 0, 200)).unwrap();
+
+        let low_fee = make_ordered_tx(random_address(), 0, 50);
+        assert!(matches!(pool.add(low_fee), Err(TxPoolError::PoolFull)));
+        assert_eq!(pool.pending_count(), 2);
+    }
+
+    #[test]
+    fn pool_evicts_lowest_fee_queued_on_overflow() {
+        let config = PoolConfig::default().with_max_queued_txs(2);
+        let pool = TransactionPool::new(config);
+        let sender = random_address();
+
+        let tx0 = make_ordered_tx(sender, 0, 100);
+        let tx2_low = make_ordered_tx(sender, 2, 10);
+        let tx3_high = make_ordered_tx(sender, 3, 30);
+        let tx4_mid = make_ordered_tx(sender, 4, 20);
+
+        pool.add(tx0).unwrap();
+        pool.add(tx2_low.clone()).unwrap();
+        pool.add(tx3_high.clone()).unwrap();
+        pool.add(tx4_mid.clone()).unwrap();
+
+        assert_eq!(pool.queued_count(), 2);
+        assert!(!pool.contains(&tx2_low.hash));
+        assert!(pool.contains(&tx3_high.hash));
+        assert!(pool.contains(&tx4_mid.hash));
+    }
+
+    #[test]
+    fn pool_rejects_low_fee_queued_when_full() {
+        let config = PoolConfig::default().with_max_queued_txs(1);
+        let pool = TransactionPool::new(config);
+        let sender = random_address();
+
+        pool.add(make_ordered_tx(sender, 0, 100)).unwrap();
+        pool.add(make_ordered_tx(sender, 2, 100)).unwrap();
+
+        let low_fee = make_ordered_tx(sender, 3, 50);
+        assert!(matches!(pool.add(low_fee), Err(TxPoolError::PoolFull)));
+        assert_eq!(pool.queued_count(), 1);
+    }
+
+    #[test]
+    fn pool_eviction_preserves_sender_nonce_gap() {
+        let config = PoolConfig::default().with_max_pending_txs(2);
+        let pool = TransactionPool::new(config);
+        let sender = random_address();
+
+        let tx0_low = make_ordered_tx(sender, 0, 10);
+        let tx1_high = make_ordered_tx(sender, 1, 100);
+        let other = make_ordered_tx(random_address(), 0, 50);
+
+        pool.add(tx0_low.clone()).unwrap();
+        pool.add(tx1_high.clone()).unwrap();
+        pool.add(other.clone()).unwrap();
+
+        assert!(!pool.contains(&tx0_low.hash));
+        assert!(pool.contains(&tx1_high.hash));
+        assert_eq!(pool.pending_count(), 1);
+        assert_eq!(pool.queued_count(), 1);
+
+        let built = pool.build(10, &BTreeSet::new());
+        assert_eq!(built.len(), 1);
+        assert_eq!(tx_nonce(&built[0]), other.nonce);
+
+        let tx0_replacement = make_ordered_tx(sender, 0, 200);
+        pool.add(tx0_replacement.clone()).unwrap();
+
+        let built = pool.build(10, &BTreeSet::new());
+        assert_eq!(built.len(), 2);
+        assert_eq!(tx_nonce(&built[0]), tx0_replacement.nonce);
+        assert_eq!(tx_nonce(&built[1]), tx1_high.nonce);
+    }
+
+    #[test]
+    fn pool_cleanup_removes_expired_transactions() {
+        let config = PoolConfig::default().with_pending_ttl_secs(60).with_queued_ttl_secs(60 * 60);
+        let pool = TransactionPool::new(config);
+
+        let sender = random_address();
+        let mut expired = make_ordered_tx(sender, 0, 100);
+        expired.timestamp = current_timestamp().saturating_sub(120);
+        pool.add(expired.clone()).unwrap();
+
+        let removed = pool.cleanup();
+        assert_eq!(removed, 1);
+        assert!(!pool.contains(&expired.hash));
+        assert!(pool.is_empty());
     }
 
     #[test]
@@ -538,12 +861,35 @@ mod tests {
         pool.add(tx2.clone()).unwrap();
         pool.add(tx3.clone()).unwrap();
 
-        pool.prune(&[TxId(tx0.hash), TxId(tx1.hash)]);
+        pool.prune(&[ordered_tx_id(&tx0), ordered_tx_id(&tx1)]);
 
         let txs = pool.build(10, &BTreeSet::new());
         assert_eq!(txs.len(), 2);
         assert_eq!(tx_nonce(&txs[0]), tx2.nonce);
         assert_eq!(tx_nonce(&txs[1]), tx3.nonce);
+    }
+
+    #[test]
+    fn pool_prune_uses_domain_tx_ids() {
+        let pool = TransactionPool::new(PoolConfig::default());
+        let sender = random_address();
+        let tx0 = make_ordered_tx(sender, 0, 100);
+        let tx1 = make_ordered_tx(sender, 1, 100);
+
+        pool.add(tx0.clone()).unwrap();
+        pool.add(tx1.clone()).unwrap();
+
+        let built = pool.build(10, &BTreeSet::new());
+        assert_eq!(built.len(), 2);
+
+        let ids: Vec<TxId> = built.iter().map(Tx::id).collect();
+        pool.prune(&ids[..1]);
+
+        assert!(!pool.contains(&tx0.hash));
+        assert!(pool.contains(&tx1.hash));
+        let rebuilt = pool.build(10, &BTreeSet::new());
+        assert_eq!(rebuilt.len(), 1);
+        assert_eq!(tx_nonce(&rebuilt[0]), tx1.nonce);
     }
 
     #[test]
@@ -558,7 +904,7 @@ mod tests {
         pool.add(tx1.clone()).unwrap();
         pool.add(tx2.clone()).unwrap();
 
-        let excluded = BTreeSet::from([TxId(tx0.hash)]);
+        let excluded = BTreeSet::from([ordered_tx_id(&tx0)]);
         let txs = pool.build(10, &excluded);
 
         assert_eq!(txs.len(), 2);
@@ -575,7 +921,7 @@ mod tests {
 
         pool.add(tx0.clone()).unwrap();
         pool.add(tx2.clone()).unwrap();
-        pool.prune(&[TxId(tx0.hash)]);
+        pool.prune(&[ordered_tx_id(&tx0)]);
 
         assert!(pool.build(10, &BTreeSet::new()).is_empty());
 

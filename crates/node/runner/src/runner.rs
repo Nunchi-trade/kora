@@ -15,7 +15,7 @@ use commonware_consensus::{
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519};
 use commonware_p2p::{Manager, TrackedPeers};
 use commonware_parallel::Sequential;
-use commonware_runtime::{Metrics as _, Spawner, buffer::paged::CacheRef, tokio};
+use commonware_runtime::{Clock as _, Metrics as _, Spawner, buffer::paged::CacheRef, tokio};
 use commonware_utils::{NZU64, NZUsize, acknowledgement::Exact, ordered::Set};
 use futures::StreamExt;
 use kora_domain::{Block, BlockCfg, BootstrapConfig, ConsensusDigest, LedgerEvent, Tx, TxCfg};
@@ -26,7 +26,7 @@ use kora_reporters::{BlockContextProvider, FinalizedReporter, NodeStateReporter,
 use kora_service::{NodeRunContext, NodeRunner};
 use kora_simplex::{DEFAULT_MAILBOX_SIZE as MAILBOX_SIZE, DefaultPool};
 use kora_transport::NetworkTransport;
-use kora_txpool::{PoolConfig, TransactionValidator};
+use kora_txpool::{PoolConfig, TransactionPool, TransactionValidator};
 use tracing::{debug, info, trace, warn};
 
 use crate::{RevmApplication, RunnerError, scheme::ThresholdScheme};
@@ -37,6 +37,7 @@ const BLOCK_CODEC_MAX_TXS: usize = 10_000;
 const BLOCK_CODEC_MAX_TX_BYTES: usize = 8 * 1024 * 1024;
 const EPOCH_LENGTH: u64 = u64::MAX;
 const PARTITION_PREFIX: &str = "kora";
+const TXPOOL_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 
 type Peer = ed25519::PublicKey;
 type CertArchive = Finalization<ThresholdScheme, ConsensusDigest>;
@@ -106,6 +107,18 @@ fn spawn_ledger_observers<S: Spawner>(service: LedgerService, spawner: S) {
                 LedgerEvent::SnapshotPersisted(digest) => {
                     trace!(?digest, "snapshot persisted");
                 }
+            }
+        }
+    });
+}
+
+fn spawn_txpool_cleanup(pool: TransactionPool, context: tokio::Context) {
+    context.with_label("txpool-cleanup").shared(false).spawn(move |ctx| async move {
+        loop {
+            ctx.sleep(TXPOOL_CLEANUP_INTERVAL).await;
+            let removed = pool.cleanup();
+            if removed > 0 {
+                debug!(removed, "expired transactions cleaned from txpool");
             }
         }
     });
@@ -229,6 +242,8 @@ impl NodeRunner for ProductionRunner {
             self.rpc_config.as_ref().map(|_| Arc::new(kora_indexer::BlockIndex::new()));
         let ledger = LedgerService::new(state.clone());
         spawn_ledger_observers(ledger.clone(), context.clone());
+        let txpool = ledger.txpool().await;
+        spawn_txpool_cleanup(txpool.clone(), context.clone());
 
         if let Some((node_state, addr)) = &self.rpc_config {
             let qmdb_state = state.qmdb_state().await;
@@ -274,6 +289,7 @@ impl NodeRunner for ProductionRunner {
                 indexed_provider,
             )
             .with_tx_submit(tx_submit)
+            .with_txpool(txpool.clone())
             .with_peer_count(self.scheme.participants().len().saturating_sub(1) as u64);
             drop(rpc.start());
             info!(addr = %addr, "RPC server started with live state provider");

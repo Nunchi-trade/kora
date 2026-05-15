@@ -4,6 +4,7 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use axum::{Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
 use jsonrpsee::server::{Server, ServerHandle};
+use kora_txpool::TransactionPool;
 use tower::limit::ConcurrencyLimitLayer;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tracing::{error, info};
@@ -17,6 +18,7 @@ use crate::{
     kora::{KoraApiImpl, KoraApiServer},
     state::NodeState,
     state_provider::{NoopStateProvider, StateProvider},
+    txpool::{TxpoolApiImpl, TxpoolApiServer},
 };
 
 /// Error type for RPC server operations.
@@ -75,6 +77,7 @@ pub struct RpcServer<S: StateProvider = NoopStateProvider> {
     jsonrpc_addr: SocketAddr,
     chain_id: u64,
     tx_submit: Option<TxSubmitCallback>,
+    txpool: Option<TransactionPool>,
     state_provider: S,
     cors_config: CorsConfig,
     max_connections: u32,
@@ -89,6 +92,7 @@ impl<S: StateProvider> std::fmt::Debug for RpcServer<S> {
             .field("jsonrpc_addr", &self.jsonrpc_addr)
             .field("chain_id", &self.chain_id)
             .field("tx_submit", &self.tx_submit.is_some())
+            .field("txpool", &self.txpool.is_some())
             .finish()
     }
 }
@@ -109,6 +113,7 @@ impl RpcServer<NoopStateProvider> {
             jsonrpc_addr: addr,
             chain_id: 1,
             tx_submit: None,
+            txpool: None,
             state_provider: NoopStateProvider,
             cors_config: CorsConfig::default(),
             max_connections: 100,
@@ -124,6 +129,7 @@ impl RpcServer<NoopStateProvider> {
             jsonrpc_addr: addr,
             chain_id,
             tx_submit: None,
+            txpool: None,
             state_provider: NoopStateProvider,
             cors_config: CorsConfig::default(),
             max_connections: 100,
@@ -146,6 +152,7 @@ impl<S: StateProvider + Clone + 'static> RpcServer<S> {
             jsonrpc_addr: addr,
             chain_id,
             tx_submit: None,
+            txpool: None,
             state_provider,
             cors_config: CorsConfig::default(),
             max_connections: 100,
@@ -157,6 +164,13 @@ impl<S: StateProvider + Clone + 'static> RpcServer<S> {
     #[must_use]
     pub fn with_tx_submit(mut self, tx_submit: TxSubmitCallback) -> Self {
         self.tx_submit = Some(tx_submit);
+        self
+    }
+
+    /// Set the transaction pool exposed by the `txpool_*` namespace.
+    #[must_use]
+    pub fn with_txpool(mut self, txpool: TransactionPool) -> Self {
+        self.txpool = Some(txpool);
         self
     }
 
@@ -189,6 +203,7 @@ impl<S: StateProvider + Clone + 'static> RpcServer<S> {
             jsonrpc_addr: config.jsonrpc_addr,
             chain_id: config.chain_id,
             tx_submit: None,
+            txpool: None,
             state_provider,
             cors_config: config.cors,
             max_connections: config.max_connections,
@@ -206,6 +221,7 @@ impl<S: StateProvider + Clone + 'static> RpcServer<S> {
         let node_state_for_jsonrpc = Arc::clone(&node_state);
         let chain_id = self.chain_id;
         let tx_submit = self.tx_submit;
+        let txpool = self.txpool;
         let cors_layer = build_cors_layer(&self.cors_config);
         let max_connections = self.max_connections;
         let state_provider = self.state_provider;
@@ -273,6 +289,12 @@ impl<S: StateProvider + Clone + 'static> RpcServer<S> {
                 error!(error = %e, "Failed to merge kora API");
                 return None;
             }
+            if let Some(txpool) = txpool
+                && let Err(e) = module.merge(TxpoolApiImpl::new(txpool).into_rpc())
+            {
+                error!(error = %e, "Failed to merge txpool API");
+                return None;
+            }
 
             info!(addr = %jsonrpc_addr, "Starting JSON-RPC server");
 
@@ -324,6 +346,7 @@ pub struct JsonRpcServer<S: StateProvider = NoopStateProvider> {
     addr: SocketAddr,
     chain_id: u64,
     tx_submit: Option<TxSubmitCallback>,
+    txpool: Option<TransactionPool>,
     state_provider: S,
     max_connections: u32,
     peer_count: u64,
@@ -335,6 +358,7 @@ impl<S: StateProvider> std::fmt::Debug for JsonRpcServer<S> {
             .field("addr", &self.addr)
             .field("chain_id", &self.chain_id)
             .field("tx_submit", &self.tx_submit.is_some())
+            .field("txpool", &self.txpool.is_some())
             .finish()
     }
 }
@@ -346,6 +370,7 @@ impl JsonRpcServer<NoopStateProvider> {
             addr,
             chain_id,
             tx_submit: None,
+            txpool: None,
             state_provider: NoopStateProvider,
             max_connections: 100,
             peer_count: 0,
@@ -360,6 +385,7 @@ impl<S: StateProvider + Clone + 'static> JsonRpcServer<S> {
             addr,
             chain_id,
             tx_submit: None,
+            txpool: None,
             state_provider,
             max_connections: 100,
             peer_count: 0,
@@ -370,6 +396,13 @@ impl<S: StateProvider + Clone + 'static> JsonRpcServer<S> {
     #[must_use]
     pub fn with_tx_submit(mut self, tx_submit: TxSubmitCallback) -> Self {
         self.tx_submit = Some(tx_submit);
+        self
+    }
+
+    /// Set the transaction pool exposed by the `txpool_*` namespace.
+    #[must_use]
+    pub fn with_txpool(mut self, txpool: TransactionPool) -> Self {
+        self.txpool = Some(txpool);
         self
     }
 
@@ -407,6 +440,9 @@ impl<S: StateProvider + Clone + 'static> JsonRpcServer<S> {
         module.merge(eth_api.into_rpc())?;
         module.merge(net_api.into_rpc())?;
         module.merge(web3_api.into_rpc())?;
+        if let Some(txpool) = self.txpool {
+            module.merge(TxpoolApiImpl::new(txpool).into_rpc())?;
+        }
 
         info!(addr = %self.addr, "Starting JSON-RPC server");
 

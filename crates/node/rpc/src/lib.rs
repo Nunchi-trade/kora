@@ -20,6 +20,9 @@ pub use eth::{
 mod kora;
 pub use kora::{KoraApiImpl, KoraApiServer};
 
+mod txpool;
+pub use txpool::{TxpoolApiImpl, TxpoolApiServer, TxpoolContent, TxpoolInspect, TxpoolStatus};
+
 mod server;
 pub use server::{JsonRpcServer, RpcServer, RpcServerHandle, ServerError};
 

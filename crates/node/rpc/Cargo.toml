@@ -44,6 +44,7 @@ parking_lot = "0.12"
 kora-executor = { path = "../executor" }
 kora-indexer = { path = "../../storage/indexer" }
 kora-traits = { path = "../../storage/traits" }
+kora-txpool = { path = "../txpool" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }

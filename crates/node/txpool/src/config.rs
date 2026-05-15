@@ -15,6 +15,10 @@ pub struct PoolConfig {
     pub min_gas_price: u128,
     /// Percentage bump required for replacement transactions.
     pub replacement_bump_percent: u8,
+    /// Time-to-live for pending transactions, in seconds.
+    pub pending_ttl_secs: u64,
+    /// Time-to-live for queued transactions, in seconds.
+    pub queued_ttl_secs: u64,
 }
 
 impl Default for PoolConfig {
@@ -26,6 +30,8 @@ impl Default for PoolConfig {
             max_tx_size: 128 * 1024, // 128 KB
             min_gas_price: 0,
             replacement_bump_percent: 10,
+            pending_ttl_secs: 30 * 60,
+            queued_ttl_secs: 60 * 60,
         }
     }
 }
@@ -40,6 +46,8 @@ impl PoolConfig {
             max_tx_size: 128 * 1024,
             min_gas_price: 0,
             replacement_bump_percent: 10,
+            pending_ttl_secs: 30 * 60,
+            queued_ttl_secs: 60 * 60,
         }
     }
 
@@ -84,6 +92,20 @@ impl PoolConfig {
         self.replacement_bump_percent = percent;
         self
     }
+
+    /// Sets the time-to-live for pending transactions, in seconds.
+    #[must_use]
+    pub const fn with_pending_ttl_secs(mut self, ttl: u64) -> Self {
+        self.pending_ttl_secs = ttl;
+        self
+    }
+
+    /// Sets the time-to-live for queued transactions, in seconds.
+    #[must_use]
+    pub const fn with_queued_ttl_secs(mut self, ttl: u64) -> Self {
+        self.queued_ttl_secs = ttl;
+        self
+    }
 }
 
 #[cfg(test)]
@@ -99,6 +121,8 @@ mod tests {
         assert_eq!(config.max_tx_size, 128 * 1024);
         assert_eq!(config.min_gas_price, 0);
         assert_eq!(config.replacement_bump_percent, 10);
+        assert_eq!(config.pending_ttl_secs, 30 * 60);
+        assert_eq!(config.queued_ttl_secs, 60 * 60);
     }
 
     #[test]
@@ -111,6 +135,8 @@ mod tests {
         assert_eq!(new.max_tx_size, default.max_tx_size);
         assert_eq!(new.min_gas_price, default.min_gas_price);
         assert_eq!(new.replacement_bump_percent, default.replacement_bump_percent);
+        assert_eq!(new.pending_ttl_secs, default.pending_ttl_secs);
+        assert_eq!(new.queued_ttl_secs, default.queued_ttl_secs);
     }
 
     #[test]
@@ -152,6 +178,18 @@ mod tests {
     }
 
     #[test]
+    fn builder_with_pending_ttl_secs() {
+        let config = PoolConfig::new().with_pending_ttl_secs(60);
+        assert_eq!(config.pending_ttl_secs, 60);
+    }
+
+    #[test]
+    fn builder_with_queued_ttl_secs() {
+        let config = PoolConfig::new().with_queued_ttl_secs(120);
+        assert_eq!(config.queued_ttl_secs, 120);
+    }
+
+    #[test]
     fn builder_chaining() {
         let config = PoolConfig::new()
             .with_max_pending_txs(10000)
@@ -159,7 +197,9 @@ mod tests {
             .with_max_txs_per_sender(50)
             .with_max_tx_size(64 * 1024)
             .with_min_gas_price(500)
-            .with_replacement_bump_percent(15);
+            .with_replacement_bump_percent(15)
+            .with_pending_ttl_secs(45)
+            .with_queued_ttl_secs(90);
 
         assert_eq!(config.max_pending_txs, 10000);
         assert_eq!(config.max_queued_txs, 5000);
@@ -167,6 +207,8 @@ mod tests {
         assert_eq!(config.max_tx_size, 64 * 1024);
         assert_eq!(config.min_gas_price, 500);
         assert_eq!(config.replacement_bump_percent, 15);
+        assert_eq!(config.pending_ttl_secs, 45);
+        assert_eq!(config.queued_ttl_secs, 90);
     }
 
     #[test]
@@ -174,6 +216,8 @@ mod tests {
         let config = PoolConfig::new().with_max_pending_txs(100).with_min_gas_price(999);
         let cloned = config.clone();
 
+        assert_eq!(config.max_pending_txs, 100);
+        assert_eq!(config.min_gas_price, 999);
         assert_eq!(cloned.max_pending_txs, 100);
         assert_eq!(cloned.min_gas_price, 999);
     }
