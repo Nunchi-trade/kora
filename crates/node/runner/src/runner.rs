@@ -1,4 +1,9 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use alloy_consensus::Header;
 use alloy_primitives::{Address, B256, keccak256};
@@ -49,6 +54,7 @@ const CONSENSUS_SKIP_TIMEOUT: ViewDelta = ViewDelta::new(32);
 const SIGNATURE_THREADS: usize = 2;
 const EPOCH_LENGTH: u64 = u64::MAX;
 const PARTITION_PREFIX: &str = "kora";
+const RUNTIME_DIR_ENV: &str = "KORA_RUNTIME_DIR";
 
 type Peer = ed25519::PublicKey;
 type CertArchive = Finalization<ThresholdScheme, ConsensusDigest>;
@@ -57,6 +63,23 @@ type NodeStateRptr = NodeStateReporter<ThresholdScheme>;
 
 fn default_page_cache(context: &tokio::Context) -> CacheRef {
     DefaultPool::init(context)
+}
+
+/// Resolve the storage directory used by the Commonware runtime.
+///
+/// By default this lives under `data_dir/runtime` so validator state survives
+/// restarts. Local devnets can set `KORA_RUNTIME_DIR` to put consensus journals
+/// on tmpfs and avoid Docker-volume fsync latency.
+#[must_use]
+pub fn runtime_storage_directory(data_dir: &Path) -> PathBuf {
+    runtime_storage_directory_from(data_dir, std::env::var_os(RUNTIME_DIR_ENV))
+}
+
+fn runtime_storage_directory_from(data_dir: &Path, override_dir: Option<OsString>) -> PathBuf {
+    match override_dir {
+        Some(path) if !path.is_empty() => PathBuf::from(path),
+        _ => data_dir.join("runtime"),
+    }
 }
 
 const fn block_codec_cfg() -> BlockCfg {
@@ -263,9 +286,10 @@ impl ProductionRunner {
         use commonware_runtime::Runner;
         use kora_transport::NetworkConfigExt;
 
-        let executor = tokio::Runner::new(
-            tokio::Config::default().with_storage_directory(config.data_dir.join("runtime")),
-        );
+        let runtime_dir = runtime_storage_directory(&config.data_dir);
+        info!(runtime_dir = %runtime_dir.display(), "Starting Commonware runtime");
+        let executor =
+            tokio::Runner::new(tokio::Config::default().with_storage_directory(runtime_dir));
         executor.start(|context| async move {
             let validator_key = config
                 .validator_key()
@@ -506,5 +530,40 @@ impl NodeRunner for ProductionRunner {
 
         info!("Validator started successfully");
         Ok(ledger)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_storage_directory_defaults_under_data_dir() {
+        let data_dir = PathBuf::from("/var/lib/kora");
+
+        assert_eq!(
+            runtime_storage_directory_from(&data_dir, None),
+            PathBuf::from("/var/lib/kora/runtime")
+        );
+    }
+
+    #[test]
+    fn runtime_storage_directory_ignores_empty_override() {
+        let data_dir = PathBuf::from("/var/lib/kora");
+
+        assert_eq!(
+            runtime_storage_directory_from(&data_dir, Some(OsString::new())),
+            PathBuf::from("/var/lib/kora/runtime")
+        );
+    }
+
+    #[test]
+    fn runtime_storage_directory_uses_override() {
+        let data_dir = PathBuf::from("/var/lib/kora");
+
+        assert_eq!(
+            runtime_storage_directory_from(&data_dir, Some(OsString::from("/runtime"))),
+            PathBuf::from("/runtime")
+        );
     }
 }

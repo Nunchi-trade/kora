@@ -20,7 +20,7 @@ use kora_overlay::OverlayState;
 use kora_qmdb_ledger::QmdbState;
 use kora_rpc::NodeState;
 use rand::Rng;
-use tracing::{info, trace, warn};
+use tracing::{debug, trace, warn};
 
 /// REVM-based consensus application.
 #[derive(Clone)]
@@ -150,7 +150,7 @@ where
         let block_digest = block.commitment();
 
         let total_elapsed = start.elapsed();
-        info!(
+        debug!(
             ?block_digest,
             height,
             txs = block.txs.len(),
@@ -232,7 +232,7 @@ where
             .await;
 
         let total_elapsed = start.elapsed();
-        info!(
+        debug!(
             ?digest,
             height = block.height,
             txs = block.txs.len(),
@@ -304,7 +304,7 @@ where
                 if let Some(ref state) = node_state {
                     state.inc_proposed();
                 }
-                info!(
+                debug!(
                     height = b.height,
                     ancestry_ms = ancestry_elapsed.as_millis(),
                     build_ms = build_elapsed.as_millis(),
@@ -368,7 +368,7 @@ where
             let verify_elapsed = verify_start.elapsed();
             let total_elapsed = start.elapsed();
 
-            info!(
+            debug!(
                 tip_height,
                 block_count,
                 ancestry_ms = ancestry_elapsed.as_millis(),
