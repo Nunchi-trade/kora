@@ -18,7 +18,7 @@ impl BroadcastInitializer {
     pub const DEFAULT_DEQUE_SIZE: usize = 256;
 
     /// Whether messages are sent with priority by default.
-    pub const DEFAULT_PRIORITY: bool = false;
+    pub const DEFAULT_PRIORITY: bool = true;
 }
 
 impl BroadcastInitializer {
@@ -57,6 +57,6 @@ mod tests {
     fn test_defaults() {
         assert_eq!(BroadcastInitializer::DEFAULT_MAILBOX_SIZE, 1024);
         assert_eq!(BroadcastInitializer::DEFAULT_DEQUE_SIZE, 256);
-        assert!(!BroadcastInitializer::DEFAULT_PRIORITY);
+        assert!(BroadcastInitializer::DEFAULT_PRIORITY);
     }
 }

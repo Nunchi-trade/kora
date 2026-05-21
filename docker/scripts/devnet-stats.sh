@@ -17,6 +17,8 @@ CHAIN_ID="${CHAIN_ID:-1337}"
 RPC_PORTS=(8545 8546 8547 8548)
 FOLLOWER_SERVICE="secondary-node0"
 FOLLOWER_P2P_PORT=30500
+declare -a PREV_FINALIZED=()
+declare -a PREV_SAMPLE_MS=()
 
 cleanup() {
     tput cnorm
@@ -37,12 +39,16 @@ format_uptime() {
 fetch_all_statuses() {
     local tmpdir=$(mktemp -d)
     
-    # Launch parallel fetches using JSON-RPC POST to get block number (indicates node is alive)
+    # Launch parallel fetches using JSON-RPC POST to get node status.
     for i in 0 1 2 3; do
-        (curl -s --max-time 0.2 -X POST -H "Content-Type: application/json" \
-            -d '{"jsonrpc":"2.0","method":"kora_nodeStatus","params":[],"id":1}' \
-            "http://localhost:${RPC_PORTS[$i]}" 2>/dev/null | \
-            jq -c '.result // {}' > "$tmpdir/$i" 2>/dev/null || echo "{}" > "$tmpdir/$i") &
+        (
+            status=$(curl -s --max-time 0.2 -X POST -H "Content-Type: application/json" \
+                -d '{"jsonrpc":"2.0","method":"kora_nodeStatus","params":[],"id":1}' \
+                "http://localhost:${RPC_PORTS[$i]}" 2>/dev/null | \
+                jq -c '.result // {}' 2>/dev/null || true)
+            [[ -n "$status" ]] || status="{}"
+            printf "%s\n" "$status" > "$tmpdir/$i"
+        ) &
     done
     wait
     
@@ -78,7 +84,7 @@ render() {
     
     echo -e "${BOLD}${CYAN}Node Status${NC}"
     echo -e "┌───────┬──────────┬────────────┬──────────┬────────────┬────────────┬────────────┬────────────┬────────┐"
-    echo -e "│ ${BOLD}Node${NC}  │ ${BOLD}Status${NC}   │ ${BOLD}Uptime${NC}     │ ${BOLD}View${NC}     │ ${BOLD}Finalized${NC}  │ ${BOLD}Nullified${NC}  │ ${BOLD}Proposed${NC}   │ ${BOLD}Throughput${NC} │ ${BOLD}Leader${NC} │"
+    echo -e "│ ${BOLD}Node${NC}  │ ${BOLD}Status${NC}   │ ${BOLD}Uptime${NC}     │ ${BOLD}View${NC}     │ ${BOLD}Finalized${NC}  │ ${BOLD}Nullified${NC}  │ ${BOLD}Proposed${NC}   │ ${BOLD}Blocks/s${NC}   │ ${BOLD}Leader${NC} │"
     echo -e "├───────┼──────────┼────────────┼──────────┼────────────┼────────────┼────────────┼────────────┼────────┤"
     
     local rpc_count=0
@@ -87,7 +93,7 @@ render() {
     local max_uptime=0
     local total_finalized=0
     local max_view=0
-    local max_throughput=0
+    local max_blocks_per_sec=0
     local follower_status="offline"
     local follower_color=$RED
     local follower_state="-"
@@ -98,6 +104,8 @@ render() {
     # Fetch all statuses in parallel
     local all_status
     all_status=$(fetch_all_statuses)
+    local sample_ms
+    sample_ms=$(date +%s%3N)
     
     local i=0
     while IFS= read -r status; do
@@ -135,23 +143,31 @@ render() {
                     ((++healthy_count))
                 fi
                 
-                # Calculate throughput (blocks/sec)
-                local throughput_str="-"
-                if [[ $uptime -gt 0 && $finalized -gt 0 ]]; then
-                    # Use awk for floating point division
-                    local tps=$(awk "BEGIN {printf \"%.2f\", $finalized / $uptime}")
-                    throughput_str="${tps} b/s"
-                    # Track max for summary
-                    local tps_int=$(awk "BEGIN {printf \"%d\", $finalized * 100 / $uptime}")
-                    [[ $tps_int -gt $max_throughput ]] && max_throughput=$tps_int
+                # Calculate live finalized blocks per second since the previous refresh.
+                local blocks_per_sec_str="-"
+                if [[ -n "${PREV_FINALIZED[$i]:-}" && -n "${PREV_SAMPLE_MS[$i]:-}" ]]; then
+                    local delta_blocks=$((finalized - PREV_FINALIZED[$i]))
+                    local delta_ms=$((sample_ms - PREV_SAMPLE_MS[$i]))
+                    if [[ $delta_blocks -ge 0 && $delta_ms -gt 0 ]]; then
+                        local blocks_per_sec
+                        blocks_per_sec=$(awk -v blocks="$delta_blocks" -v ms="$delta_ms" 'BEGIN {printf "%.2f", blocks * 1000 / ms}')
+                        blocks_per_sec_str="${blocks_per_sec} b/s"
+                        local blocks_per_sec_int
+                        blocks_per_sec_int=$(awk -v blocks="$delta_blocks" -v ms="$delta_ms" 'BEGIN {printf "%d", blocks * 100000 / ms}')
+                        [[ $blocks_per_sec_int -gt $max_blocks_per_sec ]] && max_blocks_per_sec=$blocks_per_sec_int
+                    fi
                 fi
+                PREV_FINALIZED[$i]=$finalized
+                PREV_SAMPLE_MS[$i]=$sample_ms
                 
                 printf "│ ${CYAN}%-5s${NC} │ %b │ %-10s │ %-8s │ %-10s │ %-10s │ %-10s │ %-10s │   %b    │\n" \
-                    "$validator_index" "$rpc_status" "$uptime_str" "$view" "$finalized" "$nullified" "$proposed" "$throughput_str" "$leader_str"
+                    "$validator_index" "$rpc_status" "$uptime_str" "$view" "$finalized" "$nullified" "$proposed" "$blocks_per_sec_str" "$leader_str"
             else
+                unset "PREV_FINALIZED[$i]" "PREV_SAMPLE_MS[$i]"
                 printf "│ ${CYAN}%-5s${NC} │ ${RED}offline${NC}  │ -          │ -        │ -          │ -          │ -          │ -          │   -    │\n" "$i"
             fi
         else
+            unset "PREV_FINALIZED[$i]" "PREV_SAMPLE_MS[$i]"
             printf "│ ${CYAN}%-5s${NC} │ ${RED}offline${NC}  │ -          │ -        │ -          │ -          │ -          │ -          │   -    │\n" "$i"
         fi
         ((++i))
@@ -206,13 +222,13 @@ render() {
     local uptime_str="0s"
     [[ $max_uptime -gt 0 ]] && uptime_str=$(format_uptime "$max_uptime")
     
-    # Format throughput from stored integer (x100)
-    local throughput_str="0.00 b/s"
-    if [[ $max_throughput -gt 0 ]]; then
-        throughput_str=$(awk "BEGIN {printf \"%.2f b/s\", $max_throughput / 100}")
+    # Format live blocks/sec from stored integer (x100)
+    local blocks_per_sec_str="0.00 b/s"
+    if [[ $max_blocks_per_sec -gt 0 ]]; then
+        blocks_per_sec_str=$(awk -v bps="$max_blocks_per_sec" 'BEGIN {printf "%.2f b/s", bps / 100}')
     fi
     
-    echo -e "  ${DIM}Consensus:${NC} ${health_color}${healthy_count}/4${NC}  │  ${DIM}RPC:${NC} ${GREEN}${rpc_count}/4${NC}  │  ${DIM}Follower:${NC} ${follower_color}${follower_status}${NC}  │  ${DIM}Stalled:${NC} ${YELLOW}${stalled_count}${NC}  │  ${DIM}Threshold:${NC} $threshold  │  ${DIM}View:${NC} ${CYAN}$max_view${NC}  │  ${DIM}Finalized:${NC} ${GREEN}$total_finalized${NC}  │  ${DIM}Throughput:${NC} ${CYAN}$throughput_str${NC}  │  ${DIM}Uptime:${NC} $uptime_str"
+    echo -e "  ${DIM}Consensus:${NC} ${health_color}${healthy_count}/4${NC}  │  ${DIM}RPC:${NC} ${GREEN}${rpc_count}/4${NC}  │  ${DIM}Follower:${NC} ${follower_color}${follower_status}${NC}  │  ${DIM}Stalled:${NC} ${YELLOW}${stalled_count}${NC}  │  ${DIM}Threshold:${NC} $threshold  │  ${DIM}View:${NC} ${CYAN}$max_view${NC}  │  ${DIM}Finalized:${NC} ${GREEN}$total_finalized${NC}  │  ${DIM}Blocks/s:${NC} ${CYAN}$blocks_per_sec_str${NC}  │  ${DIM}Uptime:${NC} $uptime_str"
 
     echo ""
     echo -e "${BOLD}${CYAN}Follower Node${NC}"
