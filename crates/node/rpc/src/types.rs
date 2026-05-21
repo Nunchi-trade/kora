@@ -152,7 +152,7 @@ pub struct RpcTransaction {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_priority_fee_per_gas: Option<U256>,
     /// V component of signature.
-    pub v: U64,
+    pub v: U256,
     /// R component of signature.
     pub r: U256,
     /// S component of signature.

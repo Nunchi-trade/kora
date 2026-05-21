@@ -1,0 +1,8 @@
+[baseline] t=1779298891 | node0: h=26079 view=37600 null=4723 | node1: h=26079 view=37600 null=4723 | node2: h=26079 view=37600 null=4723 | node3: h=25348 view=36677 null=46
+[baseline] t=1779298893 | node0: h=26087 (+8) view=37616 null=4730 | node1: h=26088 (+9) view=37616 null=4730 | node2: h=26088 (+9) view=37616 null=4730 | node3: h=25348 view=36677 null=46 | net_rate=3.992 blk/s (~0.250s/blk)
+[baseline] t=1779298895 | node0: h=26096 (+9) view=37633 null=4738 | node1: h=26096 (+8) view=37633 null=4738 | node2: h=26096 (+8) view=37633 null=4738 | node3: h=25348 view=36677 null=46 | net_rate=4.490 blk/s (~0.223s/blk)
+[baseline] t=1779298897 | node0: h=26105 (+9) view=37645 null=4743 | node1: h=26105 (+9) view=37645 null=4743 | node2: h=26105 (+9) view=37645 null=4743 | node3: h=25348 view=36677 null=46 | net_rate=4.491 blk/s (~0.223s/blk)
+[baseline] t=1779298899 | node0: h=26113 (+8) view=37660 null=4748 | node1: h=26113 (+8) view=37660 null=4748 | node2: h=26113 (+8) view=37660 null=4748 | node3: h=25348 view=36677 null=46 | net_rate=3.992 blk/s (~0.250s/blk)
+[baseline] t=1779298901 | node0: h=26122 (+9) view=37674 null=4753 | node1: h=26122 (+9) view=37674 null=4753 | node2: h=26122 (+9) view=37674 null=4753 | node3: h=25348 view=36677 null=46 | net_rate=4.491 blk/s (~0.223s/blk)
+[baseline] t=1779298903 | node0: h=26131 (+9) view=37688 null=4759 | node1: h=26131 (+9) view=37688 null=4759 | node2: h=26131 (+9) view=37688 null=4759 | node3: h=25348 view=36677 null=46 | net_rate=4.492 blk/s (~0.223s/blk)
+[baseline] t=1779298905 | node0: h=26139 (+8) view=37701 null=4765 | node1: h=26139 (+8) view=37701 null=4765 | node2: h=26139 (+8) view=37703 null=4765 | node3: h=25348 view=36677 null=46 | net_rate=3.992 blk/s (~0.250s/blk)

@@ -79,6 +79,10 @@ fn loadgen_address(seed: u8) -> Address {
     Address::from_slice(&hash[12..])
 }
 
+fn funded_loadgen_allocations() -> impl Iterator<Item = GenesisAllocation> {
+    (1..=LOADGEN_ACCOUNT_COUNT).map(|seed| funded_allocation(loadgen_address(seed).to_string()))
+}
+
 pub(crate) fn run(args: SetupArgs) -> Result<()> {
     tracing::info!(
         validators = args.validators,
@@ -181,10 +185,7 @@ pub(crate) fn run(args: SetupArgs) -> Result<()> {
         funded_allocation("0xDdE169289B51C512268D0b11EE2b15160b1e1793"),
         funded_allocation("0xde738C4084dDE5083A7959235Fd230e27eAFC63B"),
     ];
-    allocations.extend(
-        (1..=LOADGEN_ACCOUNT_COUNT)
-            .map(|seed| funded_allocation(loadgen_address(seed).to_string())),
-    );
+    allocations.extend(funded_loadgen_allocations());
 
     let genesis = GenesisConfig {
         chain_id: args.chain_id,
@@ -205,4 +206,36 @@ pub(crate) fn run(args: SetupArgs) -> Result<()> {
     tracing::info!("  Chain ID:   {}", args.chain_id);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LOADGEN_ADDRESS_FIXTURES: &[(u8, &str)] = &[
+        (1, "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf"),
+        (2, "0x2B5AD5c4795c026514f8317c7a215E218DcCD6cF"),
+        (3, "0x6813Eb9362372EEF6200f3b1dbC3f819671cBA69"),
+    ];
+
+    #[test]
+    fn loadgen_address_matches_seed_fixtures() {
+        for &(seed, expected) in LOADGEN_ADDRESS_FIXTURES {
+            assert_eq!(loadgen_address(seed).to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn funded_loadgen_allocations_include_expected_seed_addresses() {
+        let allocations: Vec<_> = funded_loadgen_allocations().collect();
+
+        assert_eq!(allocations.len(), usize::from(LOADGEN_ACCOUNT_COUNT));
+        for &(_, expected) in LOADGEN_ADDRESS_FIXTURES {
+            let allocation = allocations
+                .iter()
+                .find(|allocation| allocation.address == expected)
+                .expect("expected loadgen seed address to be funded");
+            assert_eq!(allocation.balance, GENESIS_BALANCE);
+        }
+    }
 }

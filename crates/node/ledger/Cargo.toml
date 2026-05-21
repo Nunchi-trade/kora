@@ -20,6 +20,7 @@ kora-qmdb-ledger = { path = "../../storage/qmdb-ledger" }
 kora-traits = { path = "../../storage/traits" }
 
 # Commonware
+commonware-consensus.workspace = true
 commonware-cryptography.workspace = true
 commonware-runtime.workspace = true
 

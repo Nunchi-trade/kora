@@ -45,7 +45,7 @@ Run from repository root (`just <cmd>`) or from `docker/` directory (`just <cmd>
 |---------|-------------|
 | `just devnet` | Start devnet with interactive DKG (production-like) |
 | `just trusted-devnet` | Start devnet with trusted dealer DKG (fast, insecure) |
-| `just devnet-down` | Stop all containers (preserves state) |
+| `just devnet-down` | Stop all containers (preserves keys/config volumes; runtime state is ephemeral) |
 | `just devnet-reset` | Stop and delete all state (fresh DKG on next start) |
 | `just devnet-logs` | Stream validator logs |
 | `just devnet-status` | Show container status and endpoints |
@@ -61,7 +61,7 @@ Run from repository root (`just <cmd>`) or from `docker/` directory (`just <cmd>
 | `just devnet` | Start devnet with interactive DKG (production-like) |
 | `just trusted-devnet` | Start devnet with trusted dealer DKG (fast, insecure) |
 | `just devnet-minimal` | Start devnet without observability stack |
-| `just down` | Stop all containers (preserves state) |
+| `just down` | Stop all containers (preserves keys/config volumes; runtime state is ephemeral) |
 | `just reset` | Stop and delete all state (fresh DKG on next start) |
 | `just restart` | Stop and restart the devnet |
 | `just restart-validators` | Restart only validator nodes |
@@ -164,6 +164,7 @@ Environment variables (set in `.env` or export):
 |----------|---------|-------------|
 | `CHAIN_ID` | 1337 | Chain identifier |
 | `RUST_LOG` | info | Log level (trace, debug, info, warn, error) |
+| `KORA_RUNTIME_DIR` | /runtime | Commonware runtime storage directory. The Docker devnet mounts this path as 1GiB tmpfs to keep local consensus journal syncs off Docker named volumes. |
 | `COMPOSE_PROFILES` | observability | Comma-separated profiles (observability, distributed-dkg) |
 | `VALIDATOR_INDEX` | - | Node index (0-3), set per container |
 | `IS_BOOTSTRAP` | - | Whether node is bootstrap node |

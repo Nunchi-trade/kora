@@ -25,6 +25,8 @@ x-node-common: &node-common
 x-validator-common: &validator-common
   <<: *node-common
   restart: unless-stopped
+  tmpfs:
+    - /runtime:size=1g,mode=1777
   healthcheck:
     test: ["CMD", "/scripts/healthcheck.sh"]
     interval: 10s
@@ -34,6 +36,7 @@ x-validator-common: &validator-common
   environment:
     - RUST_LOG=${RUST_LOG:-info}
     - CHAIN_ID=${CHAIN_ID:-1337}
+    - KORA_RUNTIME_DIR=${KORA_RUNTIME_DIR:-/runtime}
     - HEALTHCHECK_MODE=ready
 
 services:
@@ -189,6 +192,7 @@ services:
     environment:
       - RUST_LOG=${RUST_LOG:-info}
       - CHAIN_ID=${CHAIN_ID:-1337}
+      - KORA_RUNTIME_DIR=${KORA_RUNTIME_DIR:-/runtime}
       - VALIDATOR_INDEX=0
       - IS_BOOTSTRAP=true
       - HEALTHCHECK_MODE=ready
@@ -210,6 +214,7 @@ services:
     environment:
       - RUST_LOG=${RUST_LOG:-info}
       - CHAIN_ID=${CHAIN_ID:-1337}
+      - KORA_RUNTIME_DIR=${KORA_RUNTIME_DIR:-/runtime}
       - VALIDATOR_INDEX=1
       - IS_BOOTSTRAP=false
       - BOOTSTRAP_PEERS=node0:30303
@@ -232,6 +237,7 @@ services:
     environment:
       - RUST_LOG=${RUST_LOG:-info}
       - CHAIN_ID=${CHAIN_ID:-1337}
+      - KORA_RUNTIME_DIR=${KORA_RUNTIME_DIR:-/runtime}
       - VALIDATOR_INDEX=2
       - IS_BOOTSTRAP=false
       - BOOTSTRAP_PEERS=node0:30303
@@ -254,6 +260,7 @@ services:
     environment:
       - RUST_LOG=${RUST_LOG:-info}
       - CHAIN_ID=${CHAIN_ID:-1337}
+      - KORA_RUNTIME_DIR=${KORA_RUNTIME_DIR:-/runtime}
       - VALIDATOR_INDEX=3
       - IS_BOOTSTRAP=false
       - BOOTSTRAP_PEERS=node0:30303
@@ -276,6 +283,7 @@ services:
     environment:
       - RUST_LOG=${RUST_LOG:-info}
       - CHAIN_ID=${CHAIN_ID:-1337}
+      - KORA_RUNTIME_DIR=${KORA_RUNTIME_DIR:-/runtime}
       - IS_BOOTSTRAP=false
       - BOOTSTRAP_PEERS=node0:30303
       - HEALTHCHECK_MODE=ready

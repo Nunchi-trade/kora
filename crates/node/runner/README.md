@@ -118,6 +118,7 @@ The runner is configured through:
 | `scheme` | BLS12-381 threshold signing scheme from DKG |
 | `chain_id` | EVM chain identifier |
 | `gas_limit` | Maximum gas per block |
+| `KORA_RUNTIME_DIR` | Optional environment override for Commonware runtime storage. Defaults to `{data_dir}/runtime`. |
 | `bootstrap` | Genesis allocations and bootstrap transactions |
 | `rpc_config` | Optional RPC server configuration |
 

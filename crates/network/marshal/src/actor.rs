@@ -17,7 +17,7 @@ use commonware_consensus::{
     types::{Epoch, FixedEpocher, Height, ViewDelta},
 };
 use commonware_cryptography::certificate::Provider;
-use commonware_parallel::Sequential;
+use commonware_parallel::{Sequential, Strategy};
 use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner, Storage, buffer::paged::CacheRef};
 use commonware_utils::{Acknowledgement, NZU64, NZUsize};
 use rand_core::CryptoRngCore;
@@ -46,22 +46,22 @@ impl ActorInitializer {
     pub const DEFAULT_MAILBOX_SIZE: usize = 1024;
 
     /// The default view retention timeout (10 views).
-    pub const DEFAULT_VIEW_RETENTION_TIMEOUT: ViewDelta = ViewDelta::new(10);
+    pub const DEFAULT_VIEW_RETENTION_TIMEOUT: ViewDelta = ViewDelta::new(2560);
 
     /// The default maximum number of blocks to repair at once.
-    pub const DEFAULT_MAX_REPAIR: NonZeroUsize = NZUsize!(10);
+    pub const DEFAULT_MAX_REPAIR: NonZeroUsize = NZUsize!(128);
 
     /// The default prunable items per section.
-    pub const DEFAULT_PRUNABLE_ITEMS_PER_SECTION: NonZeroU64 = NZU64!(10);
+    pub const DEFAULT_PRUNABLE_ITEMS_PER_SECTION: NonZeroU64 = NZU64!(4_096);
 
     /// The default replay buffer size.
-    pub const DEFAULT_REPLAY_BUFFER: NonZeroUsize = NZUsize!(1024);
+    pub const DEFAULT_REPLAY_BUFFER: NonZeroUsize = NZUsize!(8 * 1024 * 1024);
 
     /// The default key write buffer size.
-    pub const DEFAULT_KEY_WRITE_BUFFER: NonZeroUsize = NZUsize!(1024);
+    pub const DEFAULT_KEY_WRITE_BUFFER: NonZeroUsize = NZUsize!(1024 * 1024);
 
     /// The default value write buffer size.
-    pub const DEFAULT_VALUE_WRITE_BUFFER: NonZeroUsize = NZUsize!(1024);
+    pub const DEFAULT_VALUE_WRITE_BUFFER: NonZeroUsize = NZUsize!(1024 * 1024);
 
     /// The default blocks per epoch.
     pub const DEFAULT_BLOCKS_PER_EPOCH: NonZeroU64 = NZU64!(20);
@@ -114,6 +114,42 @@ impl ActorInitializer {
         FB: Blocks<Block = B>,
         A: Acknowledgement,
     {
+        Self::init_with_strategy(
+            context,
+            finalizations_by_height,
+            finalized_blocks,
+            provider,
+            page_cache,
+            block_codec_config,
+            Sequential,
+        )
+        .await
+    }
+
+    /// Initializes the marshal actor with a custom verification strategy.
+    #[allow(clippy::type_complexity)]
+    pub async fn init_with_strategy<E, B, P, FC, FB, A, S>(
+        context: E,
+        finalizations_by_height: FC,
+        finalized_blocks: FB,
+        provider: P,
+        page_cache: CacheRef,
+        block_codec_config: B::Cfg,
+        strategy: S,
+    ) -> (
+        Actor<E, Standard<B>, P, FC, FB, FixedEpocher, S, A>,
+        Mailbox<P::Scheme, Standard<B>>,
+        Height,
+    )
+    where
+        E: BufferPooler + CryptoRngCore + Spawner + Metrics + Clock + Storage,
+        B: Block,
+        P: Provider<Scope = Epoch, Scheme: Scheme<B::Digest>>,
+        FC: Certificates<BlockDigest = B::Digest, Commitment = B::Digest, Scheme = P::Scheme>,
+        FB: Blocks<Block = B>,
+        A: Acknowledgement,
+        S: Strategy,
+    {
         let config = Config {
             provider,
             epocher: FixedEpocher::new(Self::DEFAULT_BLOCKS_PER_EPOCH),
@@ -128,7 +164,7 @@ impl ActorInitializer {
             block_codec_config,
             max_repair: Self::DEFAULT_MAX_REPAIR,
             max_pending_acks: NZUsize!(1024),
-            strategy: Sequential,
+            strategy,
         };
 
         Actor::init(context, finalizations_by_height, finalized_blocks, config).await
@@ -188,12 +224,12 @@ mod tests {
     #[test]
     fn test_defaults() {
         assert_eq!(ActorInitializer::DEFAULT_MAILBOX_SIZE, 1024);
-        assert_eq!(ActorInitializer::DEFAULT_VIEW_RETENTION_TIMEOUT, ViewDelta::new(10));
-        assert_eq!(ActorInitializer::DEFAULT_MAX_REPAIR.get(), 10);
-        assert_eq!(ActorInitializer::DEFAULT_PRUNABLE_ITEMS_PER_SECTION.get(), 10);
-        assert_eq!(ActorInitializer::DEFAULT_REPLAY_BUFFER.get(), 1024);
-        assert_eq!(ActorInitializer::DEFAULT_KEY_WRITE_BUFFER.get(), 1024);
-        assert_eq!(ActorInitializer::DEFAULT_VALUE_WRITE_BUFFER.get(), 1024);
+        assert_eq!(ActorInitializer::DEFAULT_VIEW_RETENTION_TIMEOUT, ViewDelta::new(2560));
+        assert_eq!(ActorInitializer::DEFAULT_MAX_REPAIR.get(), 128);
+        assert_eq!(ActorInitializer::DEFAULT_PRUNABLE_ITEMS_PER_SECTION.get(), 4_096);
+        assert_eq!(ActorInitializer::DEFAULT_REPLAY_BUFFER.get(), 8 * 1024 * 1024);
+        assert_eq!(ActorInitializer::DEFAULT_KEY_WRITE_BUFFER.get(), 1024 * 1024);
+        assert_eq!(ActorInitializer::DEFAULT_VALUE_WRITE_BUFFER.get(), 1024 * 1024);
         assert_eq!(ActorInitializer::DEFAULT_BLOCKS_PER_EPOCH.get(), 20);
         assert_eq!(ActorInitializer::DEFAULT_PARTITION_PREFIX, "marshal");
     }

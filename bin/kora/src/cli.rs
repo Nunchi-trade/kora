@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 use kora_config::NodeConfig;
 use kora_domain::BootstrapConfig;
 use kora_rpc::NodeState;
-use kora_runner::{ProductionRunner, load_threshold_scheme};
+use kora_runner::{ProductionRunner, load_threshold_scheme, runtime_storage_directory};
 use kora_service::LegacyNodeService;
 
 #[derive(Parser, Debug)]
@@ -194,9 +194,10 @@ impl Cli {
             "Starting secondary peer"
         );
 
+        let runtime_dir = runtime_storage_directory(&config.data_dir);
+        tracing::info!(runtime_dir = %runtime_dir.display(), "Starting Commonware runtime");
         let executor = commonware_runtime::tokio::Runner::new(
-            commonware_runtime::tokio::Config::default()
-                .with_storage_directory(config.data_dir.join("runtime")),
+            commonware_runtime::tokio::Config::default().with_storage_directory(runtime_dir),
         );
         executor.start(|context| async move {
             let mut transport = config

@@ -1,0 +1,7 @@
+=== TEST 2: two-node restart (validator-node2 + validator-node3) ===
+[baseline 15s]
+[stopping validator-node2 validator-node3]
+[while-down 45s - no quorum]
+[starting validator-node2 validator-node3]
+[post-restart 180s]
+saved to /root/daeji/repro-logs/test2-two-node-restart-20260520T174131Z

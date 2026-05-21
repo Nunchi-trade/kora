@@ -11,3 +11,10 @@ node_modules/
 *~
 .DS_Store
 Thumbs.db
+
+# Documentation - exclude markdown but keep README files needed by crate docs
+*.md
+!README.md
+!bin/**/README.md
+!crates/**/README.md
+!docker/README.md
