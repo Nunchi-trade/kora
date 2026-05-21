@@ -124,3 +124,4 @@ the default genesis timestamp is `0`.
   confirms the ledger honours the configured genesis timestamp.
 - **E2E harness**: The full e2e test suite exercises real-timestamp proposals
   end-to-end across multiple simulated nodes.
+- All proposal tests pass `now_secs` to validate the timestamp threading.
