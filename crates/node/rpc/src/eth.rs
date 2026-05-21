@@ -880,7 +880,7 @@ mod tests {
     use sha3::{Digest as _, Keccak256};
 
     use super::*;
-    use crate::state_provider::{NoopStateProvider, StateProvider};
+    use crate::state_provider::NoopStateProvider;
 
     #[derive(Clone, Debug)]
     struct MockFeeStateProvider {
@@ -1536,5 +1536,102 @@ mod tests {
             &tx_data[..],
             "callback receives the caller's tx bytes verbatim — no re-encoding, no truncation"
         );
+    }
+
+    // --- Unit tests for helper functions ---
+
+    #[test]
+    fn calculate_next_base_fee_at_target() {
+        // Gas used == target (half of limit): base fee unchanged.
+        let base_fee = gwei(10);
+        assert_eq!(calculate_next_base_fee(base_fee, 15_000_000, 30_000_000), base_fee);
+    }
+
+    #[test]
+    fn calculate_next_base_fee_above_target() {
+        let next = calculate_next_base_fee(gwei(10), 20_000_000, 30_000_000);
+        assert!(next > gwei(10), "base fee should increase when gas exceeds target");
+    }
+
+    #[test]
+    fn calculate_next_base_fee_below_target() {
+        let next = calculate_next_base_fee(gwei(10), 5_000_000, 30_000_000);
+        assert!(next < gwei(10), "base fee should decrease when gas is below target");
+    }
+
+    #[test]
+    fn calculate_next_base_fee_zero_gas_limit() {
+        assert_eq!(calculate_next_base_fee(gwei(10), 0, 0), gwei(10));
+    }
+
+    #[test]
+    fn percentile_value_at_extremes() {
+        let mut values = vec![gwei(1), gwei(5), gwei(10)];
+        assert_eq!(percentile_value(&mut values, 0), Some(gwei(1)));
+        assert_eq!(percentile_value(&mut values, 100), Some(gwei(10)));
+    }
+
+    #[test]
+    fn percentile_value_empty_returns_none() {
+        let mut values: Vec<U256> = vec![];
+        assert_eq!(percentile_value(&mut values, 50), None);
+    }
+
+    #[test]
+    fn resolve_fee_history_newest_earliest_tag() {
+        let result = resolve_fee_history_newest(BlockNumberOrTag::Tag(BlockTag::Earliest), 1000);
+        assert_eq!(result, 0);
+    }
+
+    #[tokio::test]
+    async fn fee_history_multi_block_returns_correct_structure() {
+        let provider = MockFeeStateProvider::new(vec![
+            make_fee_block(0, gwei(1), 10_000_000, 30_000_000, vec![gwei(2)]),
+            make_fee_block(1, gwei(2), 20_000_000, 30_000_000, vec![gwei(4)]),
+            make_fee_block(2, gwei(3), 25_000_000, 30_000_000, vec![gwei(6)]),
+        ]);
+        let api = EthApiImpl::new(1, provider);
+
+        let history = EthApiServer::fee_history(&api, U64::from(3), BlockNumberOrTag::Latest, None)
+            .await
+            .unwrap();
+
+        assert_eq!(history.oldest_block, U64::ZERO);
+        // 3 blocks + 1 predicted next base fee = 4 entries.
+        assert_eq!(history.base_fee_per_gas.len(), 4);
+        assert_eq!(history.gas_used_ratio.len(), 3);
+        assert!(history.reward.is_none());
+    }
+
+    #[test]
+    fn effective_gas_price_for_sampling_legacy_tx() {
+        let tx = RpcTransaction {
+            hash: B256::ZERO,
+            nonce: U64::ZERO,
+            block_hash: None,
+            block_number: None,
+            transaction_index: None,
+            from: Address::ZERO,
+            to: None,
+            value: U256::ZERO,
+            gas: U64::from(21_000),
+            gas_price: gwei(15),
+            input: Bytes::new(),
+            tx_type: U64::ZERO,
+            chain_id: None,
+            max_fee_per_gas: None,
+            max_priority_fee_per_gas: None,
+            v: U64::ZERO,
+            r: U256::ZERO,
+            s: U256::ZERO,
+        };
+
+        assert_eq!(effective_gas_price_for_sampling(&tx, gwei(1)), gwei(15));
+    }
+
+    #[test]
+    fn block_gas_used_ratio_edge_cases() {
+        assert_eq!(block_gas_used_ratio(100, 0), 0.0);
+        assert_eq!(block_gas_used_ratio(30_000_000, 30_000_000), 1.0);
     }
 }
