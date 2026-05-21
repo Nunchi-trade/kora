@@ -2,7 +2,10 @@
 
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 
-use alloy_consensus::{Transaction as _, TxEnvelope, transaction::SignerRecoverable as _};
+use alloy_consensus::{
+    Transaction as _, TxEnvelope,
+    transaction::{SignerRecoverable as _, to_eip155_value},
+};
 use alloy_eips::eip2718::Decodable2718 as _;
 use alloy_primitives::{Address, B256, Bytes, U64, U256};
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
@@ -512,10 +515,21 @@ fn raw_tx_to_pending_rpc(data: &Bytes) -> Result<RpcTransaction, RpcError> {
         chain_id: envelope.chain_id().map(U64::from),
         max_fee_per_gas: max_fee_per_gas(&envelope).map(U256::from),
         max_priority_fee_per_gas: max_priority_fee_per_gas(&envelope).map(U256::from),
-        v: U256::from(u64::from(signature.v())),
+        v: U256::from(signature_v(&envelope)),
         r: signature.r(),
         s: signature.s(),
     })
+}
+
+fn signature_v(envelope: &TxEnvelope) -> u128 {
+    let y_parity = envelope.signature().v();
+    match envelope {
+        TxEnvelope::Legacy(tx) => to_eip155_value(y_parity, tx.tx().chain_id),
+        TxEnvelope::Eip2930(_)
+        | TxEnvelope::Eip1559(_)
+        | TxEnvelope::Eip4844(_)
+        | TxEnvelope::Eip7702(_) => u128::from(y_parity),
+    }
 }
 
 const fn transaction_type(envelope: &TxEnvelope) -> u64 {
