@@ -464,20 +464,26 @@ impl<S: StateProvider + 'static> EthApiServer for EthApiImpl<S> {
         // Initialize the cursor so the first `getFilterChanges` starts at
         // `from_block` (inclusive) when explicitly provided, rather than
         // always starting from the current head.
-        let last_poll_block = match &filter.from_block {
-            Some(BlockNumberOrTag::Number(n)) => {
-                let from = n.to::<u64>();
-                // Cursor is *last included* block, so subtract 1 so the
-                // first poll begins at `from`. For block 0 we use `None`
-                // to represent "nothing polled yet".
-                if from == 0 { None } else { Some(from - 1) }
+        let last_poll_block = if filter.block_hash.is_some() {
+            // block_hash filters are single-block; `None` ensures the
+            // first poll returns results, and subsequent polls return empty.
+            None
+        } else {
+            match &filter.from_block {
+                Some(BlockNumberOrTag::Number(n)) => {
+                    let from = n.to::<u64>();
+                    // Cursor is *last included* block, so subtract 1 so the
+                    // first poll begins at `from`. For block 0 we use `None`
+                    // to represent "nothing polled yet".
+                    if from == 0 { None } else { Some(from - 1) }
+                }
+                Some(BlockNumberOrTag::Tag(crate::types::BlockTag::Earliest)) => {
+                    // Start from genesis: no blocks polled yet.
+                    None
+                }
+                // latest / pending / safe / finalized / default -> current head
+                _ => Some(head),
             }
-            Some(BlockNumberOrTag::Tag(crate::types::BlockTag::Earliest)) => {
-                // Start from genesis: no blocks polled yet.
-                None
-            }
-            // latest / pending / safe / finalized / default -> current head
-            _ => Some(head),
         };
         let id = self.filter_store.create(Filter::Log { criteria: filter, last_poll_block });
         Ok(U256::from(id))
@@ -501,8 +507,7 @@ impl<S: StateProvider + 'static> EthApiServer for EthApiImpl<S> {
         let id = filter_id_to_u64(filter_id).ok_or(RpcError::FilterNotFound)?;
         let entry = self.filter_store.get(id).ok_or(RpcError::FilterNotFound)?;
 
-        // Read filter state under the lock, then release before any async I/O
-        // (Fix 3: minimize the locked section across `.await` points).
+        // Read filter state under the lock, then release before any async I/O.
         enum FilterSnapshot {
             Log { criteria: RpcLogFilter, last_poll_block: Option<u64> },
             Block { last_poll_block: u64 },
@@ -539,12 +544,17 @@ impl<S: StateProvider + 'static> EthApiServer for EthApiImpl<S> {
                     return Ok(FilterChanges::Logs(Vec::new()));
                 }
 
-                // Fix 2: preserve the original `to_block` / `block_hash`.
+                // Preserve the original `to_block` / `block_hash`.
                 // Only override `from_block` to advance the cursor, and
                 // only cap `to_block` at head when no fixed bound was set.
                 let changes_filter = if criteria.block_hash.is_some() {
-                    // block_hash filters are single-block: pass criteria
-                    // unchanged (they ignore from_block/to_block).
+                    // block_hash filters are single-block and already returned
+                    // their results on the first poll (when last_poll_block was
+                    // None). Subsequent polls always return empty.
+                    if last_poll_block.is_some() {
+                        entry.touch();
+                        return Ok(FilterChanges::Logs(Vec::new()));
+                    }
                     criteria.clone()
                 } else {
                     let from = last_poll_block.map(|lpb| lpb.saturating_add(1)).unwrap_or(0);
@@ -584,7 +594,7 @@ impl<S: StateProvider + 'static> EthApiServer for EthApiImpl<S> {
 
                 let provider = self.state_provider.read().await;
                 let mut hashes = Vec::new();
-                // Fix 4: track the highest block that was actually observed
+                // Track the highest block that was actually observed
                 // rather than blindly advancing to `head`.
                 let mut highest_observed = last_poll_block;
                 for block_num in last_poll_block.saturating_add(1)..=head {
@@ -605,8 +615,7 @@ impl<S: StateProvider + 'static> EthApiServer for EthApiImpl<S> {
                 Ok(FilterChanges::Hashes(hashes))
             }
             FilterSnapshot::PendingTx { known_hashes, last_seen_index } => {
-                // Fix 5: return new pending tx hashes in insertion order
-                // instead of sorting lexicographically.
+                // Return new pending tx hashes in insertion order.
                 let tx_order = self.pending_tx_order.read().await;
                 let new_hashes: Vec<B256> = tx_order
                     .iter()
@@ -727,11 +736,12 @@ impl Web3ApiServer for Web3ApiImpl {
     }
 }
 
-fn filter_id_to_u64(filter_id: U256) -> Option<u64> {
-    if filter_id > U256::from(u64::MAX) {
+const fn filter_id_to_u64(filter_id: U256) -> Option<u64> {
+    let limbs = filter_id.as_limbs();
+    if limbs[1] != 0 || limbs[2] != 0 || limbs[3] != 0 {
         return None;
     }
-    Some(filter_id.to::<u64>())
+    Some(limbs[0])
 }
 
 fn raw_tx_to_pending_rpc(data: &Bytes) -> Result<RpcTransaction, RpcError> {
@@ -1243,5 +1253,71 @@ mod tests {
             panic!("pending transaction filter should return hashes");
         };
         assert!(hashes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn eth_log_filter_block_hash_returns_once() {
+        let provider = TestStateProvider::default();
+        let target = Address::repeat_byte(0x11);
+        let topic = B256::repeat_byte(0xaa);
+        let block_hash = B256::repeat_byte(1);
+
+        provider.insert_block(1, block_hash).await;
+        provider.insert_log(1, target, vec![topic]).await;
+
+        let api = EthApiImpl::new(1, provider.clone());
+        let filter_id = EthApiServer::new_filter(
+            &api,
+            RpcLogFilter { block_hash: Some(block_hash), ..RpcLogFilter::default() },
+        )
+        .await
+        .unwrap();
+
+        // First poll returns the matching logs.
+        let changes = EthApiServer::get_filter_changes(&api, filter_id).await.unwrap();
+        let FilterChanges::Logs(logs) = changes else {
+            panic!("log filter should return logs");
+        };
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].address, target);
+
+        // Advance the chain and confirm subsequent polls return empty.
+        provider.insert_block(2, B256::repeat_byte(2)).await;
+        let changes = EthApiServer::get_filter_changes(&api, filter_id).await.unwrap();
+        assert_eq!(changes, FilterChanges::Logs(Vec::new()));
+    }
+
+    #[tokio::test]
+    async fn eth_get_filter_logs_rejects_non_log_filter() {
+        let provider = TestStateProvider::default();
+        provider.insert_block(1, B256::repeat_byte(1)).await;
+        let api = EthApiImpl::new(1, provider);
+
+        let filter_id = EthApiServer::new_block_filter(&api).await.unwrap();
+        let err = EthApiServer::get_filter_logs(&api, filter_id).await.unwrap_err();
+        assert_eq!(err.code(), crate::error_codes::SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn eth_get_filter_changes_invalid_id() {
+        let api = EthApiImpl::new(1, NoopStateProvider);
+
+        // Non-existent filter id.
+        let err = EthApiServer::get_filter_changes(&api, U256::from(999)).await.unwrap_err();
+        assert_eq!(err.code(), crate::error_codes::SERVER_ERROR);
+
+        // Overflowing filter id (> u64::MAX).
+        let overflow = U256::from(u64::MAX).wrapping_add(U256::from(1));
+        let err = EthApiServer::get_filter_changes(&api, overflow).await.unwrap_err();
+        assert_eq!(err.code(), crate::error_codes::SERVER_ERROR);
+    }
+
+    #[test]
+    fn filter_id_to_u64_edge_cases() {
+        assert_eq!(filter_id_to_u64(U256::ZERO), Some(0));
+        assert_eq!(filter_id_to_u64(U256::from(1)), Some(1));
+        assert_eq!(filter_id_to_u64(U256::from(u64::MAX)), Some(u64::MAX));
+        assert_eq!(filter_id_to_u64(U256::from(u64::MAX).wrapping_add(U256::from(1))), None);
+        assert_eq!(filter_id_to_u64(U256::MAX), None);
     }
 }

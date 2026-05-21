@@ -26,7 +26,7 @@ pub(crate) const DEFAULT_MAX_FILTERS: usize = 1024;
 pub(crate) type FilterId = u64;
 
 /// Response payload for `eth_getFilterChanges`.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum FilterChanges {
     /// Log filter changes.
