@@ -311,6 +311,11 @@ mod tests {
     }
 
     #[test]
+    fn rate_limit_config_default_is_not_disabled() {
+        assert!(!RateLimitConfig::default().is_disabled());
+    }
+
+    #[test]
     fn rpc_server_config_clone() {
         let original = RpcServerConfig::default().with_rate_limit(250).with_max_connections(75);
         let cloned = original.clone();

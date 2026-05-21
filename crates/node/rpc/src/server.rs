@@ -715,8 +715,44 @@ mod tests {
     }
 
     #[test]
+    fn token_bucket_zero_rps_rejects_all() {
+        let start = Instant::now();
+        let mut bucket =
+            TokenBucket::new(RateLimitConfig { requests_per_second: 0, burst_size: 100 }, start);
+
+        // With requests_per_second=0, burst_size is forced to 0 and no tokens are ever added.
+        assert!(!bucket.try_acquire_at(start));
+        assert!(!bucket.try_acquire_at(start + Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn token_bucket_does_not_exceed_burst() {
+        let start = Instant::now();
+        let mut bucket =
+            TokenBucket::new(RateLimitConfig { requests_per_second: 100, burst_size: 3 }, start);
+
+        // Drain all tokens.
+        assert!(bucket.try_acquire_at(start));
+        assert!(bucket.try_acquire_at(start));
+        assert!(bucket.try_acquire_at(start));
+        assert!(!bucket.try_acquire_at(start));
+
+        // Wait long enough for many tokens to accumulate, but cap at burst_size.
+        let much_later = start + Duration::from_secs(60);
+        assert!(bucket.try_acquire_at(much_later));
+        assert!(bucket.try_acquire_at(much_later));
+        assert!(bucket.try_acquire_at(much_later));
+        assert!(!bucket.try_acquire_at(much_later));
+    }
+
+    #[test]
     fn disabled_rate_limit_does_not_build_limiter() {
         assert!(SharedRateLimiter::new(RateLimitConfig::disabled()).is_none());
+    }
+
+    #[test]
+    fn rate_limit_allows_with_no_limiter() {
+        assert!(rate_limit_allows(&None));
     }
 
     #[test]
