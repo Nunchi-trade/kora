@@ -346,15 +346,18 @@ mod tests {
             .with_account(addr, test_account_with_storage(1, 100, slot, U256::from(777)));
 
         let mut changes = ChangeSet::new();
-        changes.accounts.insert(addr, AccountUpdate {
-            created: false,
-            selfdestructed: true,
-            nonce: 0,
-            balance: U256::ZERO,
-            code_hash: B256::ZERO,
-            code: None,
-            storage: BTreeMap::new(),
-        });
+        changes.accounts.insert(
+            addr,
+            AccountUpdate {
+                created: false,
+                selfdestructed: true,
+                nonce: 0,
+                balance: U256::ZERO,
+                code_hash: B256::ZERO,
+                code: None,
+                storage: BTreeMap::new(),
+            },
+        );
 
         let overlay = OverlayState::new(base, changes);
 
@@ -370,15 +373,18 @@ mod tests {
             .with_account(addr, test_account_with_storage(1, 100, slot, U256::from(123)));
 
         let mut changes = ChangeSet::new();
-        changes.accounts.insert(addr, AccountUpdate {
-            created: true,
-            selfdestructed: false,
-            nonce: 0,
-            balance: U256::ZERO,
-            code_hash: B256::ZERO,
-            code: None,
-            storage: BTreeMap::new(),
-        });
+        changes.accounts.insert(
+            addr,
+            AccountUpdate {
+                created: true,
+                selfdestructed: false,
+                nonce: 0,
+                balance: U256::ZERO,
+                code_hash: B256::ZERO,
+                code: None,
+                storage: BTreeMap::new(),
+            },
+        );
 
         let overlay = OverlayState::new(base, changes);
 
@@ -434,15 +440,18 @@ mod tests {
 
         let base = MockStateDb::new();
         let mut changes = ChangeSet::new();
-        changes.accounts.insert(addr, AccountUpdate {
-            created: true,
-            selfdestructed: false,
-            nonce: 1,
-            balance: U256::from(500),
-            code_hash,
-            code: Some(vec![0x60, 0x00]),
-            storage: BTreeMap::new(),
-        });
+        changes.accounts.insert(
+            addr,
+            AccountUpdate {
+                created: true,
+                selfdestructed: false,
+                nonce: 1,
+                balance: U256::from(500),
+                code_hash,
+                code: Some(vec![0x60, 0x00]),
+                storage: BTreeMap::new(),
+            },
+        );
 
         let overlay = OverlayState::new(base, changes);
 
@@ -454,15 +463,18 @@ mod tests {
         let addr = Address::repeat_byte(0x07);
         let code_hash = B256::repeat_byte(0xCD);
 
-        let base = MockStateDb::new().with_account(addr, AccountUpdate {
-            created: false,
-            selfdestructed: false,
-            nonce: 0,
-            balance: U256::ZERO,
-            code_hash,
-            code: None,
-            storage: BTreeMap::new(),
-        });
+        let base = MockStateDb::new().with_account(
+            addr,
+            AccountUpdate {
+                created: false,
+                selfdestructed: false,
+                nonce: 0,
+                balance: U256::ZERO,
+                code_hash,
+                code: None,
+                storage: BTreeMap::new(),
+            },
+        );
         let overlay = OverlayState::new(base, ChangeSet::new());
 
         assert_eq!(overlay.code_hash(&addr).await.unwrap(), code_hash);
@@ -476,15 +488,18 @@ mod tests {
 
         let base = MockStateDb::new();
         let mut changes = ChangeSet::new();
-        changes.accounts.insert(addr, AccountUpdate {
-            created: true,
-            selfdestructed: false,
-            nonce: 1,
-            balance: U256::from(100),
-            code_hash,
-            code: Some(code_bytes.clone()),
-            storage: BTreeMap::new(),
-        });
+        changes.accounts.insert(
+            addr,
+            AccountUpdate {
+                created: true,
+                selfdestructed: false,
+                nonce: 1,
+                balance: U256::from(100),
+                code_hash,
+                code: Some(code_bytes.clone()),
+                storage: BTreeMap::new(),
+            },
+        );
 
         let overlay = OverlayState::new(base, changes);
 
@@ -497,15 +512,18 @@ mod tests {
         let code_hash = B256::repeat_byte(0x12);
         let code_bytes = vec![0x61, 0x02, 0x03];
 
-        let base = MockStateDb::new().with_account(addr, AccountUpdate {
-            created: false,
-            selfdestructed: false,
-            nonce: 0,
-            balance: U256::ZERO,
-            code_hash,
-            code: Some(code_bytes.clone()),
-            storage: BTreeMap::new(),
-        });
+        let base = MockStateDb::new().with_account(
+            addr,
+            AccountUpdate {
+                created: false,
+                selfdestructed: false,
+                nonce: 0,
+                balance: U256::ZERO,
+                code_hash,
+                code: Some(code_bytes.clone()),
+                storage: BTreeMap::new(),
+            },
+        );
         let overlay = OverlayState::new(base, ChangeSet::new());
 
         assert_eq!(overlay.code(&code_hash).await.unwrap(), Bytes::from(code_bytes));
