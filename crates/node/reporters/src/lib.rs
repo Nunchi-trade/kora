@@ -245,7 +245,7 @@ struct TxMetadata {
     chain_id: Option<u64>,
     max_fee_per_gas: Option<u128>,
     max_priority_fee_per_gas: Option<u128>,
-    v: u64,
+    v: u128,
     r: U256,
     s: U256,
     input: Bytes,
@@ -393,16 +393,15 @@ fn decode_tx_metadata(tx_bytes: &Bytes) -> Option<TxMetadata> {
     })
 }
 
-fn signature_v(envelope: &TxEnvelope) -> u64 {
+fn signature_v(envelope: &TxEnvelope) -> u128 {
     let y_parity = envelope.signature().v();
-    let value = match envelope {
+    match envelope {
         TxEnvelope::Legacy(tx) => to_eip155_value(y_parity, tx.tx().chain_id),
         TxEnvelope::Eip2930(_)
         | TxEnvelope::Eip1559(_)
         | TxEnvelope::Eip4844(_)
         | TxEnvelope::Eip7702(_) => u128::from(y_parity),
-    };
-    value.try_into().unwrap_or(u64::MAX)
+    }
 }
 
 const fn transaction_type(envelope: &TxEnvelope) -> u8 {

@@ -346,7 +346,7 @@ fn indexed_tx_to_rpc(tx: IndexedTransaction) -> RpcTransaction {
         chain_id: tx.chain_id.map(U64::from),
         max_fee_per_gas: tx.max_fee_per_gas.map(U256::from),
         max_priority_fee_per_gas: tx.max_priority_fee_per_gas.map(U256::from),
-        v: U64::from(tx.v),
+        v: U256::from(tx.v),
         r: tx.r,
         s: tx.s,
     }
@@ -544,7 +544,7 @@ mod tests {
         assert_eq!(rpc_tx.chain_id, Some(U64::from(1337)));
         assert_eq!(rpc_tx.max_fee_per_gas, Some(U256::from(20_000_000_000u64)));
         assert_eq!(rpc_tx.max_priority_fee_per_gas, Some(U256::from(1_500_000_000u64)));
-        assert_eq!(rpc_tx.v, U64::from(1));
+        assert_eq!(rpc_tx.v, U256::from(1));
         assert_eq!(rpc_tx.r, U256::from(123));
         assert_eq!(rpc_tx.s, U256::from(456));
     }

@@ -54,8 +54,8 @@ pub struct IndexedTransaction {
     pub max_fee_per_gas: Option<u128>,
     /// Max priority fee per gas (EIP-1559 and later typed transactions).
     pub max_priority_fee_per_gas: Option<u128>,
-    /// V component of the transaction signature.
-    pub v: u64,
+    /// V component of the transaction signature (u128 to represent the full EIP-155 range).
+    pub v: u128,
     /// R component of the transaction signature.
     pub r: U256,
     /// S component of the transaction signature.
