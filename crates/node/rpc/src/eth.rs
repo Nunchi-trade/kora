@@ -613,18 +613,36 @@ async fn estimate_recent_fees<S: StateProvider>(
         latest_base_fee = Some(base_fee);
 
         if let BlockTransactions::Full(txs) = &block.transactions {
-            gas_prices.extend(txs.iter().map(|tx| tx.gas_price));
+            gas_prices.extend(txs.iter().map(|tx| effective_gas_price_for_sampling(tx, base_fee)));
             priority_fees.extend(txs.iter().map(|tx| effective_priority_fee(tx, base_fee)));
         }
     }
 
     let priority_fee =
         percentile_value(&mut priority_fees, config.percentile).unwrap_or(config.min_priority_fee);
-    let priority_fee = clamp_fee(priority_fee, config.min_priority_fee, config.max_price);
+    let priority_fee = priority_fee.max(config.min_priority_fee);
     let latest_base_fee = latest_base_fee.unwrap_or_else(default_base_fee);
+
+    // Clamp priority fee so that base_fee + priority_fee does not exceed
+    // max_price (when the base fee alone is still under the cap).
+    let priority_fee = if latest_base_fee < config.max_price {
+        priority_fee.min(config.max_price.saturating_sub(latest_base_fee))
+    } else {
+        priority_fee
+    };
+
     let min_gas_price = config.min_price.max(latest_base_fee.saturating_add(priority_fee));
     let gas_price = percentile_value(&mut gas_prices, config.percentile).unwrap_or(min_gas_price);
-    let gas_price = clamp_fee(gas_price, min_gas_price, config.max_price);
+    let gas_price = gas_price.max(min_gas_price);
+
+    // Always enforce the hard cap unless the base fee alone exceeds it --
+    // in that case the chain's base fee is already above the configured
+    // maximum and we must still return a usable price.
+    let gas_price = if latest_base_fee <= config.max_price {
+        gas_price.min(config.max_price)
+    } else {
+        gas_price
+    };
 
     GasOracleEstimate { gas_price, priority_fee }
 }
@@ -651,11 +669,6 @@ fn resolve_fee_history_newest(newest_block: BlockNumberOrTag, head: u64) -> u64 
 
 fn default_base_fee() -> U256 {
     U256::from(GWEI)
-}
-
-fn clamp_fee(value: U256, min: U256, max: U256) -> U256 {
-    let value = value.max(min);
-    if max >= min { value.min(max) } else { value }
 }
 
 fn percentile_value(values: &mut [U256], percentile: u8) -> Option<U256> {
@@ -731,7 +744,33 @@ fn effective_priority_fee(tx: &RpcTransaction, base_fee: U256) -> U256 {
         (Some(max_fee), Some(max_priority_fee)) => {
             max_priority_fee.min(max_fee.saturating_sub(base_fee))
         }
+        _ if is_dynamic_fee_type(tx) => {
+            // Indexed EIP-1559 (or later) tx without populated EIP-1559
+            // fields: `gas_price` may represent `max_fee_per_gas`, so we
+            // cannot reliably derive the tip. Return zero to avoid
+            // inflating estimates.
+            U256::ZERO
+        }
         _ => tx.gas_price.saturating_sub(base_fee),
+    }
+}
+
+/// Returns `true` when the transaction type uses dynamic-fee semantics
+/// (types 2, 3, 4 -- EIP-1559, EIP-4844, EIP-7702).
+fn is_dynamic_fee_type(tx: &RpcTransaction) -> bool {
+    tx.tx_type.to::<u64>() >= 2
+}
+
+/// Derives the effective gas price a transaction actually paid, accounting
+/// for the difference between legacy `gas_price` and EIP-1559
+/// `min(max_fee, base_fee + tip)`.
+fn effective_gas_price_for_sampling(tx: &RpcTransaction, base_fee: U256) -> U256 {
+    match (tx.max_fee_per_gas, tx.max_priority_fee_per_gas) {
+        (Some(max_fee), Some(max_priority_fee)) => {
+            let tip = max_priority_fee.min(max_fee.saturating_sub(base_fee));
+            base_fee.saturating_add(tip).min(max_fee)
+        }
+        _ => tx.gas_price,
     }
 }
 
@@ -963,6 +1002,12 @@ mod tests {
         U256::from(value * GWEI)
     }
 
+    /// EIP-1559 transaction parameters for test block construction.
+    struct Eip1559TxParams {
+        max_fee: U256,
+        max_priority_fee: U256,
+    }
+
     fn make_fee_block(
         number: u64,
         base_fee_per_gas: U256,
@@ -993,6 +1038,73 @@ mod tests {
                 v: U64::ZERO,
                 r: U256::ZERO,
                 s: U256::ZERO,
+            })
+            .collect();
+
+        RpcBlock {
+            hash: block_hash,
+            parent_hash: B256::ZERO,
+            number: U64::from(number),
+            state_root: B256::ZERO,
+            transactions_root: B256::ZERO,
+            receipts_root: B256::ZERO,
+            logs_bloom: Bytes::new(),
+            timestamp: U64::from(number),
+            gas_limit: U64::from(gas_limit),
+            gas_used: U64::from(gas_used),
+            extra_data: Bytes::new(),
+            mix_hash: B256::ZERO,
+            nonce: Default::default(),
+            base_fee_per_gas: Some(base_fee_per_gas),
+            miner: Address::ZERO,
+            difficulty: U256::ZERO,
+            total_difficulty: U256::ZERO,
+            uncles: vec![],
+            size: U64::ZERO,
+            transactions: BlockTransactions::Full(transactions),
+        }
+    }
+
+    /// Build a block containing EIP-1559 (type 2) transactions with explicit
+    /// `max_fee_per_gas` and `max_priority_fee_per_gas` fields.
+    fn make_eip1559_fee_block(
+        number: u64,
+        base_fee_per_gas: U256,
+        gas_used: u64,
+        gas_limit: u64,
+        txs: Vec<Eip1559TxParams>,
+    ) -> RpcBlock {
+        let block_hash = B256::repeat_byte(number as u8);
+        let transactions = txs
+            .into_iter()
+            .enumerate()
+            .map(|(index, params)| {
+                // Effective gas price = min(max_fee, base_fee + tip)
+                let tip =
+                    params.max_priority_fee.min(params.max_fee.saturating_sub(base_fee_per_gas));
+                let gas_price = base_fee_per_gas.saturating_add(tip).min(params.max_fee);
+                RpcTransaction {
+                    hash: B256::repeat_byte(
+                        (number as u8).wrapping_mul(16).wrapping_add(index as u8),
+                    ),
+                    nonce: U64::from(index as u64),
+                    block_hash: Some(block_hash),
+                    block_number: Some(U64::from(number)),
+                    transaction_index: Some(U64::from(index as u64)),
+                    from: Address::repeat_byte(0x11),
+                    to: Some(Address::repeat_byte(0x22)),
+                    value: U256::ZERO,
+                    gas: U64::from(21_000),
+                    gas_price,
+                    input: Bytes::new(),
+                    tx_type: U64::from(2),
+                    chain_id: Some(U64::from(1)),
+                    max_fee_per_gas: Some(params.max_fee),
+                    max_priority_fee_per_gas: Some(params.max_priority_fee),
+                    v: U64::ZERO,
+                    r: U256::ZERO,
+                    s: U256::ZERO,
+                }
             })
             .collect();
 
@@ -1164,6 +1276,168 @@ mod tests {
 
         let rewards = history.reward.unwrap();
         assert_eq!(rewards, vec![vec![U256::ZERO, U256::ZERO]]);
+    }
+
+    #[test]
+    fn effective_priority_fee_eip1559_uses_min_of_tip_and_headroom() {
+        // EIP-1559 tx: max_fee=10 gwei, max_priority_fee=3 gwei, base_fee=2 gwei.
+        // headroom = max_fee - base_fee = 8 gwei
+        // effective tip = min(3, 8) = 3 gwei
+        let tx = RpcTransaction {
+            hash: B256::ZERO,
+            nonce: U64::ZERO,
+            block_hash: None,
+            block_number: None,
+            transaction_index: None,
+            from: Address::ZERO,
+            to: None,
+            value: U256::ZERO,
+            gas: U64::from(21_000),
+            gas_price: gwei(10),
+            input: Bytes::new(),
+            tx_type: U64::from(2),
+            chain_id: Some(U64::from(1)),
+            max_fee_per_gas: Some(gwei(10)),
+            max_priority_fee_per_gas: Some(gwei(3)),
+            v: U64::ZERO,
+            r: U256::ZERO,
+            s: U256::ZERO,
+        };
+
+        assert_eq!(effective_priority_fee(&tx, gwei(2)), gwei(3));
+    }
+
+    #[test]
+    fn effective_priority_fee_eip1559_caps_at_headroom() {
+        // EIP-1559 tx: max_fee=5 gwei, max_priority_fee=4 gwei, base_fee=3 gwei.
+        // headroom = 5 - 3 = 2 gwei
+        // effective tip = min(4, 2) = 2 gwei
+        let tx = RpcTransaction {
+            hash: B256::ZERO,
+            nonce: U64::ZERO,
+            block_hash: None,
+            block_number: None,
+            transaction_index: None,
+            from: Address::ZERO,
+            to: None,
+            value: U256::ZERO,
+            gas: U64::from(21_000),
+            gas_price: gwei(5),
+            input: Bytes::new(),
+            tx_type: U64::from(2),
+            chain_id: Some(U64::from(1)),
+            max_fee_per_gas: Some(gwei(5)),
+            max_priority_fee_per_gas: Some(gwei(4)),
+            v: U64::ZERO,
+            r: U256::ZERO,
+            s: U256::ZERO,
+        };
+
+        assert_eq!(effective_priority_fee(&tx, gwei(3)), gwei(2));
+    }
+
+    #[test]
+    fn effective_priority_fee_indexed_eip1559_without_fields_returns_zero() {
+        // Indexed EIP-1559 tx where max_fee_per_gas/max_priority_fee_per_gas
+        // are not populated (None), but gas_price holds max_fee_per_gas.
+        // The fallback should return zero rather than inflating the tip.
+        let tx = RpcTransaction {
+            hash: B256::ZERO,
+            nonce: U64::ZERO,
+            block_hash: None,
+            block_number: None,
+            transaction_index: None,
+            from: Address::ZERO,
+            to: None,
+            value: U256::ZERO,
+            gas: U64::from(21_000),
+            gas_price: gwei(20),
+            input: Bytes::new(),
+            tx_type: U64::from(2),
+            chain_id: Some(U64::from(1)),
+            max_fee_per_gas: None,
+            max_priority_fee_per_gas: None,
+            v: U64::ZERO,
+            r: U256::ZERO,
+            s: U256::ZERO,
+        };
+
+        // Without the fix this would return gwei(19), inflating estimates.
+        assert_eq!(effective_priority_fee(&tx, gwei(1)), U256::ZERO);
+    }
+
+    #[tokio::test]
+    async fn gas_price_eip1559_uses_effective_price_not_max_fee() {
+        // base_fee = 2 gwei. A type-2 tx with max_fee=20 gwei, tip=3 gwei.
+        // Effective price = base_fee + min(tip, max_fee - base_fee) = 2+3 = 5 gwei.
+        // Without the fix, the oracle would sample gas_price = max_fee = 20 gwei.
+        let provider = MockFeeStateProvider::new(vec![make_eip1559_fee_block(
+            0,
+            gwei(2),
+            21_000,
+            30_000_000,
+            vec![Eip1559TxParams { max_fee: gwei(20), max_priority_fee: gwei(3) }],
+        )]);
+        let api = EthApiImpl::new(1, provider);
+
+        let gas_price = EthApiServer::gas_price(&api).await.unwrap();
+        // Should be 5 gwei (base + tip), not 20 gwei (max_fee).
+        assert_eq!(gas_price, gwei(5));
+    }
+
+    #[tokio::test]
+    async fn gas_price_never_exceeds_max_price() {
+        // Set up a scenario where min_gas_price (base_fee + priority_fee)
+        // would exceed max_price. Ensure the oracle respects the cap.
+        let config = GasOracleConfig {
+            blocks: 1,
+            percentile: 60,
+            min_price: U256::from(GWEI),
+            max_price: gwei(10),
+            min_priority_fee: U256::from(GWEI),
+        };
+        // base_fee = 8 gwei, tx gas_price = 12 gwei
+        // Without fix: min_gas_price = base_fee + priority_fee could exceed max_price
+        let provider = MockFeeStateProvider::new(vec![make_fee_block(
+            0,
+            gwei(8),
+            21_000,
+            30_000_000,
+            vec![gwei(12)],
+        )]);
+        let api = EthApiImpl::new(1, provider).with_gas_oracle_config(config);
+
+        let gas_price = EthApiServer::gas_price(&api).await.unwrap();
+        assert!(gas_price <= gwei(10), "gas_price {gas_price} should not exceed max_price 10 gwei");
+    }
+
+    #[tokio::test]
+    async fn gas_price_allows_exceeding_max_when_base_fee_above_cap() {
+        // When the base fee alone is above max_price, the oracle must still
+        // return a usable price rather than clamping to max_price.
+        let config = GasOracleConfig {
+            blocks: 1,
+            percentile: 60,
+            min_price: U256::from(GWEI),
+            max_price: gwei(5),
+            min_priority_fee: U256::from(GWEI),
+        };
+        // base_fee = 10 gwei (above max_price of 5 gwei)
+        let provider = MockFeeStateProvider::new(vec![make_fee_block(
+            0,
+            gwei(10),
+            21_000,
+            30_000_000,
+            vec![gwei(12)],
+        )]);
+        let api = EthApiImpl::new(1, provider).with_gas_oracle_config(config);
+
+        let gas_price = EthApiServer::gas_price(&api).await.unwrap();
+        // Must be at least base_fee + min_priority_fee
+        assert!(
+            gas_price >= gwei(11),
+            "gas_price {gas_price} should be at least base_fee + min_priority_fee when base_fee exceeds cap"
+        );
     }
 
     #[test]
