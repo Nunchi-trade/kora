@@ -33,6 +33,8 @@ thiserror.workspace = true
 futures.workspace = true
 
 [dev-dependencies]
+k256.workspace = true
+kora-domain = { path = "../domain", features = ["evm"] }
 rstest = "0.24"
 tokio = { workspace = true, features = ["rt", "macros"] }
 
