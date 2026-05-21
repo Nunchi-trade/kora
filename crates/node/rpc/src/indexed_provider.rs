@@ -186,18 +186,18 @@ impl<S: StateDbRead + Send + Sync + 'static> StateProvider for IndexedStateProvi
             }
         }
 
-        let indexed_logs = self.index.get_logs(&log_filter);
-        let block_number = self.index.head_block_number();
-        let logs = indexed_logs
+        let logs = self
+            .index
+            .get_logs(&log_filter)
             .into_iter()
             .map(|log| RpcLog {
                 address: log.address,
                 topics: log.topics,
                 data: log.data,
-                block_number: U64::from(block_number),
-                transaction_hash: B256::ZERO,
-                transaction_index: U64::ZERO,
-                block_hash: B256::ZERO,
+                block_number: U64::from(log.block_number),
+                transaction_hash: log.transaction_hash,
+                transaction_index: U64::from(log.transaction_index),
+                block_hash: log.block_hash,
                 log_index: U64::from(log.log_index),
                 removed: false,
             })
@@ -342,17 +342,18 @@ fn indexed_tx_to_rpc(tx: IndexedTransaction) -> RpcTransaction {
         gas: U64::from(tx.gas_limit),
         gas_price: U256::from(tx.gas_price),
         input: tx.input,
-        tx_type: U64::ZERO,
-        chain_id: None,
-        max_fee_per_gas: None,
-        max_priority_fee_per_gas: None,
-        v: U64::ZERO,
-        r: U256::ZERO,
-        s: U256::ZERO,
+        tx_type: U64::from(tx.tx_type),
+        chain_id: tx.chain_id.map(U64::from),
+        max_fee_per_gas: tx.max_fee_per_gas.map(U256::from),
+        max_priority_fee_per_gas: tx.max_priority_fee_per_gas.map(U256::from),
+        v: U256::from(tx.v),
+        r: tx.r,
+        s: tx.s,
     }
 }
 
 fn indexed_receipt_to_rpc(receipt: IndexedReceipt) -> RpcTransactionReceipt {
+    let logs_bloom = Bytes::copy_from_slice(receipt.logs_bloom.as_slice());
     let logs = receipt
         .logs
         .into_iter()
@@ -360,10 +361,10 @@ fn indexed_receipt_to_rpc(receipt: IndexedReceipt) -> RpcTransactionReceipt {
             address: log.address,
             topics: log.topics,
             data: log.data,
-            block_number: U64::from(receipt.block_number),
-            transaction_hash: receipt.transaction_hash,
-            transaction_index: U64::from(receipt.transaction_index),
-            block_hash: receipt.block_hash,
+            block_number: U64::from(log.block_number),
+            transaction_hash: log.transaction_hash,
+            transaction_index: U64::from(log.transaction_index),
+            block_hash: log.block_hash,
             log_index: U64::from(log.log_index),
             removed: false,
         })
@@ -380,15 +381,16 @@ fn indexed_receipt_to_rpc(receipt: IndexedReceipt) -> RpcTransactionReceipt {
         gas_used: U64::from(receipt.gas_used),
         contract_address: receipt.contract_address,
         logs,
-        logs_bloom: Bytes::new(),
-        tx_type: U64::ZERO,
+        logs_bloom,
+        tx_type: U64::from(receipt.tx_type),
         status: if receipt.status { U64::from(1) } else { U64::ZERO },
-        effective_gas_price: U256::ZERO,
+        effective_gas_price: U256::from(receipt.effective_gas_price),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use alloy_primitives::Bloom;
     use kora_indexer::IndexedLog;
 
     use super::*;
@@ -468,6 +470,13 @@ mod tests {
             value: U256::ZERO,
             gas_limit: 21_000,
             gas_price: 1_000_000_000,
+            tx_type: 0,
+            chain_id: Some(1337),
+            max_fee_per_gas: None,
+            max_priority_fee_per_gas: None,
+            v: 27,
+            r: U256::from(1),
+            s: U256::from(2),
             input: Bytes::new(),
             nonce: 0,
         }
@@ -489,9 +498,97 @@ mod tests {
                 topics: vec![],
                 data: Bytes::new(),
                 log_index: 0,
+                block_number,
+                block_hash,
+                transaction_hash: tx_hash,
+                transaction_index: 0,
             }],
+            logs_bloom: Bloom::ZERO,
+            tx_type: 0,
+            effective_gas_price: 1_000_000_000,
             status: true,
         }
+    }
+
+    #[test]
+    fn indexed_tx_preserves_eip1559_fields() {
+        let block_hash = B256::repeat_byte(1);
+        let tx_hash = B256::repeat_byte(2);
+        let tx = IndexedTransaction {
+            hash: tx_hash,
+            block_hash,
+            block_number: 7,
+            index: 3,
+            from: Address::repeat_byte(0xaa),
+            to: Some(Address::repeat_byte(0xbb)),
+            value: U256::from(10),
+            gas_limit: 50_000,
+            gas_price: 20_000_000_000,
+            tx_type: 2,
+            chain_id: Some(1337),
+            max_fee_per_gas: Some(20_000_000_000),
+            max_priority_fee_per_gas: Some(1_500_000_000),
+            v: 1,
+            r: U256::from(123),
+            s: U256::from(456),
+            input: Bytes::from_static(&[0xde, 0xad]),
+            nonce: 9,
+        };
+
+        let rpc_tx = indexed_tx_to_rpc(tx);
+
+        assert_eq!(rpc_tx.hash, tx_hash);
+        assert_eq!(rpc_tx.block_hash, Some(block_hash));
+        assert_eq!(rpc_tx.transaction_index, Some(U64::from(3)));
+        assert_eq!(rpc_tx.tx_type, U64::from(2));
+        assert_eq!(rpc_tx.chain_id, Some(U64::from(1337)));
+        assert_eq!(rpc_tx.max_fee_per_gas, Some(U256::from(20_000_000_000u64)));
+        assert_eq!(rpc_tx.max_priority_fee_per_gas, Some(U256::from(1_500_000_000u64)));
+        assert_eq!(rpc_tx.v, U256::from(1));
+        assert_eq!(rpc_tx.r, U256::from(123));
+        assert_eq!(rpc_tx.s, U256::from(456));
+    }
+
+    #[test]
+    fn indexed_receipt_preserves_fee_type_bloom_and_log_metadata() {
+        let block_hash = B256::repeat_byte(1);
+        let tx_hash = B256::repeat_byte(2);
+        let receipt = IndexedReceipt {
+            transaction_hash: tx_hash,
+            block_hash,
+            block_number: 5,
+            transaction_index: 1,
+            from: Address::repeat_byte(0xaa),
+            to: Some(Address::repeat_byte(0xbb)),
+            cumulative_gas_used: 50_000,
+            gas_used: 29_000,
+            contract_address: None,
+            logs: vec![IndexedLog {
+                address: Address::repeat_byte(0xcc),
+                topics: vec![B256::repeat_byte(0xdd)],
+                data: Bytes::from_static(&[0x01, 0x02]),
+                log_index: 4,
+                block_number: 5,
+                block_hash,
+                transaction_hash: tx_hash,
+                transaction_index: 1,
+            }],
+            logs_bloom: Bloom::repeat_byte(0xab),
+            tx_type: 2,
+            effective_gas_price: 12_000_000_000,
+            status: true,
+        };
+
+        let rpc_receipt = indexed_receipt_to_rpc(receipt);
+
+        assert_eq!(rpc_receipt.tx_type, U64::from(2));
+        assert_eq!(rpc_receipt.effective_gas_price, U256::from(12_000_000_000u64));
+        assert_eq!(rpc_receipt.logs_bloom.len(), 256);
+        assert_eq!(rpc_receipt.logs_bloom[0], 0xab);
+        assert_eq!(rpc_receipt.logs[0].block_number, U64::from(5));
+        assert_eq!(rpc_receipt.logs[0].block_hash, block_hash);
+        assert_eq!(rpc_receipt.logs[0].transaction_hash, tx_hash);
+        assert_eq!(rpc_receipt.logs[0].transaction_index, U64::from(1));
     }
 
     #[tokio::test]
@@ -607,6 +704,63 @@ mod tests {
         let receipt = receipt.unwrap();
         assert_eq!(receipt.transaction_hash, tx_hash);
         assert_eq!(receipt.logs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn get_logs_returns_indexed_block_and_transaction_metadata() {
+        let index = Arc::new(BlockIndex::new());
+        let block_hash = B256::repeat_byte(5);
+        let tx_hash = B256::repeat_byte(2);
+        let log_address = Address::repeat_byte(0xcc);
+        let receipt = IndexedReceipt {
+            transaction_hash: tx_hash,
+            block_hash,
+            block_number: 5,
+            transaction_index: 2,
+            from: Address::repeat_byte(0xaa),
+            to: Some(Address::repeat_byte(0xbb)),
+            cumulative_gas_used: 42_000,
+            gas_used: 21_000,
+            contract_address: None,
+            logs: vec![IndexedLog {
+                address: log_address,
+                topics: vec![B256::repeat_byte(0xdd)],
+                data: Bytes::from_static(&[0x01]),
+                log_index: 9,
+                block_number: 5,
+                block_hash,
+                transaction_hash: tx_hash,
+                transaction_index: 2,
+            }],
+            logs_bloom: Bloom::ZERO,
+            tx_type: 2,
+            effective_gas_price: 12_000_000_000,
+            status: true,
+        };
+        index.insert_block(
+            create_test_block(5, block_hash),
+            vec![create_test_tx(tx_hash, block_hash, 5)],
+            vec![receipt],
+        );
+        index.insert_block(create_test_block(10, B256::repeat_byte(10)), vec![], vec![]);
+
+        let provider = IndexedStateProvider::with_chain_id(index, MockState, 1337);
+        let logs = provider
+            .get_logs(RpcLogFilter {
+                from_block: Some(BlockNumberOrTag::Number(U64::from(5))),
+                to_block: Some(BlockNumberOrTag::Number(U64::from(5))),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].address, log_address);
+        assert_eq!(logs[0].block_number, U64::from(5));
+        assert_eq!(logs[0].block_hash, block_hash);
+        assert_eq!(logs[0].transaction_hash, tx_hash);
+        assert_eq!(logs[0].transaction_index, U64::from(2));
+        assert_eq!(logs[0].log_index, U64::from(9));
     }
 
     #[tokio::test]

@@ -3500,6 +3500,7 @@ dependencies = [
  "commonware-cryptography",
  "commonware-runtime",
  "commonware-utils",
+ "k256",
  "kora-consensus",
  "kora-domain",
  "kora-executor",
@@ -3508,6 +3509,7 @@ dependencies = [
  "kora-overlay",
  "kora-qmdb-ledger",
  "kora-rpc",
+ "sha3",
  "tracing",
 ]
 
