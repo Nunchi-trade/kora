@@ -20,9 +20,6 @@ volumes/
 # Documentation
 *.md
 !README.md
-!bin/**/README.md
-!crates/**/README.md
-!docker/README.md
 
 # Test files
 *.test
