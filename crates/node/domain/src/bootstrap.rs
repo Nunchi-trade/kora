@@ -1,4 +1,4 @@
-//! Boostrap configuration.
+//! Bootstrap configuration.
 
 use std::{path::Path, str::FromStr};
 
