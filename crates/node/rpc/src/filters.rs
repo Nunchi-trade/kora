@@ -43,7 +43,9 @@ pub(crate) enum Filter {
         /// Log matching criteria supplied at filter creation.
         criteria: RpcLogFilter,
         /// Last block included by `eth_getFilterChanges`.
-        last_poll_block: u64,
+        /// `None` means no blocks have been polled yet (first poll starts
+        /// from the filter's `from_block`).
+        last_poll_block: Option<u64>,
     },
     /// Block filter cursor.
     Block {
@@ -54,6 +56,10 @@ pub(crate) enum Filter {
     PendingTransaction {
         /// Pending transaction hashes already reported to this filter.
         known_hashes: HashSet<B256>,
+        /// Snapshot index into the shared insertion-order vec at the time
+        /// of last poll (or filter creation). New hashes are those at
+        /// indices >= this value that are not in `known_hashes`.
+        last_seen_index: usize,
     },
 }
 

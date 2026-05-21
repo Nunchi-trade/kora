@@ -225,6 +225,10 @@ pub struct EthApiImpl<S: StateProvider> {
     tx_submit: Option<TxSubmitCallback>,
     state_provider: Arc<RwLock<S>>,
     pending_txs: Arc<RwLock<HashMap<B256, RpcTransaction>>>,
+    /// Insertion-ordered record of pending transaction hashes so that
+    /// `eth_getFilterChanges` for pending-tx filters can return hashes
+    /// in arrival order rather than an arbitrary sorted order.
+    pending_tx_order: Arc<RwLock<Vec<B256>>>,
     filter_store: Arc<FilterStore>,
 }
 
@@ -247,6 +251,7 @@ impl<S: StateProvider + 'static> EthApiImpl<S> {
             tx_submit: None,
             state_provider: Arc::new(RwLock::new(state_provider)),
             pending_txs: Arc::new(RwLock::new(HashMap::new())),
+            pending_tx_order: Arc::new(RwLock::new(Vec::new())),
             filter_store: Arc::new(FilterStore::default()),
         }
     }
@@ -259,6 +264,7 @@ impl<S: StateProvider + 'static> EthApiImpl<S> {
             tx_submit: Some(tx_submit),
             state_provider: Arc::new(RwLock::new(state_provider)),
             pending_txs: Arc::new(RwLock::new(HashMap::new())),
+            pending_tx_order: Arc::new(RwLock::new(Vec::new())),
             filter_store: Arc::new(FilterStore::default()),
         }
     }
@@ -339,6 +345,7 @@ impl<S: StateProvider + 'static> EthApiServer for EthApiImpl<S> {
         }
 
         self.pending_txs.write().await.insert(tx_hash, pending_tx);
+        self.pending_tx_order.write().await.push(tx_hash);
         Ok(tx_hash)
     }
 
@@ -454,7 +461,25 @@ impl<S: StateProvider + 'static> EthApiServer for EthApiImpl<S> {
 
     async fn new_filter(&self, filter: RpcLogFilter) -> RpcResult<U256> {
         let head = self.current_block_number().await;
-        let id = self.filter_store.create(Filter::Log { criteria: filter, last_poll_block: head });
+        // Initialize the cursor so the first `getFilterChanges` starts at
+        // `from_block` (inclusive) when explicitly provided, rather than
+        // always starting from the current head.
+        let last_poll_block = match &filter.from_block {
+            Some(BlockNumberOrTag::Number(n)) => {
+                let from = n.to::<u64>();
+                // Cursor is *last included* block, so subtract 1 so the
+                // first poll begins at `from`. For block 0 we use `None`
+                // to represent "nothing polled yet".
+                if from == 0 { None } else { Some(from - 1) }
+            }
+            Some(BlockNumberOrTag::Tag(crate::types::BlockTag::Earliest)) => {
+                // Start from genesis: no blocks polled yet.
+                None
+            }
+            // latest / pending / safe / finalized / default -> current head
+            _ => Some(head),
+        };
+        let id = self.filter_store.create(Filter::Log { criteria: filter, last_poll_block });
         Ok(U256::from(id))
     }
 
@@ -466,64 +491,141 @@ impl<S: StateProvider + 'static> EthApiServer for EthApiImpl<S> {
 
     async fn new_pending_transaction_filter(&self) -> RpcResult<U256> {
         let known_hashes = self.pending_txs.read().await.keys().copied().collect();
-        let id = self.filter_store.create(Filter::PendingTransaction { known_hashes });
+        let last_seen_index = self.pending_tx_order.read().await.len();
+        let id =
+            self.filter_store.create(Filter::PendingTransaction { known_hashes, last_seen_index });
         Ok(U256::from(id))
     }
 
     async fn get_filter_changes(&self, filter_id: U256) -> RpcResult<FilterChanges> {
         let id = filter_id_to_u64(filter_id).ok_or(RpcError::FilterNotFound)?;
         let entry = self.filter_store.get(id).ok_or(RpcError::FilterNotFound)?;
-        let mut filter = entry.lock().await;
 
-        match &mut *filter {
-            Filter::Log { criteria, last_poll_block } => {
+        // Read filter state under the lock, then release before any async I/O
+        // (Fix 3: minimize the locked section across `.await` points).
+        enum FilterSnapshot {
+            Log { criteria: RpcLogFilter, last_poll_block: Option<u64> },
+            Block { last_poll_block: u64 },
+            PendingTx { known_hashes: HashSet<B256>, last_seen_index: usize },
+        }
+
+        let snapshot = {
+            let filter = entry.lock().await;
+            match &*filter {
+                Filter::Log { criteria, last_poll_block } => FilterSnapshot::Log {
+                    criteria: criteria.clone(),
+                    last_poll_block: *last_poll_block,
+                },
+                Filter::Block { last_poll_block } => {
+                    FilterSnapshot::Block { last_poll_block: *last_poll_block }
+                }
+                Filter::PendingTransaction { known_hashes, last_seen_index } => {
+                    FilterSnapshot::PendingTx {
+                        known_hashes: known_hashes.clone(),
+                        last_seen_index: *last_seen_index,
+                    }
+                }
+            }
+        };
+        // Lock is released here.
+
+        match snapshot {
+            FilterSnapshot::Log { criteria, last_poll_block } => {
                 let head = self.current_block_number().await;
-                if head <= *last_poll_block {
+                if let Some(lpb) = last_poll_block
+                    && head <= lpb
+                {
                     entry.touch();
                     return Ok(FilterChanges::Logs(Vec::new()));
                 }
 
-                let mut changes_filter = criteria.clone();
-                changes_filter.from_block =
-                    Some(BlockNumberOrTag::Number(U64::from(last_poll_block.saturating_add(1))));
-                changes_filter.to_block = Some(BlockNumberOrTag::Number(U64::from(head)));
-                changes_filter.block_hash = None;
+                // Fix 2: preserve the original `to_block` / `block_hash`.
+                // Only override `from_block` to advance the cursor, and
+                // only cap `to_block` at head when no fixed bound was set.
+                let changes_filter = if criteria.block_hash.is_some() {
+                    // block_hash filters are single-block: pass criteria
+                    // unchanged (they ignore from_block/to_block).
+                    criteria.clone()
+                } else {
+                    let from = last_poll_block.map(|lpb| lpb.saturating_add(1)).unwrap_or(0);
+                    let to = match &criteria.to_block {
+                        // Honour the original fixed upper bound.
+                        Some(BlockNumberOrTag::Number(n)) => n.to::<u64>().min(head),
+                        // Open-ended or "latest": cap at current head.
+                        _ => head,
+                    };
+                    RpcLogFilter {
+                        from_block: Some(BlockNumberOrTag::Number(U64::from(from))),
+                        to_block: Some(BlockNumberOrTag::Number(U64::from(to))),
+                        // Preserve everything else from the original criteria.
+                        address: criteria.address.clone(),
+                        topics: criteria.topics.clone(),
+                        block_hash: None,
+                    }
+                };
 
                 let provider = self.state_provider.read().await;
                 let logs = provider.get_logs(changes_filter).await?;
-                *last_poll_block = head;
+
+                // Update the cursor under the lock.
+                let mut filter = entry.lock().await;
+                if let Filter::Log { last_poll_block: lpb, .. } = &mut *filter {
+                    *lpb = Some(head);
+                }
                 entry.touch();
                 Ok(FilterChanges::Logs(logs))
             }
-            Filter::Block { last_poll_block } => {
+            FilterSnapshot::Block { last_poll_block } => {
                 let head = self.current_block_number().await;
-                if head <= *last_poll_block {
+                if head <= last_poll_block {
                     entry.touch();
                     return Ok(FilterChanges::Hashes(Vec::new()));
                 }
 
                 let provider = self.state_provider.read().await;
                 let mut hashes = Vec::new();
+                // Fix 4: track the highest block that was actually observed
+                // rather than blindly advancing to `head`.
+                let mut highest_observed = last_poll_block;
                 for block_num in last_poll_block.saturating_add(1)..=head {
                     if let Some(block) = provider
                         .block_by_number(BlockNumberOrTag::Number(U64::from(block_num)), false)
                         .await?
                     {
                         hashes.push(block.hash);
+                        highest_observed = block_num;
                     }
                 }
 
-                *last_poll_block = head;
+                let mut filter = entry.lock().await;
+                if let Filter::Block { last_poll_block: lpb } = &mut *filter {
+                    *lpb = highest_observed;
+                }
                 entry.touch();
                 Ok(FilterChanges::Hashes(hashes))
             }
-            Filter::PendingTransaction { known_hashes } => {
+            FilterSnapshot::PendingTx { known_hashes, last_seen_index } => {
+                // Fix 5: return new pending tx hashes in insertion order
+                // instead of sorting lexicographically.
+                let tx_order = self.pending_tx_order.read().await;
+                let new_hashes: Vec<B256> = tx_order
+                    .iter()
+                    .skip(last_seen_index)
+                    .filter(|h| !known_hashes.contains(*h))
+                    .copied()
+                    .collect();
+                let new_index = tx_order.len();
                 let current_hashes: HashSet<B256> =
                     self.pending_txs.read().await.keys().copied().collect();
-                let mut new_hashes =
-                    current_hashes.difference(known_hashes).copied().collect::<Vec<_>>();
-                new_hashes.sort_unstable();
-                *known_hashes = current_hashes;
+                drop(tx_order);
+
+                let mut filter = entry.lock().await;
+                if let Filter::PendingTransaction { known_hashes: kh, last_seen_index: idx } =
+                    &mut *filter
+                {
+                    *kh = current_hashes;
+                    *idx = new_index;
+                }
                 entry.touch();
                 Ok(FilterChanges::Hashes(new_hashes))
             }
