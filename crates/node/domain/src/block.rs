@@ -41,8 +41,9 @@ impl Block {
 
     /// Choose a block timestamp that is strictly greater than its parent.
     ///
-    /// Returns `None` if `parent_timestamp` is `u64::MAX`, since no strictly
-    /// greater timestamp can be represented.
+    /// `now_secs` is the current wall-clock time in seconds since the Unix
+    /// epoch. Returns `None` if `parent_timestamp` is `u64::MAX`, since no
+    /// strictly greater timestamp can be represented.
     pub const fn next_timestamp(now_secs: u64, parent_timestamp: u64) -> Option<u64> {
         match parent_timestamp.checked_add(1) {
             Some(next) => {
