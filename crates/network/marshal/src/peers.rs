@@ -43,10 +43,10 @@ impl PeerInitializer {
     pub const DEFAULT_FETCH_RETRY_TIMEOUT: Duration = Duration::from_millis(100);
 
     /// Whether there are priority requests.
-    pub const PRIORITY_REQUESTS: bool = false;
+    pub const PRIORITY_REQUESTS: bool = true;
 
     /// Whether there are priority responses.
-    pub const PRIORITY_RESPONSES: bool = false;
+    pub const PRIORITY_RESPONSES: bool = true;
 }
 
 impl PeerInitializer {
@@ -92,7 +92,7 @@ mod tests {
         assert_eq!(PeerInitializer::DEFAULT_INITIAL_DELAY, Duration::from_millis(200));
         assert_eq!(PeerInitializer::DEFAULT_TIMEOUT, Duration::from_millis(200));
         assert_eq!(PeerInitializer::DEFAULT_FETCH_RETRY_TIMEOUT, Duration::from_millis(100));
-        assert!(!PeerInitializer::PRIORITY_REQUESTS);
-        assert!(!PeerInitializer::PRIORITY_RESPONSES);
+        assert!(PeerInitializer::PRIORITY_REQUESTS);
+        assert!(PeerInitializer::PRIORITY_RESPONSES);
     }
 }

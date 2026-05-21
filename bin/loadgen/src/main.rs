@@ -15,11 +15,14 @@ use alloy_consensus::{SignableTransaction as _, TxEip1559, TxEnvelope};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{Address, Bytes, Signature, TxKind, U256, keccak256};
 use clap::Parser;
-use eyre::Result;
+use eyre::{Result, WrapErr as _};
 use futures::stream::{FuturesUnordered, StreamExt};
 use k256::ecdsa::SigningKey;
 use sha3::{Digest as _, Keccak256};
 use tracing::{error, info, warn};
+
+const MIN_LOADGEN_ACCOUNTS: usize = 1;
+const MAX_LOADGEN_ACCOUNTS: usize = u8::MAX as usize;
 
 /// Load generator CLI.
 #[derive(Parser, Debug)]
@@ -87,6 +90,20 @@ impl Account {
     }
 }
 
+fn loadgen_seeds(accounts: usize) -> Result<Vec<u8>> {
+    if !(MIN_LOADGEN_ACCOUNTS..=MAX_LOADGEN_ACCOUNTS).contains(&accounts) {
+        eyre::bail!(
+            "loadgen accounts must be between {} and {}, got {}",
+            MIN_LOADGEN_ACCOUNTS,
+            MAX_LOADGEN_ACCOUNTS,
+            accounts
+        );
+    }
+
+    let accounts = u8::try_from(accounts).expect("loadgen account count was validated");
+    Ok((1..=accounts).collect())
+}
+
 fn address_from_key(key: &SigningKey) -> Address {
     let encoded = key.verifying_key().to_encoded_point(false);
     let pubkey = encoded.as_bytes();
@@ -122,6 +139,18 @@ fn sign_eip1559_transfer(
     let mut raw_bytes = Vec::new();
     envelope.encode_2718(&mut raw_bytes);
     Bytes::from(raw_bytes)
+}
+
+fn parse_json_rpc_quantity(quantity: &str) -> Result<u64> {
+    let value = quantity
+        .strip_prefix("0x")
+        .ok_or_else(|| eyre::eyre!("JSON-RPC quantity missing 0x prefix: {quantity}"))?;
+    if value.is_empty() {
+        eyre::bail!("JSON-RPC quantity has no digits: {quantity}");
+    }
+
+    u64::from_str_radix(value, 16)
+        .wrap_err_with(|| format!("invalid JSON-RPC quantity: {quantity}"))
 }
 
 /// HTTP client for RPC calls.
@@ -179,8 +208,7 @@ impl RpcClient {
 
         let nonce_hex =
             json["result"].as_str().ok_or_else(|| eyre::eyre!("missing nonce result"))?;
-        let nonce = nonce_hex.strip_prefix("0x").unwrap_or(nonce_hex);
-        u64::from_str_radix(nonce, 16).map_err(Into::into)
+        parse_json_rpc_quantity(nonce_hex)
     }
 }
 
@@ -236,10 +264,11 @@ async fn main() -> Result<()> {
         "Starting load generator"
     );
 
+    let account_seeds = loadgen_seeds(args.accounts)?;
     let accounts: Vec<Arc<Account>> =
-        (1..=args.accounts).map(|i| Arc::new(Account::new(i as u8))).collect();
+        account_seeds.into_iter().map(|seed| Arc::new(Account::new(seed))).collect();
 
-    info!("Sender addresses (fund these with ETH):");
+    info!("Sender addresses:");
     for acc in &accounts {
         info!("  {}", acc.address);
     }
@@ -346,4 +375,58 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LOADGEN_ADDRESS_FIXTURES: &[(u8, &str)] = &[
+        (1, "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf"),
+        (2, "0x2B5AD5c4795c026514f8317c7a215E218DcCD6cF"),
+        (3, "0x6813Eb9362372EEF6200f3b1dbC3f819671cBA69"),
+    ];
+
+    #[test]
+    fn account_addresses_match_seed_fixtures() {
+        for &(seed, expected) in LOADGEN_ADDRESS_FIXTURES {
+            let account = Account::new(seed);
+            assert_eq!(account.address.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn loadgen_seeds_accepts_supported_range() {
+        assert_eq!(loadgen_seeds(1).unwrap(), vec![1]);
+        assert_eq!(loadgen_seeds(3).unwrap(), vec![1, 2, 3]);
+
+        let seeds = loadgen_seeds(255).unwrap();
+        assert_eq!(seeds.len(), 255);
+        assert_eq!(seeds.first(), Some(&1));
+        assert_eq!(seeds.last(), Some(&255));
+    }
+
+    #[test]
+    fn loadgen_seeds_rejects_unsupported_counts() {
+        for accounts in [0, 256, usize::MAX] {
+            let error = loadgen_seeds(accounts).unwrap_err().to_string();
+            assert!(error.contains("between 1 and 255"));
+            assert!(error.contains(&accounts.to_string()));
+        }
+    }
+
+    #[test]
+    fn parse_json_rpc_quantity_accepts_hex_quantities() {
+        assert_eq!(parse_json_rpc_quantity("0x0").unwrap(), 0);
+        assert_eq!(parse_json_rpc_quantity("0xa").unwrap(), 10);
+        assert_eq!(parse_json_rpc_quantity("0x10").unwrap(), 16);
+        assert_eq!(parse_json_rpc_quantity("0xFF").unwrap(), 255);
+    }
+
+    #[test]
+    fn parse_json_rpc_quantity_rejects_invalid_quantities() {
+        for quantity in ["", "10", "0x", "0xzz"] {
+            assert!(parse_json_rpc_quantity(quantity).is_err());
+        }
+    }
 }

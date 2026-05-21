@@ -13,34 +13,34 @@ pub struct ArchiveInitializer;
 
 impl ArchiveInitializer {
     /// The default freezer table initial size.
-    pub const DEFAULT_FREEZER_TABLE_INITIAL_SIZE: u32 = 65_536;
+    pub const DEFAULT_FREEZER_TABLE_INITIAL_SIZE: u32 = 2_097_152;
 
     /// The default freezer table resize frequency.
     pub const DEFAULT_FREEZER_TABLE_RESIZE_FREQUENCY: u8 = 4;
 
     /// The default freezer table resize chunk size.
-    pub const DEFAULT_FREEZER_TABLE_RESIZE_CHUNK_SIZE: u32 = 16_384;
+    pub const DEFAULT_FREEZER_TABLE_RESIZE_CHUNK_SIZE: u32 = 65_536;
 
     /// The default freezer value target size.
-    pub const DEFAULT_FREEZER_VALUE_TARGET_SIZE: u64 = 1024;
+    pub const DEFAULT_FREEZER_VALUE_TARGET_SIZE: u64 = 1024 * 1024 * 1024;
 
     /// The default compression level (zstd level 3).
     pub const DEFAULT_COMPRESSION_LEVEL: Option<u8> = Some(3);
 
     /// The default items per section.
-    pub const DEFAULT_ITEMS_PER_SECTION: NonZeroU64 = NZU64!(1024);
+    pub const DEFAULT_ITEMS_PER_SECTION: NonZeroU64 = NZU64!(262_144);
 
     /// The default write buffer size.
-    pub const DEFAULT_WRITE_BUFFER: NonZeroUsize = NZUsize!(1024);
+    pub const DEFAULT_WRITE_BUFFER: NonZeroUsize = NZUsize!(1024 * 1024);
 
     /// The default replay buffer size.
-    pub const DEFAULT_REPLAY_BUFFER: NonZeroUsize = NZUsize!(1024);
+    pub const DEFAULT_REPLAY_BUFFER: NonZeroUsize = NZUsize!(8 * 1024 * 1024);
 
     /// The default page size.
-    pub const DEFAULT_PAGE_SIZE: NonZeroU16 = NZU16!(1024);
+    pub const DEFAULT_PAGE_SIZE: NonZeroU16 = NZU16!(4_096);
 
     /// The default page cache size.
-    pub const DEFAULT_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+    pub const DEFAULT_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(8_192);
 
     /// The default partition prefix for finalizations archive.
     pub const DEFAULT_FINALIZATIONS_PREFIX: &'static str = "finalizations";
@@ -133,16 +133,16 @@ mod tests {
 
     #[test]
     fn test_defaults() {
-        assert_eq!(ArchiveInitializer::DEFAULT_FREEZER_TABLE_INITIAL_SIZE, 65_536);
+        assert_eq!(ArchiveInitializer::DEFAULT_FREEZER_TABLE_INITIAL_SIZE, 2_097_152);
         assert_eq!(ArchiveInitializer::DEFAULT_FREEZER_TABLE_RESIZE_FREQUENCY, 4);
-        assert_eq!(ArchiveInitializer::DEFAULT_FREEZER_TABLE_RESIZE_CHUNK_SIZE, 16_384);
-        assert_eq!(ArchiveInitializer::DEFAULT_FREEZER_VALUE_TARGET_SIZE, 1024);
+        assert_eq!(ArchiveInitializer::DEFAULT_FREEZER_TABLE_RESIZE_CHUNK_SIZE, 65_536);
+        assert_eq!(ArchiveInitializer::DEFAULT_FREEZER_VALUE_TARGET_SIZE, 1024 * 1024 * 1024);
         assert_eq!(ArchiveInitializer::DEFAULT_COMPRESSION_LEVEL, Some(3));
-        assert_eq!(ArchiveInitializer::DEFAULT_ITEMS_PER_SECTION.get(), 1024);
-        assert_eq!(ArchiveInitializer::DEFAULT_WRITE_BUFFER.get(), 1024);
-        assert_eq!(ArchiveInitializer::DEFAULT_REPLAY_BUFFER.get(), 1024);
-        assert_eq!(ArchiveInitializer::DEFAULT_PAGE_SIZE.get(), 1024);
-        assert_eq!(ArchiveInitializer::DEFAULT_PAGE_CACHE_SIZE.get(), 10);
+        assert_eq!(ArchiveInitializer::DEFAULT_ITEMS_PER_SECTION.get(), 262_144);
+        assert_eq!(ArchiveInitializer::DEFAULT_WRITE_BUFFER.get(), 1024 * 1024);
+        assert_eq!(ArchiveInitializer::DEFAULT_REPLAY_BUFFER.get(), 8 * 1024 * 1024);
+        assert_eq!(ArchiveInitializer::DEFAULT_PAGE_SIZE.get(), 4_096);
+        assert_eq!(ArchiveInitializer::DEFAULT_PAGE_CACHE_SIZE.get(), 8_192);
         assert_eq!(ArchiveInitializer::DEFAULT_FINALIZATIONS_PREFIX, "finalizations");
         assert_eq!(ArchiveInitializer::DEFAULT_BLOCKS_PREFIX, "blocks");
     }

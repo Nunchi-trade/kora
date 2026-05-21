@@ -14,7 +14,7 @@ mod error;
 pub use error::RunnerError;
 
 mod runner;
-pub use runner::ProductionRunner;
+pub use runner::{ProductionRunner, runtime_storage_directory};
 
 mod scheme;
 pub use scheme::{ThresholdScheme, load_threshold_scheme};

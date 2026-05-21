@@ -8,6 +8,7 @@
 use std::{collections::BTreeSet, fmt, sync::Arc};
 
 use alloy_primitives::{Address, B256, U256};
+use commonware_consensus::Block as _;
 use commonware_cryptography::Committable as _;
 use commonware_runtime::{Metrics as _, tokio};
 use futures::{channel::mpsc::UnboundedReceiver, lock::Mutex};
@@ -86,13 +87,40 @@ impl LedgerView {
         Self::init_with_config(context, config, genesis_alloc).await
     }
 
+    /// Initialize a ledger view, optionally applying the genesis allocation to QMDB.
+    pub async fn init_with_genesis(
+        context: tokio::Context,
+        partition_prefix: String,
+        genesis_alloc: Vec<(Address, U256)>,
+        apply_genesis: bool,
+    ) -> LedgerResult<Self> {
+        let config = QmdbConfig::new(partition_prefix);
+        Self::init_with_config_and_genesis(context, config, genesis_alloc, apply_genesis).await
+    }
+
     /// Initialize a ledger view with an explicit QMDB configuration.
     pub async fn init_with_config(
         context: tokio::Context,
         config: QmdbConfig,
         genesis_alloc: Vec<(Address, U256)>,
     ) -> LedgerResult<Self> {
-        let qmdb = QmdbLedger::init(context.with_label("qmdb"), config, genesis_alloc).await?;
+        Self::init_with_config_and_genesis(context, config, genesis_alloc, true).await
+    }
+
+    /// Initialize a ledger view with control over whether genesis is applied to QMDB.
+    pub async fn init_with_config_and_genesis(
+        context: tokio::Context,
+        config: QmdbConfig,
+        genesis_alloc: Vec<(Address, U256)>,
+        apply_genesis: bool,
+    ) -> LedgerResult<Self> {
+        let qmdb = QmdbLedger::init_with_genesis(
+            context.with_label("qmdb"),
+            config,
+            genesis_alloc,
+            apply_genesis,
+        )
+        .await?;
         let genesis_root = qmdb.root().await?;
 
         let genesis_block = Block {
@@ -205,6 +233,22 @@ impl LedgerView {
     pub async fn cache_snapshot(&self, digest: ConsensusDigest, snapshot: LedgerSnapshot) {
         let inner = self.inner.lock().await;
         inner.snapshots.insert(digest, snapshot);
+    }
+
+    /// Restore a finalized block as an already-persisted snapshot over the current QMDB state.
+    pub async fn restore_persisted_snapshot(&self, block: &Block) {
+        let inner = self.inner.lock().await;
+        let digest = block.commitment();
+        let state = OverlayState::new(inner.qmdb.state(), QmdbChangeSet::default());
+        let snapshot = Snapshot::new(
+            Some(block.parent()),
+            state,
+            block.state_root,
+            QmdbChangeSet::default(),
+            tx_ids(&block.txs),
+        );
+        inner.snapshots.insert(digest, snapshot);
+        inner.snapshots.mark_persisted(&[digest]);
     }
 
     /// Fetch the components needed to build a proposal.
@@ -386,6 +430,11 @@ impl LedgerService {
     /// Cache a fully constructed snapshot.
     pub async fn cache_snapshot(&self, digest: ConsensusDigest, snapshot: LedgerSnapshot) {
         self.view.cache_snapshot(digest, snapshot).await;
+    }
+
+    /// Restore a finalized block as an already-persisted snapshot.
+    pub async fn restore_persisted_snapshot(&self, block: &Block) {
+        self.view.restore_persisted_snapshot(block).await;
     }
 
     /// Fetch proposal components.

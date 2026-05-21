@@ -1,0 +1,15 @@
+{
+  "validators": 3,
+  "threshold": 2,
+  "participants": [
+    "552f1bbb2be3ce4ec7e3d166076800ac8167d612c7c985aa3dd33cf39280ced4",
+    "6bdd67c5a93af1d3f40d6fc4a1424e751d3e08d8389fa755758735d53ee9cc23",
+    "7040546e65eccf6df1a6ada9152d0e2cecb7bbd7f3112dc8db4336f78e67fab1"
+  ],
+  "secondary_participants": [],
+  "bootstrappers": {
+    "552f1bbb2be3ce4ec7e3d166076800ac8167d612c7c985aa3dd33cf39280ced4": "65.109.61.210:30303",
+    "6bdd67c5a93af1d3f40d6fc4a1424e751d3e08d8389fa755758735d53ee9cc23": "65.108.142.179:30303",
+    "7040546e65eccf6df1a6ada9152d0e2cecb7bbd7f3112dc8db4336f78e67fab1": "65.21.67.17:30303"
+  }
+}
