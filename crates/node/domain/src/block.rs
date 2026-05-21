@@ -40,9 +40,20 @@ impl Block {
     }
 
     /// Choose a block timestamp that is strictly greater than its parent.
-    pub const fn next_timestamp(now_secs: u64, parent_timestamp: u64) -> u64 {
-        let next_parent_timestamp = parent_timestamp.saturating_add(1);
-        if now_secs > next_parent_timestamp { now_secs } else { next_parent_timestamp }
+    ///
+    /// Returns `None` if `parent_timestamp` is `u64::MAX`, since no strictly
+    /// greater timestamp can be represented.
+    pub const fn next_timestamp(now_secs: u64, parent_timestamp: u64) -> Option<u64> {
+        match parent_timestamp.checked_add(1) {
+            Some(next) => {
+                if now_secs > next {
+                    Some(now_secs)
+                } else {
+                    Some(next)
+                }
+            }
+            None => None,
+        }
     }
 }
 
@@ -224,13 +235,19 @@ mod tests {
 
     #[test]
     fn next_timestamp_uses_clock_when_ahead() {
-        assert_eq!(Block::next_timestamp(1_700_000_100, 1_700_000_042), 1_700_000_100);
+        assert_eq!(Block::next_timestamp(1_700_000_100, 1_700_000_042), Some(1_700_000_100));
     }
 
     #[test]
     fn next_timestamp_advances_parent_when_clock_lags() {
-        assert_eq!(Block::next_timestamp(1_700_000_042, 1_700_000_042), 1_700_000_043);
-        assert_eq!(Block::next_timestamp(1_700_000_000, 1_700_000_042), 1_700_000_043);
+        assert_eq!(Block::next_timestamp(1_700_000_042, 1_700_000_042), Some(1_700_000_043));
+        assert_eq!(Block::next_timestamp(1_700_000_000, 1_700_000_042), Some(1_700_000_043));
+    }
+
+    #[test]
+    fn next_timestamp_returns_none_at_u64_max() {
+        assert_eq!(Block::next_timestamp(0, u64::MAX), None);
+        assert_eq!(Block::next_timestamp(u64::MAX, u64::MAX), None);
     }
 
     #[test]

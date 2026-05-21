@@ -842,7 +842,7 @@ where
             let parent = ancestry.next().await?;
             let now_secs =
                 env.current().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-            let timestamp = Block::next_timestamp(now_secs, parent.timestamp);
+            let timestamp = Block::next_timestamp(now_secs, parent.timestamp)?;
             self.build_block(&parent, timestamp).await
         }
     }

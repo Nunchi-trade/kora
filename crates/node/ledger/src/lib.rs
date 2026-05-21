@@ -575,7 +575,7 @@ mod tests {
         txs: Vec<Tx>,
     ) -> BuiltBlock {
         let executor = RevmExecutor::new(CHAIN_ID);
-        let timestamp = Block::next_timestamp(0, parent.timestamp);
+        let timestamp = Block::next_timestamp(0, parent.timestamp).expect("timestamp overflow");
         let context = block_context(height, timestamp, PREVRANDAO);
         let txs_bytes: Vec<Bytes> = txs.iter().map(|tx| tx.bytes.clone()).collect();
         let outcome =

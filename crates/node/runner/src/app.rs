@@ -305,7 +305,16 @@ where
             let parent = ancestry.next().await?;
             let ancestry_elapsed = start.elapsed();
             let now_secs = unix_timestamp_secs(&env);
-            let timestamp = Block::next_timestamp(now_secs, parent.timestamp);
+            let timestamp = match Block::next_timestamp(now_secs, parent.timestamp) {
+                Some(ts) => ts,
+                None => {
+                    tracing::error!(
+                        parent_timestamp = parent.timestamp,
+                        "timestamp overflow: cannot produce a timestamp after parent"
+                    );
+                    return None;
+                }
+            };
 
             let build_start = Instant::now();
             let block = self.build_block(&parent, timestamp).await;
