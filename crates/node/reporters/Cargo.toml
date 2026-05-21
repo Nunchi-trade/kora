@@ -35,3 +35,7 @@ alloy-primitives.workspace = true
 
 # Tracing
 tracing.workspace = true
+
+[dev-dependencies]
+k256.workspace = true
+sha3.workspace = true

@@ -81,6 +81,12 @@ EXPOSE 30303 8545 8546 9002
 # Default volumes
 VOLUME ["/data", "/shared"]
 
+# Runtime health check shared with Compose. Override HEALTHCHECK_MODE to
+# switch the check: dkg (share.key + output.json exist), p2p (port 30303),
+# ready (.ready file + port 30303). Default mode is p2p.
+HEALTHCHECK --interval=10s --timeout=5s --retries=3 --start-period=30s \
+    CMD /scripts/healthcheck.sh
+
 # Default entrypoint - can be overridden for different modes
 ENTRYPOINT ["/scripts/entrypoint.sh"]
 CMD ["validator"]
