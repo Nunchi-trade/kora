@@ -13,7 +13,7 @@ workspace = true
 [dependencies]
 # HTTP server
 axum = "0.8"
-tower = { version = "0.5", features = ["limit"] }
+tower = { version = "0.5", features = ["limit", "util"] }
 tower-http = { version = "0.6", features = ["cors"] }
 
 # JSON-RPC
@@ -47,7 +47,6 @@ kora-traits = { path = "../../storage/traits" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }
-tower = { version = "0.5", features = ["util"] }
 serde_json.workspace = true
 k256.workspace = true
 sha3.workspace = true

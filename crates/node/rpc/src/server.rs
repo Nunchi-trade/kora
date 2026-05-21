@@ -118,8 +118,16 @@ struct TokenBucket {
 impl TokenBucket {
     const fn new(config: RateLimitConfig, now: Instant) -> Self {
         let requests_per_second = config.requests_per_second as f64;
-        let burst_size =
-            if config.requests_per_second == 0 { 0.0 } else { config.burst_size as f64 };
+        let burst_size = if config.requests_per_second == 0 {
+            0.0
+        } else {
+            // Clamp burst_size to at least 1 so that an enabled limiter can
+            // always admit at least one request.  Without this, burst_size==0
+            // would start with 0 tokens and refill() would never add more,
+            // permanently rejecting all requests.
+            let bs = config.burst_size as f64;
+            if bs < 1.0 { 1.0 } else { bs }
+        };
 
         Self { requests_per_second, burst_size, tokens: burst_size, last_refill: now }
     }
@@ -688,6 +696,22 @@ mod tests {
         let half_second_later = start + Duration::from_millis(500);
         assert!(bucket.try_acquire_at(half_second_later));
         assert!(!bucket.try_acquire_at(half_second_later));
+    }
+
+    #[test]
+    fn token_bucket_clamps_zero_burst_to_one() {
+        let start = Instant::now();
+        let mut bucket =
+            TokenBucket::new(RateLimitConfig { requests_per_second: 10, burst_size: 0 }, start);
+
+        // burst_size=0 is clamped to 1, so the first request succeeds.
+        assert!(bucket.try_acquire_at(start));
+        // Second request at the same instant is rejected (burst of 1).
+        assert!(!bucket.try_acquire_at(start));
+
+        // After enough time, a new token is replenished.
+        let later = start + Duration::from_millis(200);
+        assert!(bucket.try_acquire_at(later));
     }
 
     #[test]
