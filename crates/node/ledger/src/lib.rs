@@ -374,13 +374,15 @@ impl LedgerView {
         inner.snapshots.clear_persisting_chain(&chain);
         match result {
             Ok(_) => {
-                if let Some(tip) = chain.last()
-                    && let Some(snapshot) = inner.snapshots.get(tip)
-                {
+                for digest in &chain {
+                    let snapshot = inner
+                        .snapshots
+                        .get(digest)
+                        .ok_or(ConsensusError::SnapshotNotFound(*digest))?;
                     let compact_state =
                         OverlayState::new(inner.qmdb.state(), QmdbChangeSet::default());
                     inner.snapshots.insert(
-                        *tip,
+                        *digest,
                         Snapshot::new(
                             snapshot.parent,
                             compact_state,
@@ -741,6 +743,90 @@ mod tests {
             let result = qmdb.state().balance(&to).await.expect("balance");
             assert_eq!(result, U256::from(TRANSFER_ONE + TRANSFER_TWO));
             assert_eq!(state_root, block2.block.state_root);
+        });
+    }
+
+    #[test]
+    fn persist_snapshot_compacts_all_persisted_chain_snapshots() {
+        // Tokio runtime required for WrapDatabaseAsync in the QMDB adapter.
+        let executor = tokio::Runner::default();
+        executor.start(|context| async move {
+            // Arrange
+            let from_key = key_from_byte(FROM_BYTE_A);
+            let to_key = key_from_byte(TO_BYTE_A);
+            let from = Evm::address_from_key(&from_key);
+            let to = Evm::address_from_key(&to_key);
+            let setup = setup_ledger(
+                context,
+                "revm-ledger-compact-chain",
+                vec![(from, U256::from(GENESIS_BALANCE)), (to, U256::ZERO)],
+            )
+            .await;
+            let parent_snapshot = setup
+                .service
+                .parent_snapshot(setup.genesis_digest)
+                .await
+                .expect("genesis snapshot");
+            let block1 = build_block_snapshot(
+                &setup.service,
+                &setup.genesis,
+                parent_snapshot,
+                HEIGHT_ONE,
+                vec![transfer_tx(&from_key, to, TRANSFER_ONE, 0)],
+            )
+            .await;
+            let parent_snapshot =
+                setup.service.parent_snapshot(block1.digest).await.expect("block1 snapshot");
+            let block2 = build_block_snapshot(
+                &setup.service,
+                &block1.block,
+                parent_snapshot,
+                HEIGHT_TWO,
+                vec![transfer_tx(&from_key, to, TRANSFER_TWO, 1)],
+            )
+            .await;
+
+            let block1_before =
+                setup.service.parent_snapshot(block1.digest).await.expect("block1 snapshot");
+            let block2_before =
+                setup.service.parent_snapshot(block2.digest).await.expect("block2 snapshot");
+            assert!(!block1_before.changes.is_empty());
+            assert!(!block2_before.changes.is_empty());
+
+            let block1_parent = block1_before.parent;
+            let block1_state_root = block1_before.state_root;
+            let block1_tx_ids = block1_before.tx_ids.clone();
+            let block2_parent = block2_before.parent;
+            let block2_state_root = block2_before.state_root;
+            let block2_tx_ids = block2_before.tx_ids.clone();
+
+            // Act
+            let persisted =
+                setup.ledger.persist_snapshot(block2.digest).await.expect("persist snapshot");
+
+            // Assert
+            assert!(persisted);
+            let block1_after =
+                setup.service.parent_snapshot(block1.digest).await.expect("block1 snapshot");
+            let block2_after =
+                setup.service.parent_snapshot(block2.digest).await.expect("block2 snapshot");
+
+            assert!(block1_after.changes.is_empty());
+            assert!(block2_after.changes.is_empty());
+            assert!(
+                block1_after.state.changes_is_empty(),
+                "block1 overlay change set should be empty after compaction"
+            );
+            assert!(
+                block2_after.state.changes_is_empty(),
+                "block2 overlay change set should be empty after compaction"
+            );
+            assert_eq!(block1_after.parent, block1_parent);
+            assert_eq!(block1_after.state_root, block1_state_root);
+            assert_eq!(block1_after.tx_ids, block1_tx_ids);
+            assert_eq!(block2_after.parent, block2_parent);
+            assert_eq!(block2_after.state_root, block2_state_root);
+            assert_eq!(block2_after.tx_ids, block2_tx_ids);
         });
     }
 

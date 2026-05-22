@@ -18,6 +18,18 @@ impl<S> OverlayState<S> {
         Self { base, changes: Arc::new(changes) }
     }
 
+    /// Return the number of accounts in the overlay change set.
+    #[must_use]
+    pub fn change_len(&self) -> usize {
+        self.changes.len()
+    }
+
+    /// Return whether the overlay change set is empty.
+    #[must_use]
+    pub fn changes_is_empty(&self) -> bool {
+        self.changes.is_empty()
+    }
+
     /// Merge the current overlay changes with a newer change set.
     pub fn merge_changes(&self, newer: ChangeSet) -> ChangeSet {
         let mut merged = (*self.changes).clone();
@@ -403,6 +415,22 @@ mod tests {
         let base = MockStateDb::new();
         let overlay = OverlayState::new(base, ChangeSet::new());
         let _ = overlay.base();
+    }
+
+    #[test]
+    fn test_changes_is_empty_and_change_len() {
+        let addr = Address::repeat_byte(0x0A);
+        let base = MockStateDb::new();
+
+        let empty_overlay = OverlayState::new(base.clone(), ChangeSet::new());
+        assert!(empty_overlay.changes_is_empty());
+        assert_eq!(empty_overlay.change_len(), 0);
+
+        let mut changes = ChangeSet::new();
+        changes.accounts.insert(addr, test_account(1, 100));
+        let non_empty_overlay = OverlayState::new(base, changes);
+        assert!(!non_empty_overlay.changes_is_empty());
+        assert_eq!(non_empty_overlay.change_len(), 1);
     }
 
     #[tokio::test]
