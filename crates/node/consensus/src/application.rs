@@ -137,6 +137,7 @@ mod tests {
             Ok(Block {
                 parent: kora_domain::BlockId(alloy_primitives::B256::ZERO),
                 height: 0,
+                timestamp: 0,
                 prevrandao: alloy_primitives::B256::ZERO,
                 state_root: kora_domain::StateRoot(alloy_primitives::B256::ZERO),
                 txs: Vec::new(),
@@ -167,6 +168,7 @@ mod tests {
         let block = Block {
             parent: kora_domain::BlockId(alloy_primitives::B256::ZERO),
             height: 0,
+            timestamp: 0,
             prevrandao: alloy_primitives::B256::ZERO,
             state_root: kora_domain::StateRoot(alloy_primitives::B256::ZERO),
             txs: Vec::new(),

@@ -83,8 +83,24 @@ impl LedgerView {
         partition_prefix: String,
         genesis_alloc: Vec<(Address, U256)>,
     ) -> LedgerResult<Self> {
+        Self::init_with_genesis_timestamp(context, partition_prefix, genesis_alloc, 0).await
+    }
+
+    /// Initialize a ledger view with an explicit genesis block timestamp.
+    pub async fn init_with_genesis_timestamp(
+        context: tokio::Context,
+        partition_prefix: String,
+        genesis_alloc: Vec<(Address, U256)>,
+        genesis_timestamp: u64,
+    ) -> LedgerResult<Self> {
         let config = QmdbConfig::new(partition_prefix);
-        Self::init_with_config(context, config, genesis_alloc).await
+        Self::init_with_config_and_genesis_timestamp(
+            context,
+            config,
+            genesis_alloc,
+            genesis_timestamp,
+        )
+        .await
     }
 
     /// Initialize a ledger view, optionally applying the genesis allocation to QMDB.
@@ -98,6 +114,25 @@ impl LedgerView {
         Self::init_with_config_and_genesis(context, config, genesis_alloc, apply_genesis).await
     }
 
+    /// Initialize a ledger view with explicit timestamp and control over genesis allocation.
+    pub async fn init_with_genesis_options(
+        context: tokio::Context,
+        partition_prefix: String,
+        genesis_alloc: Vec<(Address, U256)>,
+        apply_genesis: bool,
+        genesis_timestamp: u64,
+    ) -> LedgerResult<Self> {
+        let config = QmdbConfig::new(partition_prefix);
+        Self::init_with_config_and_genesis_options(
+            context,
+            config,
+            genesis_alloc,
+            apply_genesis,
+            genesis_timestamp,
+        )
+        .await
+    }
+
     /// Initialize a ledger view with an explicit QMDB configuration.
     pub async fn init_with_config(
         context: tokio::Context,
@@ -107,12 +142,41 @@ impl LedgerView {
         Self::init_with_config_and_genesis(context, config, genesis_alloc, true).await
     }
 
+    /// Initialize a ledger view with explicit QMDB and genesis timestamp configuration.
+    pub async fn init_with_config_and_genesis_timestamp(
+        context: tokio::Context,
+        config: QmdbConfig,
+        genesis_alloc: Vec<(Address, U256)>,
+        genesis_timestamp: u64,
+    ) -> LedgerResult<Self> {
+        Self::init_with_config_and_genesis_options(
+            context,
+            config,
+            genesis_alloc,
+            true,
+            genesis_timestamp,
+        )
+        .await
+    }
+
     /// Initialize a ledger view with control over whether genesis is applied to QMDB.
     pub async fn init_with_config_and_genesis(
         context: tokio::Context,
         config: QmdbConfig,
         genesis_alloc: Vec<(Address, U256)>,
         apply_genesis: bool,
+    ) -> LedgerResult<Self> {
+        Self::init_with_config_and_genesis_options(context, config, genesis_alloc, apply_genesis, 0)
+            .await
+    }
+
+    /// Initialize a ledger view with explicit QMDB, apply-genesis and timestamp configuration.
+    pub async fn init_with_config_and_genesis_options(
+        context: tokio::Context,
+        config: QmdbConfig,
+        genesis_alloc: Vec<(Address, U256)>,
+        apply_genesis: bool,
+        genesis_timestamp: u64,
     ) -> LedgerResult<Self> {
         let qmdb = QmdbLedger::init_with_genesis(
             context.with_label("qmdb"),
@@ -126,6 +190,7 @@ impl LedgerView {
         let genesis_block = Block {
             parent: BlockId(B256::ZERO),
             height: 0,
+            timestamp: genesis_timestamp,
             prevrandao: B256::ZERO,
             state_root: genesis_root,
             txs: Vec::new(),
@@ -548,10 +613,10 @@ mod tests {
         )
     }
 
-    fn block_context(height: u64, prevrandao: B256) -> BlockContext {
+    fn block_context(height: u64, timestamp: u64, prevrandao: B256) -> BlockContext {
         let header = Header {
             number: height,
-            timestamp: height,
+            timestamp,
             gas_limit: 30_000_000,
             beneficiary: Address::ZERO,
             base_fee_per_gas: Some(0),
@@ -574,6 +639,23 @@ mod tests {
         LedgerSetup { ledger, service, genesis, genesis_digest }
     }
 
+    #[test]
+    fn init_uses_configured_genesis_timestamp() {
+        let executor = tokio::Runner::default();
+        executor.start(|context| async move {
+            let ledger = LedgerView::init_with_genesis_timestamp(
+                context,
+                next_partition("revm-ledger-genesis-timestamp"),
+                Vec::new(),
+                1_700_000_000,
+            )
+            .await
+            .expect("init ledger");
+
+            assert_eq!(ledger.genesis_block().timestamp, 1_700_000_000);
+        });
+    }
+
     async fn build_block_snapshot(
         service: &LedgerService,
         parent: &Block,
@@ -582,7 +664,8 @@ mod tests {
         txs: Vec<Tx>,
     ) -> BuiltBlock {
         let executor = RevmExecutor::new(CHAIN_ID);
-        let context = block_context(height, PREVRANDAO);
+        let timestamp = Block::next_timestamp(0, parent.timestamp).expect("timestamp overflow");
+        let context = block_context(height, timestamp, PREVRANDAO);
         let txs_bytes: Vec<Bytes> = txs.iter().map(|tx| tx.bytes.clone()).collect();
         let outcome =
             executor.execute(&parent_snapshot.state, &context, &txs_bytes).expect("execute txs");
@@ -592,8 +675,14 @@ mod tests {
             .compute_root(parent_digest, outcome.changes.clone())
             .await
             .expect("compute root");
-        let block =
-            Block { parent: parent.id(), height, prevrandao: PREVRANDAO, state_root: root, txs };
+        let block = Block {
+            parent: parent.id(),
+            height,
+            timestamp,
+            prevrandao: PREVRANDAO,
+            state_root: root,
+            txs,
+        };
         let digest = block.commitment();
         let next_state = OverlayState::new(parent_snapshot.state.base(), merged_changes);
         service

@@ -11,10 +11,10 @@ use kora_traits::StateDb;
 
 use crate::{ConsensusError, Digest, Mempool, Snapshot, SnapshotStore, TxId};
 
-fn block_context(height: u64, prevrandao: B256) -> BlockContext {
+fn block_context(height: u64, timestamp: u64, prevrandao: B256) -> BlockContext {
     let header = Header {
         number: height,
-        timestamp: height,
+        timestamp,
         gas_limit: kora_config::DEFAULT_GAS_LIMIT,
         beneficiary: Address::ZERO,
         base_fee_per_gas: Some(0),
@@ -84,6 +84,7 @@ where
         &self,
         parent: &Block,
         prevrandao: B256,
+        now_secs: u64,
     ) -> Result<(Block, Snapshot<S>), ConsensusError> {
         let parent_digest = parent.commitment();
         let parent_snapshot = self
@@ -95,7 +96,9 @@ where
         let txs = self.mempool.build(self.max_txs, &excluded);
 
         let height = parent.height + 1;
-        let context = block_context(height, prevrandao);
+        let timestamp = Block::next_timestamp(now_secs, parent.timestamp)
+            .ok_or(ConsensusError::TimestampOverflow { parent_timestamp: parent.timestamp })?;
+        let context = block_context(height, timestamp, prevrandao);
         let txs_bytes: Vec<Bytes> = txs.iter().map(|tx| tx.bytes.clone()).collect();
         let outcome = self
             .executor
@@ -108,7 +111,7 @@ where
             .map_err(ConsensusError::StateDb)?;
         let state_root = StateRoot(state_root);
 
-        let block = Block { parent: parent.id(), height, prevrandao, state_root, txs };
+        let block = Block { parent: parent.id(), height, timestamp, prevrandao, state_root, txs };
         let tx_ids = self.tx_ids_from_block(&block);
         let snapshot = Snapshot::new(
             Some(parent_digest),
@@ -126,6 +129,7 @@ where
         &self,
         parent: &Block,
         prevrandao: B256,
+        now_secs: u64,
     ) -> Result<(Block, Snapshot<S>), ConsensusError> {
         let parent_digest = parent.commitment();
         let parent_snapshot = self
@@ -137,7 +141,9 @@ where
         let txs = self.mempool.build(self.max_txs, &excluded);
 
         let height = parent.height + 1;
-        let context = block_context(height, prevrandao);
+        let timestamp = Block::next_timestamp(now_secs, parent.timestamp)
+            .ok_or(ConsensusError::TimestampOverflow { parent_timestamp: parent.timestamp })?;
+        let context = block_context(height, timestamp, prevrandao);
         let txs_bytes: Vec<Bytes> = txs.iter().map(|tx| tx.bytes.clone()).collect();
         let outcome = self
             .executor
@@ -150,7 +156,7 @@ where
             self.state.compute_root(&merged_changes).await.map_err(ConsensusError::StateDb)?;
         let state_root = StateRoot(state_root);
 
-        let block = Block { parent: parent.id(), height, prevrandao, state_root, txs };
+        let block = Block { parent: parent.id(), height, timestamp, prevrandao, state_root, txs };
         let tx_ids = self.tx_ids_from_block(&block);
         let snapshot = Snapshot::new(
             Some(parent_digest),
@@ -397,6 +403,7 @@ mod tests {
         Block {
             parent: kora_domain::BlockId(B256::ZERO),
             height: 0,
+            timestamp: 0,
             prevrandao: B256::ZERO,
             state_root: StateRoot(B256::ZERO),
             txs: Vec::new(),
@@ -435,7 +442,7 @@ mod tests {
         let builder = ProposalBuilder::new(state, mempool, snapshots, executor);
 
         let parent = parent_block();
-        let result = builder.build_proposal(&parent, B256::ZERO);
+        let result = builder.build_proposal(&parent, B256::ZERO, 0);
 
         assert!(matches!(result, Err(ConsensusError::SnapshotNotFound(_))));
     }
@@ -461,7 +468,7 @@ mod tests {
 
         let builder = ProposalBuilder::new(state, mempool, snapshots, executor);
 
-        let result = builder.build_proposal(&parent, B256::ZERO);
+        let result = builder.build_proposal(&parent, B256::ZERO, 0);
         assert!(result.is_ok());
 
         let (block, snapshot) = result.unwrap();
@@ -495,7 +502,7 @@ mod tests {
 
         let builder = ProposalBuilder::new(state, mempool, snapshots, executor);
 
-        let result = builder.build_proposal(&parent, B256::repeat_byte(0xAB));
+        let result = builder.build_proposal(&parent, B256::repeat_byte(0xAB), 0);
         assert!(result.is_ok());
 
         let (block, snapshot) = result.unwrap();
@@ -530,7 +537,7 @@ mod tests {
 
         let builder = ProposalBuilder::new(state, mempool, snapshots, executor).with_max_txs(10);
 
-        let result = builder.build_proposal(&parent, B256::ZERO);
+        let result = builder.build_proposal(&parent, B256::ZERO, 0);
         assert!(result.is_ok());
 
         let (block, _) = result.unwrap();
@@ -565,7 +572,7 @@ mod tests {
 
         let builder = ProposalBuilder::new(state, mempool, snapshots, executor);
 
-        let (block, snapshot) = builder.build_proposal(&parent, B256::ZERO).unwrap();
+        let (block, snapshot) = builder.build_proposal(&parent, B256::ZERO, 0).unwrap();
 
         // MockStateDb::compute_root returns B256::repeat_byte(0x42)
         let expected_root = StateRoot(B256::repeat_byte(0x42));
@@ -599,7 +606,7 @@ mod tests {
 
         let builder = ProposalBuilder::new(state, mempool, snapshots, executor);
 
-        let (block, _) = builder.build_proposal(&parent, B256::ZERO).unwrap();
+        let (block, _) = builder.build_proposal(&parent, B256::ZERO, 0).unwrap();
 
         assert_eq!(block.txs.len(), 3);
     }
@@ -615,6 +622,7 @@ mod tests {
         let parent = Block {
             parent: kora_domain::BlockId(B256::ZERO),
             height: 0,
+            timestamp: 0,
             prevrandao: B256::ZERO,
             state_root: StateRoot(B256::ZERO),
             txs: vec![tx.clone()],
@@ -632,7 +640,7 @@ mod tests {
         mempool.add(tx);
 
         let builder = ProposalBuilder::new(state, mempool, snapshots, executor);
-        let result = builder.build_proposal(&parent, B256::ZERO).unwrap();
+        let result = builder.build_proposal(&parent, B256::ZERO, 0).unwrap();
 
         assert!(result.0.txs.is_empty());
     }
