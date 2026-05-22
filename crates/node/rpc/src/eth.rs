@@ -16,6 +16,7 @@ use alloy_primitives::{Address, B256, Bytes, U64, U256};
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use kora_domain::MempoolEvent;
 use tokio::sync::RwLock;
+use tracing::warn;
 
 use crate::{
     error::RpcError,
@@ -958,11 +959,16 @@ async fn block_by_number_or_none<S: StateProvider>(
     block_number: u64,
     full_transactions: bool,
 ) -> Option<RpcBlock> {
-    provider
+    match provider
         .block_by_number(BlockNumberOrTag::Number(U64::from(block_number)), full_transactions)
         .await
-        .ok()
-        .flatten()
+    {
+        Ok(block) => block,
+        Err(e) => {
+            warn!(block_number, error = %e, "failed to fetch block by number");
+            None
+        }
+    }
 }
 
 fn resolve_fee_history_newest(newest_block: BlockNumberOrTag, head: u64) -> u64 {

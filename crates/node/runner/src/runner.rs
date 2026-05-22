@@ -545,7 +545,9 @@ impl NodeRunner for ProductionRunner {
         let reporter = Reporters::from((seed_reporter, inner_reporters));
 
         for tx in &self.bootstrap.bootstrap_txs {
-            let _ = ledger.submit_tx(tx.clone()).await;
+            if !ledger.submit_tx(tx.clone()).await {
+                warn!("failed to submit bootstrap transaction to mempool");
+            }
         }
 
         let engine = simplex::Engine::new(
