@@ -274,11 +274,14 @@ mod mempool_tests {
 
         publish_mempool_inclusions(Some(&sender), &block);
 
-        assert_eq!(receiver.try_recv().unwrap(), MempoolEvent::TxIncluded {
-            hash: keccak256(&tx.bytes),
-            block_number: block.height,
-            block_hash,
-        });
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            MempoolEvent::TxIncluded {
+                hash: keccak256(&tx.bytes),
+                block_number: block.height,
+                block_hash,
+            }
+        );
     }
 }
 

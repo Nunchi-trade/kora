@@ -579,11 +579,14 @@ impl Mempool for TransactionPool {
             .iter()
             .filter(|(_, queue)| !queue.pending.is_empty())
             .map(|(sender, queue)| {
-                (*sender, BuildSenderState {
-                    txs: queue.pending.clone(),
-                    index: 0,
-                    expected_nonce: queue.next_nonce,
-                })
+                (
+                    *sender,
+                    BuildSenderState {
+                        txs: queue.pending.clone(),
+                        index: 0,
+                        expected_nonce: queue.next_nonce,
+                    },
+                )
             })
             .collect();
         let pending_count = senders.values().map(|state| state.txs.len()).sum();
@@ -747,14 +750,17 @@ mod tests {
         pool.add(tx.clone()).unwrap();
 
         let event = receiver.try_recv().unwrap();
-        assert_eq!(event, MempoolEvent::TxAdded {
-            hash: tx.hash,
-            from: tx.sender,
-            to: tx.envelope.to(),
-            value: tx.envelope.value(),
-            gas_price: U256::from(tx.effective_gas_price),
-            nonce: tx.nonce,
-        });
+        assert_eq!(
+            event,
+            MempoolEvent::TxAdded {
+                hash: tx.hash,
+                from: tx.sender,
+                to: tx.envelope.to(),
+                value: tx.envelope.value(),
+                gas_price: U256::from(tx.effective_gas_price),
+                nonce: tx.nonce,
+            }
+        );
     }
 
     #[test]
@@ -769,10 +775,10 @@ mod tests {
         pool.add(high_fee.clone()).unwrap();
 
         let _ = receiver.try_recv().unwrap();
-        assert_eq!(receiver.try_recv().unwrap(), MempoolEvent::TxEvicted {
-            hash: low_fee.hash,
-            reason: "replaced".to_string()
-        });
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            MempoolEvent::TxEvicted { hash: low_fee.hash, reason: "replaced".to_string() }
+        );
         assert!(matches!(
             receiver.try_recv().unwrap(),
             MempoolEvent::TxAdded { hash, .. } if hash == high_fee.hash
@@ -1082,10 +1088,10 @@ mod tests {
 
         pool.remove(&hash);
 
-        assert_eq!(receiver.try_recv().unwrap(), MempoolEvent::TxEvicted {
-            hash,
-            reason: "removed".to_string()
-        });
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            MempoolEvent::TxEvicted { hash, reason: "removed".to_string() }
+        );
     }
 
     #[test]
@@ -1102,10 +1108,10 @@ mod tests {
 
         pool.remove_with_reason(&hash, "expired");
 
-        assert_eq!(receiver.try_recv().unwrap(), MempoolEvent::TxEvicted {
-            hash,
-            reason: "expired".to_string()
-        });
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            MempoolEvent::TxEvicted { hash, reason: "expired".to_string() }
+        );
     }
 
     #[test]
