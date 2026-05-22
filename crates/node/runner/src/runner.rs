@@ -20,7 +20,7 @@ use commonware_consensus::{
     types::{Epoch, FixedEpocher, ViewDelta},
 };
 use commonware_cryptography::{Committable as _, bls12381::primitives::variant::MinSig, ed25519};
-use commonware_p2p::{Manager, TrackedPeers};
+use commonware_p2p::{Blocker, Manager, TrackedPeers};
 use commonware_runtime::{
     Clock as _, Handle as RuntimeHandle, Metrics as _, Spawner, ThreadPooler as _,
     buffer::paged::CacheRef, tokio as cw_tokio,
@@ -51,6 +51,42 @@ type Peer = ed25519::PublicKey;
 type CertArchive = Finalization<ThresholdScheme, ConsensusDigest>;
 type MarshalMailbox = Mailbox<ThresholdScheme, Standard<Block>>;
 type NodeStateRptr = NodeStateReporter<ThresholdScheme>;
+
+/// A no-op [`Blocker`] that never permanently bans peers.
+///
+/// When a restarted node catches up, the resolver's `verify_block()` may return
+/// `false` because parent state snapshots are missing (not because the peer sent
+/// invalid data). The default blocker (`transport.oracle`) permanently blocks
+/// that peer, and in a 4-validator cluster all 3 peers get blocked within
+/// milliseconds, making catch-up impossible.
+///
+/// This struct implements [`Blocker`] with an empty `block()` method so that
+/// the resolver and simplex engine never permanently ban peers for transient
+/// verification failures. The P2P oracle still handles peer *discovery* and
+/// *tracking*; only the punitive blocking path is disabled.
+///
+/// This is a Kora-side workaround. The ideal upstream fix would add
+/// retry/back-off semantics to the resolver so it can distinguish transient
+/// failures from genuinely Byzantine behaviour.
+#[derive(Clone, Debug)]
+struct NoOpBlocker<P> {
+    _marker: std::marker::PhantomData<P>,
+}
+
+impl<P> NoOpBlocker<P> {
+    const fn new() -> Self {
+        Self { _marker: std::marker::PhantomData }
+    }
+}
+
+impl<P: commonware_cryptography::PublicKey> Blocker for NoOpBlocker<P> {
+    type PublicKey = P;
+
+    fn block(&mut self, peer: Self::PublicKey) -> impl std::future::Future<Output = ()> + Send {
+        warn!(?peer, "NoOpBlocker: ignoring block request for peer (catch-up safe)");
+        async {}
+    }
+}
 
 fn default_page_cache(context: &cw_tokio::Context) -> CacheRef {
     DefaultPool::init(context)
@@ -662,7 +698,7 @@ impl NodeRunner for ProductionRunner {
             &context.with_label("resolver"),
             my_pk.clone(),
             transport.oracle.clone(),
-            transport.oracle.clone(),
+            NoOpBlocker::<Peer>::new(),
             transport.marshal.backfill,
         );
 
@@ -721,7 +757,7 @@ impl NodeRunner for ProductionRunner {
             simplex::Config {
                 scheme: self.scheme.clone(),
                 elector: Random,
-                blocker: transport.oracle.clone(),
+                blocker: NoOpBlocker::<Peer>::new(),
                 automaton: marshaled.clone(),
                 relay: marshaled,
                 reporter,
