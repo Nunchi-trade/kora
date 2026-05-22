@@ -120,6 +120,7 @@ mod tests {
         let block = Block {
             parent: BlockId(B256::from([0xAAu8; 32])),
             height: 7,
+            timestamp: 1_700_000_007,
             prevrandao: B256::from([0x55u8; 32]),
             state_root: StateRoot(B256::from([0xBBu8; 32])),
             txs,

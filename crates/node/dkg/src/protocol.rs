@@ -451,10 +451,10 @@ impl DkgParticipant {
         // Queue public message for broadcast
         self.outgoing.push((
             None, // broadcast
-            ProtocolMessage::new(
-                ceremony_id,
-                ProtocolMessageKind::DealerPublic { dealer: my_pk.clone(), msg: pub_msg.clone() },
-            ),
+            ProtocolMessage::new(ceremony_id, ProtocolMessageKind::DealerPublic {
+                dealer: my_pk.clone(),
+                msg: pub_msg.clone(),
+            }),
         ));
 
         // Queue private messages for each player, storing our own
@@ -465,10 +465,10 @@ impl DkgParticipant {
             } else {
                 self.outgoing.push((
                     Some(player_pk.clone()),
-                    ProtocolMessage::new(
-                        ceremony_id,
-                        ProtocolMessageKind::DealerPrivate { dealer: my_pk.clone(), msg: priv_msg },
-                    ),
+                    ProtocolMessage::new(ceremony_id, ProtocolMessageKind::DealerPrivate {
+                        dealer: my_pk.clone(),
+                        msg: priv_msg,
+                    }),
                 ));
             }
         }
@@ -627,10 +627,9 @@ impl DkgParticipant {
                     self.signed_logs.iter().map(|(pk, log)| (pk.clone(), log.clone())).collect();
                 self.outgoing.push((
                     Some(from.clone()),
-                    ProtocolMessage::new(
-                        self.session.ceremony_id,
-                        ProtocolMessageKind::AllLogs { logs },
-                    ),
+                    ProtocolMessage::new(self.session.ceremony_id, ProtocolMessageKind::AllLogs {
+                        logs,
+                    }),
                 ));
             }
             ProtocolMessageKind::AllLogs { logs } => {
@@ -687,14 +686,11 @@ impl DkgParticipant {
                 let ceremony_id = self.ceremony_id();
                 self.outgoing.push((
                     Some(dealer.clone()),
-                    ProtocolMessage::new(
-                        ceremony_id,
-                        ProtocolMessageKind::PlayerAck {
-                            player: self.config.my_public_key(),
-                            dealer: dealer.clone(),
-                            ack,
-                        },
-                    ),
+                    ProtocolMessage::new(ceremony_id, ProtocolMessageKind::PlayerAck {
+                        player: self.config.my_public_key(),
+                        dealer: dealer.clone(),
+                        ack,
+                    }),
                 ));
                 self.acks_sent.insert(dealer.clone());
             } else {
@@ -722,10 +718,9 @@ impl DkgParticipant {
                 let ceremony_id = self.ceremony_id();
                 self.outgoing.push((
                     None, // broadcast
-                    ProtocolMessage::new(
-                        ceremony_id,
-                        ProtocolMessageKind::DealerLog { log: signed_log_clone },
-                    ),
+                    ProtocolMessage::new(ceremony_id, ProtocolMessageKind::DealerLog {
+                        log: signed_log_clone,
+                    }),
                 ));
             } else {
                 return Err(DkgError::CeremonyFailed("Our own dealer log is invalid".into()));

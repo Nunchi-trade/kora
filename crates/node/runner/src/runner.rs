@@ -41,17 +41,6 @@ use tracing::{debug, info, trace, warn};
 
 use crate::{RevmApplication, RunnerError, scheme::ThresholdScheme};
 
-const BLOCK_CODEC_MAX_TXS: usize = 10_000;
-// Large enough for a devnet stress batch of 10k signed transfers while still
-// preserving the per-transaction 128 KiB admission limit in the tx validator.
-const BLOCK_CODEC_MAX_TX_BYTES: usize = 8 * 1024 * 1024;
-const CONSENSUS_LEADER_TIMEOUT: Duration = Duration::from_secs(2);
-const CONSENSUS_CERTIFICATION_TIMEOUT: Duration = Duration::from_secs(4);
-const CONSENSUS_TIMEOUT_RETRY: Duration = Duration::from_secs(1);
-const CONSENSUS_FETCH_TIMEOUT: Duration = Duration::from_secs(1);
-const CONSENSUS_ACTIVITY_TIMEOUT: ViewDelta = ViewDelta::new(256);
-const CONSENSUS_SKIP_TIMEOUT: ViewDelta = ViewDelta::new(32);
-const SIGNATURE_THREADS: usize = 2;
 const EPOCH_LENGTH: u64 = u64::MAX;
 const PARTITION_PREFIX: &str = "kora";
 const RUNTIME_DIR_ENV: &str = "KORA_RUNTIME_DIR";
@@ -82,68 +71,11 @@ fn runtime_storage_directory_from(data_dir: &Path, override_dir: Option<OsString
     }
 }
 
-const fn block_codec_cfg() -> BlockCfg {
-    BlockCfg { max_txs: BLOCK_CODEC_MAX_TXS, tx: TxCfg { max_tx_bytes: BLOCK_CODEC_MAX_TX_BYTES } }
-}
-
-#[derive(Clone)]
-struct ConstantSchemeProvider(Arc<ThresholdScheme>);
-
-impl commonware_cryptography::certificate::Provider for ConstantSchemeProvider {
-    type Scope = Epoch;
-    type Scheme = ThresholdScheme;
-
-    fn scoped(&self, _epoch: Epoch) -> Option<Arc<Self::Scheme>> {
-        Some(self.0.clone())
+const fn block_codec_cfg(config: &kora_config::ConsensusBlockCodecConfig) -> BlockCfg {
+    BlockCfg {
+        max_txs: config.max_txs.get(),
+        tx: TxCfg { max_tx_bytes: config.max_tx_bytes.get() },
     }
-
-    fn all(&self) -> Option<Arc<Self::Scheme>> {
-        Some(self.0.clone())
-    }
-}
-
-impl From<ThresholdScheme> for ConstantSchemeProvider {
-    fn from(scheme: ThresholdScheme) -> Self {
-        Self(Arc::new(scheme))
-    }
-}
-
-#[derive(Clone, Debug)]
-struct RevmContextProvider {
-    gas_limit: u64,
-}
-
-impl BlockContextProvider for RevmContextProvider {
-    fn context(&self, block: &Block) -> BlockContext {
-        let header = Header {
-            number: block.height,
-            timestamp: block.height,
-            gas_limit: self.gas_limit,
-            beneficiary: Address::ZERO,
-            base_fee_per_gas: Some(0),
-            ..Default::default()
-        };
-        BlockContext::new(header, B256::ZERO, block.prevrandao)
-    }
-}
-
-fn spawn_ledger_observers<S: Spawner>(service: LedgerService, spawner: S) {
-    let mut receiver = service.subscribe();
-    spawner.shared(true).spawn(move |_| async move {
-        while let Some(event) = receiver.next().await {
-            match event {
-                LedgerEvent::TransactionSubmitted(id) => {
-                    trace!(tx=?id, "mempool accepted transaction");
-                }
-                LedgerEvent::SeedUpdated(digest, seed) => {
-                    debug!(digest=?digest, seed=?seed, "seed cache refreshed");
-                }
-                LedgerEvent::SnapshotPersisted(digest) => {
-                    trace!(?digest, "snapshot persisted");
-                }
-            }
-        }
-    });
 }
 
 fn seed_genesis_block_index(index: &BlockIndex, genesis: &Block, gas_limit: u64) {
@@ -168,10 +100,14 @@ fn seed_hash(seed: impl commonware_codec::Encode) -> B256 {
     keccak256(seed.encode())
 }
 
-fn index_recovered_block(index: &BlockIndex, block: &Block, provider: &RevmContextProvider) {
+fn index_recovered_block(
+    index: &kora_indexer::BlockIndex,
+    block: &Block,
+    provider: &RevmContextProvider,
+) {
     let block_context = provider.context(block);
     let transaction_hashes = block.txs.iter().map(|tx| keccak256(&tx.bytes)).collect();
-    let indexed_block = IndexedBlock {
+    let indexed_block = kora_indexer::IndexedBlock {
         hash: block.id().0,
         number: block.height,
         parent_hash: block.parent.0,
@@ -187,7 +123,7 @@ fn index_recovered_block(index: &BlockIndex, block: &Block, provider: &RevmConte
 
 async fn recover_finalized_state<FB, FC>(
     ledger: &LedgerService,
-    block_index: Option<&Arc<BlockIndex>>,
+    block_index: Option<&Arc<kora_indexer::BlockIndex>>,
     finalized_blocks: &FB,
     finalizations_by_height: &FC,
     provider: &RevmContextProvider,
@@ -245,6 +181,66 @@ where
     Ok(())
 }
 
+#[derive(Clone)]
+struct ConstantSchemeProvider(Arc<ThresholdScheme>);
+
+impl commonware_cryptography::certificate::Provider for ConstantSchemeProvider {
+    type Scope = Epoch;
+    type Scheme = ThresholdScheme;
+
+    fn scoped(&self, _epoch: Epoch) -> Option<Arc<Self::Scheme>> {
+        Some(self.0.clone())
+    }
+
+    fn all(&self) -> Option<Arc<Self::Scheme>> {
+        Some(self.0.clone())
+    }
+}
+
+impl From<ThresholdScheme> for ConstantSchemeProvider {
+    fn from(scheme: ThresholdScheme) -> Self {
+        Self(Arc::new(scheme))
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RevmContextProvider {
+    gas_limit: u64,
+}
+
+impl BlockContextProvider for RevmContextProvider {
+    fn context(&self, block: &Block) -> BlockContext {
+        let header = Header {
+            number: block.height,
+            timestamp: block.timestamp,
+            gas_limit: self.gas_limit,
+            beneficiary: Address::ZERO,
+            base_fee_per_gas: Some(0),
+            ..Default::default()
+        };
+        BlockContext::new(header, B256::ZERO, block.prevrandao)
+    }
+}
+
+fn spawn_ledger_observers<S: Spawner>(service: LedgerService, spawner: S) {
+    let mut receiver = service.subscribe();
+    spawner.shared(true).spawn(move |_| async move {
+        while let Some(event) = receiver.next().await {
+            match event {
+                LedgerEvent::TransactionSubmitted(id) => {
+                    trace!(tx=?id, "mempool accepted transaction");
+                }
+                LedgerEvent::SeedUpdated(digest, seed) => {
+                    debug!(digest=?digest, seed=?seed, "seed cache refreshed");
+                }
+                LedgerEvent::SnapshotPersisted(digest) => {
+                    trace!(?digest, "snapshot persisted");
+                }
+            }
+        }
+    });
+}
+
 /// Production validator node runner.
 #[derive(Clone, Debug)]
 pub struct ProductionRunner {
@@ -252,8 +248,6 @@ pub struct ProductionRunner {
     pub scheme: ThresholdScheme,
     /// Chain ID.
     pub chain_id: u64,
-    /// Gas limit per block.
-    pub gas_limit: u64,
     /// Bootstrap configuration.
     pub bootstrap: BootstrapConfig,
     /// Storage partition prefix.
@@ -266,16 +260,13 @@ pub struct ProductionRunner {
 
 impl ProductionRunner {
     /// Create a new production runner.
-    pub fn new(
-        scheme: ThresholdScheme,
-        chain_id: u64,
-        gas_limit: u64,
-        bootstrap: BootstrapConfig,
-    ) -> Self {
+    ///
+    /// The gas limit is sourced exclusively from `config.execution.gas_limit`
+    /// at runtime, so it is not accepted here.
+    pub fn new(scheme: ThresholdScheme, chain_id: u64, bootstrap: BootstrapConfig) -> Self {
         Self {
             scheme,
             chain_id,
-            gas_limit,
             bootstrap,
             partition_prefix: PARTITION_PREFIX.to_string(),
             rpc_config: None,
@@ -336,6 +327,8 @@ impl NodeRunner for ProductionRunner {
 
     async fn run(&self, ctx: NodeRunContext<Self::Transport>) -> Result<Self::Handle, Self::Error> {
         let (context, config, mut transport) = ctx.into_parts();
+        let gas_limit = config.execution.gas_limit;
+        let simplex_config = config.consensus.simplex;
 
         info!(chain_id = self.chain_id, "Starting production validator");
 
@@ -350,10 +343,10 @@ impl NodeRunner for ProductionRunner {
         );
 
         let page_cache = default_page_cache(&context);
-        let block_cfg = block_codec_cfg();
+        let block_cfg = block_codec_cfg(&config.consensus.block_codec);
         let partition_prefix = &self.partition_prefix;
         let strategy = context
-            .create_strategy(NZUsize!(SIGNATURE_THREADS))
+            .create_strategy(NZUsize!(2))
             .map_err(|e| anyhow::anyhow!("failed to create signature strategy: {e}"))?;
 
         <ThresholdScheme as commonware_cryptography::certificate::Scheme>::certificate_codec_config_unbounded();
@@ -374,11 +367,12 @@ impl NodeRunner for ProductionRunner {
         .context("init blocks archive")?;
 
         let has_finalized_history = finalized_blocks.last_index().is_some();
-        let state = LedgerView::init_with_genesis(
+        let state = LedgerView::init_with_genesis_options(
             context.with_label("state"),
             format!("{}-qmdb", self.partition_prefix),
             self.bootstrap.genesis_alloc.clone(),
             !has_finalized_history,
+            self.bootstrap.genesis_timestamp,
         )
         .await
         .context("init qmdb")?;
@@ -386,13 +380,12 @@ impl NodeRunner for ProductionRunner {
         let ledger = LedgerService::new(state.clone());
         let block_index = self.rpc_config.as_ref().map(|_| {
             let index = Arc::new(BlockIndex::new());
-            seed_genesis_block_index(&index, &ledger.genesis_block(), self.gas_limit);
+            seed_genesis_block_index(&index, &ledger.genesis_block(), gas_limit);
             index
         });
         spawn_ledger_observers(ledger.clone(), context.clone());
 
-        let executor = RevmExecutor::new(self.chain_id);
-        let context_provider = RevmContextProvider { gas_limit: self.gas_limit };
+        let context_provider = RevmContextProvider { gas_limit };
         recover_finalized_state(
             &ledger,
             block_index.as_ref(),
@@ -457,8 +450,13 @@ impl NodeRunner for ProductionRunner {
             .map_err(|e| anyhow::anyhow!("failed to load validator key: {}", e))?;
         let my_pk = commonware_cryptography::Signer::public_key(&validator_key);
 
-        let mut finalized_reporter =
-            FinalizedReporter::new(ledger.clone(), context.clone(), executor, context_provider);
+        let finalized_executor = RevmExecutor::new(self.chain_id);
+        let mut finalized_reporter = FinalizedReporter::new(
+            ledger.clone(),
+            context.clone(),
+            finalized_executor,
+            context_provider,
+        );
         if let Some(block_index) = block_index {
             finalized_reporter = finalized_reporter.with_block_index(block_index);
         }
@@ -500,7 +498,7 @@ impl NodeRunner for ProductionRunner {
             ledger.clone(),
             executor,
             block_cfg.max_txs,
-            self.gas_limit,
+            gas_limit,
         );
         if let Some((state, _)) = &self.rpc_config {
             app = app.with_node_state(state.clone());
@@ -521,32 +519,31 @@ impl NodeRunner for ProductionRunner {
             let _ = ledger.submit_tx(tx.clone()).await;
         }
 
-        let engine = simplex::Engine::new(
-            context.with_label("engine"),
-            simplex::Config {
-                scheme: self.scheme.clone(),
-                elector: Random,
-                blocker: transport.oracle.clone(),
-                automaton: marshaled.clone(),
-                relay: marshaled,
-                reporter,
-                strategy,
-                partition: self.partition_prefix.clone(),
-                mailbox_size: MAILBOX_SIZE,
-                epoch: Epoch::zero(),
-                replay_buffer: NZUsize!(16 * 1024 * 1024),
-                write_buffer: NZUsize!(16 * 1024 * 1024),
-                leader_timeout: CONSENSUS_LEADER_TIMEOUT,
-                certification_timeout: CONSENSUS_CERTIFICATION_TIMEOUT,
-                timeout_retry: CONSENSUS_TIMEOUT_RETRY,
-                fetch_timeout: CONSENSUS_FETCH_TIMEOUT,
-                activity_timeout: CONSENSUS_ACTIVITY_TIMEOUT,
-                skip_timeout: CONSENSUS_SKIP_TIMEOUT,
-                fetch_concurrent: 32,
-                page_cache,
-                forwarding: simplex::ForwardingPolicy::SilentLeader,
-            },
-        );
+        let engine = simplex::Engine::new(context.with_label("engine"), simplex::Config {
+            scheme: self.scheme.clone(),
+            elector: Random,
+            blocker: transport.oracle.clone(),
+            automaton: marshaled.clone(),
+            relay: marshaled,
+            reporter,
+            strategy,
+            partition: self.partition_prefix.clone(),
+            mailbox_size: MAILBOX_SIZE,
+            epoch: Epoch::zero(),
+            replay_buffer: simplex_config.replay_buffer_bytes,
+            write_buffer: simplex_config.write_buffer_bytes,
+            leader_timeout: Duration::from_secs(simplex_config.leader_timeout_secs.get()),
+            certification_timeout: Duration::from_secs(
+                simplex_config.certification_timeout_secs.get(),
+            ),
+            timeout_retry: Duration::from_secs(simplex_config.timeout_retry_secs.get()),
+            fetch_timeout: Duration::from_secs(simplex_config.fetch_timeout_secs.get()),
+            activity_timeout: ViewDelta::new(simplex_config.activity_timeout_views.get()),
+            skip_timeout: ViewDelta::new(simplex_config.skip_timeout_views.get()),
+            fetch_concurrent: simplex_config.fetch_concurrent.get(),
+            page_cache,
+            forwarding: simplex::ForwardingPolicy::SilentLeader,
+        });
         engine.start(transport.simplex.votes, transport.simplex.certs, transport.simplex.resolver);
 
         info!("Validator started successfully");
@@ -556,6 +553,9 @@ impl NodeRunner for ProductionRunner {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroUsize;
+
+    use kora_config::ConsensusBlockCodecConfig;
     use kora_domain::{BlockId, StateRoot};
 
     use super::*;
@@ -566,6 +566,7 @@ mod tests {
         let genesis = Block {
             parent: BlockId(B256::repeat_byte(0x11)),
             height: 0,
+            timestamp: 0,
             prevrandao: B256::repeat_byte(0x22),
             state_root: StateRoot(B256::repeat_byte(0x33)),
             txs: Vec::new(),
@@ -584,6 +585,19 @@ mod tests {
         assert_eq!(indexed.gas_used, 0);
         assert_eq!(indexed.transaction_hashes, Vec::<B256>::new());
         assert_eq!(index.get_block_by_hash(&genesis.id().0).expect("genesis by hash").number, 0);
+    }
+
+    #[test]
+    fn block_codec_cfg_uses_consensus_config() {
+        let config = ConsensusBlockCodecConfig {
+            max_txs: NonZeroUsize::new(512).unwrap(),
+            max_tx_bytes: NonZeroUsize::new(4096).unwrap(),
+        };
+
+        let block_cfg = block_codec_cfg(&config);
+
+        assert_eq!(block_cfg.max_txs, 512);
+        assert_eq!(block_cfg.tx.max_tx_bytes, 4096);
     }
 
     #[test]

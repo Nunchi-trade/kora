@@ -1,6 +1,9 @@
 //! REVM-based consensus application implementation.
 
-use std::{collections::BTreeSet, time::Instant};
+use std::{
+    collections::BTreeSet,
+    time::{Instant, UNIX_EPOCH},
+};
 
 use alloy_consensus::Header;
 use alloy_primitives::{Address, B256, Bytes};
@@ -21,6 +24,10 @@ use kora_qmdb_ledger::QmdbState;
 use kora_rpc::NodeState;
 use rand::Rng;
 use tracing::{debug, trace, warn};
+
+fn unix_timestamp_secs<Env: Clock>(env: &Env) -> u64 {
+    env.current().duration_since(UNIX_EPOCH).map(|duration| duration.as_secs()).unwrap_or(0)
+}
 
 /// REVM-based consensus application.
 #[derive(Clone)]
@@ -65,10 +72,10 @@ where
         self
     }
 
-    fn block_context(&self, height: u64, prevrandao: B256) -> BlockContext {
+    fn block_context(&self, height: u64, timestamp: u64, prevrandao: B256) -> BlockContext {
         let header = Header {
             number: height,
-            timestamp: height,
+            timestamp,
             gas_limit: self.gas_limit,
             beneficiary: Address::ZERO,
             base_fee_per_gas: Some(0),
@@ -81,7 +88,7 @@ where
         self.ledger.seed_for_parent(parent_digest).await.unwrap_or(B256::ZERO)
     }
 
-    async fn build_block(&self, parent: &Block) -> Option<Block> {
+    async fn build_block(&self, parent: &Block, timestamp: u64) -> Option<Block> {
         use kora_consensus::Mempool as _;
 
         let start = Instant::now();
@@ -118,7 +125,7 @@ where
 
         let prevrandao = self.get_prevrandao(parent_digest).await;
         let height = parent.height + 1;
-        let context = self.block_context(height, prevrandao);
+        let context = self.block_context(height, timestamp, prevrandao);
         let txs_bytes: Vec<Bytes> = txs.iter().map(|tx| tx.bytes.clone()).collect();
 
         let exec_start = Instant::now();
@@ -145,7 +152,7 @@ where
             .ok()?;
         let root_elapsed = root_start.elapsed();
 
-        let block = Block { parent: parent.id(), height, prevrandao, state_root, txs };
+        let block = Block { parent: parent.id(), height, timestamp, prevrandao, state_root, txs };
 
         let block_digest = block.commitment();
 
@@ -153,6 +160,7 @@ where
         debug!(
             ?block_digest,
             height,
+            timestamp,
             txs = block.txs.len(),
             snapshot_ms = snapshot_elapsed.as_millis(),
             exec_ms = exec_elapsed.as_millis(),
@@ -179,7 +187,7 @@ where
         };
         let snapshot_elapsed = start.elapsed();
 
-        let context = self.block_context(block.height, block.prevrandao);
+        let context = self.block_context(block.height, block.timestamp, block.prevrandao);
         let exec_start = Instant::now();
         let execution =
             match BlockExecution::execute(&parent_snapshot, &self.executor, &context, &block.txs)
@@ -284,20 +292,32 @@ where
 
     fn propose<A>(
         &mut self,
-        _context: (Env, Self::Context),
+        context: (Env, Self::Context),
         mut ancestry: AncestorStream<A, Self::Block>,
     ) -> impl std::future::Future<Output = Option<Self::Block>> + Send
     where
         A: BlockProvider<Block = Self::Block>,
     {
         let node_state = self.node_state.clone();
+        let env = context.0;
         async move {
             let start = Instant::now();
             let parent = ancestry.next().await?;
             let ancestry_elapsed = start.elapsed();
+            let now_secs = unix_timestamp_secs(&env);
+            let timestamp = match Block::next_timestamp(now_secs, parent.timestamp) {
+                Some(ts) => ts,
+                None => {
+                    tracing::error!(
+                        parent_timestamp = parent.timestamp,
+                        "timestamp overflow: cannot produce a timestamp after parent"
+                    );
+                    return None;
+                }
+            };
 
             let build_start = Instant::now();
-            let block = self.build_block(&parent).await;
+            let block = self.build_block(&parent, timestamp).await;
             let build_elapsed = build_start.elapsed();
 
             if let Some(ref b) = block {
@@ -306,6 +326,7 @@ where
                 }
                 debug!(
                     height = b.height,
+                    timestamp = b.timestamp,
                     ancestry_ms = ancestry_elapsed.as_millis(),
                     build_ms = build_elapsed.as_millis(),
                     total_ms = start.elapsed().as_millis(),

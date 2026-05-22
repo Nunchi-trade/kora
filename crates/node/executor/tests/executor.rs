@@ -365,18 +365,15 @@ async fn test_mock_state_db_commit_stores_changes() {
     let address = Address::from([0x01; 20]);
 
     let mut changes = ChangeSet::new();
-    changes.insert(
-        address,
-        AccountUpdate {
-            created: true,
-            selfdestructed: false,
-            nonce: 10,
-            balance: U256::from(5000),
-            code_hash: B256::ZERO,
-            code: None,
-            storage: std::collections::BTreeMap::new(),
-        },
-    );
+    changes.insert(address, AccountUpdate {
+        created: true,
+        selfdestructed: false,
+        nonce: 10,
+        balance: U256::from(5000),
+        code_hash: B256::ZERO,
+        code: None,
+        storage: std::collections::BTreeMap::new(),
+    });
 
     let root = state.commit(changes).await.unwrap();
 
@@ -391,25 +388,23 @@ async fn test_mock_state_db_commit_handles_selfdestruct() {
     let address = Address::from([0x01; 20]);
 
     // First create the account.
-    state.insert_account(
-        address,
-        MockAccount { nonce: 5, balance: U256::from(1000), ..Default::default() },
-    );
+    state.insert_account(address, MockAccount {
+        nonce: 5,
+        balance: U256::from(1000),
+        ..Default::default()
+    });
 
     // Then selfdestruct it.
     let mut changes = ChangeSet::new();
-    changes.insert(
-        address,
-        AccountUpdate {
-            created: false,
-            selfdestructed: true,
-            nonce: 0,
-            balance: U256::ZERO,
-            code_hash: B256::ZERO,
-            code: None,
-            storage: std::collections::BTreeMap::new(),
-        },
-    );
+    changes.insert(address, AccountUpdate {
+        created: false,
+        selfdestructed: true,
+        nonce: 0,
+        balance: U256::ZERO,
+        code_hash: B256::ZERO,
+        code: None,
+        storage: std::collections::BTreeMap::new(),
+    });
 
     state.commit(changes).await.unwrap();
 
@@ -424,18 +419,15 @@ async fn test_mock_state_db_commit_stores_code() {
     let code = vec![0x60, 0x00, 0x60, 0x00];
 
     let mut changes = ChangeSet::new();
-    changes.insert(
-        address,
-        AccountUpdate {
-            created: true,
-            selfdestructed: false,
-            nonce: 0,
-            balance: U256::ZERO,
-            code_hash,
-            code: Some(code.clone()),
-            storage: std::collections::BTreeMap::new(),
-        },
-    );
+    changes.insert(address, AccountUpdate {
+        created: true,
+        selfdestructed: false,
+        nonce: 0,
+        balance: U256::ZERO,
+        code_hash,
+        code: Some(code.clone()),
+        storage: std::collections::BTreeMap::new(),
+    });
 
     state.commit(changes).await.unwrap();
 
@@ -478,32 +470,26 @@ fn test_mock_state_db_merge_changes() {
     let address = Address::from([0x01; 20]);
 
     let mut older = ChangeSet::new();
-    older.insert(
-        address,
-        AccountUpdate {
-            created: true,
-            selfdestructed: false,
-            nonce: 1,
-            balance: U256::from(100),
-            code_hash: B256::ZERO,
-            code: None,
-            storage: std::collections::BTreeMap::new(),
-        },
-    );
+    older.insert(address, AccountUpdate {
+        created: true,
+        selfdestructed: false,
+        nonce: 1,
+        balance: U256::from(100),
+        code_hash: B256::ZERO,
+        code: None,
+        storage: std::collections::BTreeMap::new(),
+    });
 
     let mut newer = ChangeSet::new();
-    newer.insert(
-        address,
-        AccountUpdate {
-            created: false,
-            selfdestructed: false,
-            nonce: 5,
-            balance: U256::from(500),
-            code_hash: B256::ZERO,
-            code: None,
-            storage: std::collections::BTreeMap::new(),
-        },
-    );
+    newer.insert(address, AccountUpdate {
+        created: false,
+        selfdestructed: false,
+        nonce: 5,
+        balance: U256::from(500),
+        code_hash: B256::ZERO,
+        code: None,
+        storage: std::collections::BTreeMap::new(),
+    });
 
     let merged = state.merge_changes(older, newer);
 
@@ -537,10 +523,11 @@ async fn test_mock_state_db_exists_returns_true_for_account_with_nonce() {
 async fn test_mock_state_db_exists_returns_true_for_account_with_balance() {
     let state = MockStateDb::new();
     let address = Address::from([0x01; 20]);
-    state.insert_account(
-        address,
-        MockAccount { nonce: 0, balance: U256::from(1), ..Default::default() },
-    );
+    state.insert_account(address, MockAccount {
+        nonce: 0,
+        balance: U256::from(1),
+        ..Default::default()
+    });
 
     assert!(state.exists(&address).await.unwrap());
 }
@@ -566,14 +553,16 @@ fn test_execute_with_populated_state() {
     // Populate some accounts.
     let alice = Address::from([0x01; 20]);
     let bob = Address::from([0x02; 20]);
-    state.insert_account(
-        alice,
-        MockAccount { nonce: 1, balance: U256::from(1000), ..Default::default() },
-    );
-    state.insert_account(
-        bob,
-        MockAccount { nonce: 0, balance: U256::from(500), ..Default::default() },
-    );
+    state.insert_account(alice, MockAccount {
+        nonce: 1,
+        balance: U256::from(1000),
+        ..Default::default()
+    });
+    state.insert_account(bob, MockAccount {
+        nonce: 0,
+        balance: U256::from(500),
+        ..Default::default()
+    });
 
     let context = BlockContext::new(Header::default(), B256::ZERO, B256::ZERO);
     let txs: Vec<Bytes> = vec![];

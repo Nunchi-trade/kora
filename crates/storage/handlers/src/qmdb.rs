@@ -118,18 +118,15 @@ where
 
         let mut changes = ChangeSet::new();
         for (address, balance) in allocs {
-            changes.accounts.insert(
-                address,
-                AccountUpdate {
-                    created: true,
-                    selfdestructed: false,
-                    nonce: 0,
-                    balance,
-                    code_hash: KECCAK256_EMPTY,
-                    code: None,
-                    storage: BTreeMap::new(),
-                },
-            );
+            changes.accounts.insert(address, AccountUpdate {
+                created: true,
+                selfdestructed: false,
+                nonce: 0,
+                balance,
+                code_hash: KECCAK256_EMPTY,
+                code: None,
+                storage: BTreeMap::new(),
+            });
         }
         self.commit(changes).await
     }

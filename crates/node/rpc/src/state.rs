@@ -1,6 +1,7 @@
 //! Node state management for RPC endpoints.
 
 use std::{
+    num::NonZeroU32,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -10,6 +11,9 @@ use std::{
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+
+/// Default validator count used by tests and legacy callers.
+pub(crate) const DEFAULT_VALIDATOR_COUNT: u32 = 4;
 
 /// Shared node state that can be updated by the consensus engine.
 #[derive(Debug, Clone)]
@@ -21,6 +25,7 @@ pub struct NodeState {
 struct NodeStateInner {
     chain_id: u64,
     validator_index: u32,
+    validator_count: NonZeroU32,
     started_at: Instant,
     current_view: AtomicU64,
     finalized_count: AtomicU64,
@@ -32,12 +37,34 @@ struct NodeStateInner {
 
 impl NodeState {
     /// Create a new node state.
+    ///
+    /// Uses the historical four-validator leader schedule. Validator mode should prefer
+    /// [`Self::with_validator_count`] so leadership follows the configured validator set.
     #[must_use]
     pub fn new(chain_id: u64, validator_index: u32) -> Self {
+        Self::with_validator_count(chain_id, validator_index, DEFAULT_VALIDATOR_COUNT)
+    }
+
+    /// Create a new node state with an explicit validator count.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `validator_count` is zero or if `validator_index >= validator_count`.
+    #[must_use]
+    pub fn with_validator_count(chain_id: u64, validator_index: u32, validator_count: u32) -> Self {
+        let validator_count =
+            NonZeroU32::new(validator_count).expect("validator count must be non-zero");
+
+        assert!(
+            validator_index < validator_count.get(),
+            "validator_index ({validator_index}) must be less than validator_count ({validator_count})",
+        );
+
         Self {
             inner: Arc::new(NodeStateInner {
                 chain_id,
                 validator_index,
+                validator_count,
                 started_at: Instant::now(),
                 current_view: AtomicU64::new(0),
                 finalized_count: AtomicU64::new(0),
@@ -52,8 +79,8 @@ impl NodeState {
     /// Update the current view.
     pub fn set_view(&self, view: u64) {
         self.inner.current_view.store(view, Ordering::Relaxed);
-        // Compute leader: view mod 4 (for 4 validators)
-        let is_leader = (view % 4) as u32 == self.inner.validator_index;
+        let leader_index = (view % u64::from(self.inner.validator_count.get())) as u32;
+        let is_leader = leader_index == self.inner.validator_index;
         *self.inner.is_leader.write() = is_leader;
     }
 
@@ -99,7 +126,7 @@ impl NodeState {
 pub struct NodeStatus {
     /// Chain ID.
     pub chain_id: u64,
-    /// This validator's index (0-3).
+    /// This validator's index.
     pub validator_index: u32,
     /// Seconds since node started.
     pub uptime_secs: u64,
@@ -191,6 +218,46 @@ mod tests {
         let status = state.status();
         assert_eq!(status.current_view, 4);
         assert!(status.is_leader);
+    }
+
+    #[test]
+    fn node_state_leadership_uses_validator_count() {
+        let state = NodeState::with_validator_count(1, 4, 5);
+
+        state.set_view(4);
+        assert!(state.status().is_leader);
+
+        state.set_view(5);
+        assert!(!state.status().is_leader);
+
+        state.set_view(9);
+        assert!(state.status().is_leader);
+    }
+
+    #[test]
+    fn node_state_leadership_supports_non_four_validator_sets() {
+        let state = NodeState::with_validator_count(1, 2, 3);
+
+        state.set_view(2);
+        assert!(state.status().is_leader);
+
+        state.set_view(3);
+        assert!(!state.status().is_leader);
+
+        state.set_view(5);
+        assert!(state.status().is_leader);
+    }
+
+    #[test]
+    #[should_panic(expected = "validator count must be non-zero")]
+    fn node_state_validator_count_must_be_nonzero() {
+        let _ = NodeState::with_validator_count(1, 0, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "validator_index (5) must be less than validator_count (4)")]
+    fn node_state_validator_index_must_be_in_range() {
+        let _ = NodeState::with_validator_count(1, 5, 4);
     }
 
     #[test]

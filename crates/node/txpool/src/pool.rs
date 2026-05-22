@@ -321,14 +321,11 @@ impl Mempool for TransactionPool {
             .iter()
             .filter(|(_, queue)| !queue.pending.is_empty())
             .map(|(sender, queue)| {
-                (
-                    *sender,
-                    BuildSenderState {
-                        txs: queue.pending.clone(),
-                        index: 0,
-                        expected_nonce: queue.next_nonce,
-                    },
-                )
+                (*sender, BuildSenderState {
+                    txs: queue.pending.clone(),
+                    index: 0,
+                    expected_nonce: queue.next_nonce,
+                })
             })
             .collect();
         let pending_count = senders.values().map(|state| state.txs.len()).sum();

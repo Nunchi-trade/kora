@@ -197,7 +197,7 @@ pub struct RpcTransactionReceipt {
 }
 
 /// Log entry for JSON-RPC responses.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RpcLog {
     /// Contract address.
