@@ -13,13 +13,25 @@ pub struct ExecutionOutcome {
     pub receipts: Vec<ExecutionReceipt>,
     /// Total gas used by all transactions.
     pub gas_used: u64,
+    /// Addresses that were selfdestructed during block execution.
+    ///
+    /// These addresses had their code and balance removed, but their storage
+    /// entries in QMDB become orphaned (keyed by the old generation). A
+    /// future garbage collector can use this list to reclaim dead storage
+    /// once Commonware supports prefix scanning.
+    pub selfdestructed_addresses: Vec<Address>,
 }
 
 impl ExecutionOutcome {
     /// Create a new empty execution outcome.
     #[must_use]
     pub fn new() -> Self {
-        Self { changes: ChangeSet::new(), receipts: Vec::new(), gas_used: 0 }
+        Self {
+            changes: ChangeSet::new(),
+            receipts: Vec::new(),
+            gas_used: 0,
+            selfdestructed_addresses: Vec::new(),
+        }
     }
 }
 
@@ -83,5 +95,6 @@ mod tests {
         assert!(outcome.changes.is_empty());
         assert!(outcome.receipts.is_empty());
         assert_eq!(outcome.gas_used, 0);
+        assert!(outcome.selfdestructed_addresses.is_empty());
     }
 }

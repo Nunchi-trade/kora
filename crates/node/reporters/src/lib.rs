@@ -4,6 +4,8 @@
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
+mod gc_log;
+
 use std::{fmt, marker::PhantomData, sync::Arc};
 
 use alloy_consensus::{
@@ -23,6 +25,7 @@ use commonware_consensus::{
 use commonware_cryptography::{Committable as _, bls12381::primitives::variant::Variant};
 use commonware_runtime::{Spawner as _, tokio};
 use commonware_utils::acknowledgement::Acknowledgement as _;
+pub use gc_log::SelfdestructGcLog;
 use kora_consensus::BlockExecution;
 use kora_domain::{Block, ConsensusDigest, MempoolEvent, PublicKey};
 use kora_executor::{BlockContext, BlockExecutor, ExecutionOutcome};
@@ -105,6 +108,7 @@ where
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_finalized_update<E, P>(
     state: LedgerService,
     context: tokio::Context,
@@ -112,6 +116,7 @@ async fn handle_finalized_update<E, P>(
     provider: P,
     block_index: Option<Arc<BlockIndex>>,
     mempool_broadcast: Option<MempoolEventSender>,
+    gc_log: Option<Arc<SelfdestructGcLog>>,
     update: Update<Block>,
 ) where
     E: BlockExecutor<OverlayState<QmdbState>, Tx = Bytes>,
@@ -130,10 +135,17 @@ async fn handle_finalized_update<E, P>(
             )
             .await;
 
-            if let Ok((Some(outcome), Some(block_context))) = result.as_ref()
-                && let Some(index) = block_index.as_ref()
-            {
-                index_finalized_block(index, &block, block_context, outcome);
+            if let Ok((Some(outcome), Some(block_context))) = result.as_ref() {
+                if let Some(index) = block_index.as_ref() {
+                    index_finalized_block(index, &block, block_context, outcome);
+                }
+
+                // Record selfdestructed addresses for future GC.
+                if !outcome.selfdestructed_addresses.is_empty()
+                    && let Some(ref log) = gc_log
+                {
+                    log.record(block.height, &outcome.selfdestructed_addresses);
+                }
             }
 
             // Always prune the mempool regardless of whether finalization succeeded.
@@ -420,6 +432,7 @@ mod finalize_error_tests {
                 context,
                 FailingExecutor,
                 StubProvider,
+                None,
                 None,
                 None,
                 Update::Block(block, ack),
@@ -853,6 +866,8 @@ pub struct FinalizedReporter<E, P> {
     block_index: Option<Arc<BlockIndex>>,
     /// Optional mempool event channel for RPC subscriptions.
     mempool_broadcast: Option<MempoolEventSender>,
+    /// Optional GC log for tracking selfdestructed addresses.
+    gc_log: Option<Arc<SelfdestructGcLog>>,
 }
 
 impl<E, P> fmt::Debug for FinalizedReporter<E, P> {
@@ -873,7 +888,15 @@ where
         executor: E,
         provider: P,
     ) -> Self {
-        Self { state, context, executor, provider, block_index: None, mempool_broadcast: None }
+        Self {
+            state,
+            context,
+            executor,
+            provider,
+            block_index: None,
+            mempool_broadcast: None,
+            gc_log: None,
+        }
     }
 
     /// Attach the RPC-visible block index to update when blocks finalize.
@@ -887,6 +910,17 @@ where
     #[must_use]
     pub fn with_mempool_broadcast(mut self, mempool_broadcast: MempoolEventSender) -> Self {
         self.mempool_broadcast = Some(mempool_broadcast);
+        self
+    }
+
+    /// Attach a GC log for tracking selfdestructed contract addresses.
+    ///
+    /// When a finalized block contains selfdestructed contracts, their
+    /// addresses are appended to this log for future garbage collection of
+    /// orphaned QMDB storage entries.
+    #[must_use]
+    pub fn with_gc_log(mut self, gc_log: Arc<SelfdestructGcLog>) -> Self {
+        self.gc_log = Some(gc_log);
         self
     }
 }
@@ -905,6 +939,7 @@ where
         let provider = self.provider.clone();
         let block_index = self.block_index.clone();
         let mempool_broadcast = self.mempool_broadcast.clone();
+        let gc_log = self.gc_log.clone();
         async move {
             handle_finalized_update(
                 state,
@@ -913,6 +948,7 @@ where
                 provider,
                 block_index,
                 mempool_broadcast,
+                gc_log,
                 update,
             )
             .await;

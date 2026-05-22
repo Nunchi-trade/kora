@@ -425,6 +425,15 @@ impl<S: StateDb> BlockExecutor<S> for RevmExecutor {
             outcome.receipts.push(receipt);
 
             let state = result_and_state.state;
+
+            // Collect addresses that were selfdestructed in this transaction.
+            // Their storage entries in QMDB become orphaned and need future GC.
+            for (address, account) in &state {
+                if account.is_selfdestructed() {
+                    outcome.selfdestructed_addresses.push(*address);
+                }
+            }
+
             let changes = extract_changes(state.clone());
             evm.ctx.modify_db(|db| db.commit(state));
             outcome.changes.merge(changes);

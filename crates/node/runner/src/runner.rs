@@ -635,6 +635,23 @@ impl NodeRunner for ProductionRunner {
             finalized_reporter = finalized_reporter.with_mempool_broadcast(sender);
         }
 
+        // Initialize the selfdestruct GC log for tracking orphaned storage.
+        match kora_reporters::SelfdestructGcLog::open(&config.data_dir) {
+            Ok(gc_log) => {
+                info!(
+                    path = %config.data_dir.display(),
+                    "Opened selfdestruct GC log for tracking orphaned storage"
+                );
+                finalized_reporter = finalized_reporter.with_gc_log(Arc::new(gc_log));
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "Failed to open selfdestruct GC log; selfdestructed addresses will not be tracked"
+                );
+            }
+        }
+
         let scheme_provider = ConstantSchemeProvider::from(self.scheme.clone());
 
         let resolver = PeerInitializer::init::<_, _, _, Block, _, _, _>(
