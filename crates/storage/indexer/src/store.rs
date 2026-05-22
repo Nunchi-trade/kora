@@ -211,6 +211,22 @@ impl BlockIndex {
         }
     }
 
+    /// Returns up to 256 recent block hashes keyed by block number, looking
+    /// backwards from `head` (exclusive). Used to populate the BLOCKHASH opcode
+    /// context.
+    #[must_use]
+    pub fn recent_block_hashes(&self, head: u64) -> HashMap<u64, B256> {
+        let blocks_by_number = self.blocks_by_number.read();
+        let depth = head.min(256);
+        let mut hashes = HashMap::with_capacity(depth as usize);
+        for num in head.saturating_sub(depth)..head {
+            if let Some(hash) = blocks_by_number.get(&num) {
+                hashes.insert(num, *hash);
+            }
+        }
+        hashes
+    }
+
     fn matches_filter(log: &IndexedLog, filter: &LogFilter) -> bool {
         if let Some(addresses) = &filter.address
             && !addresses.contains(&log.address)
@@ -462,5 +478,34 @@ mod tests {
         assert_eq!(stats.transaction_count, 1);
         assert_eq!(stats.receipt_count, 1);
         assert_eq!(stats.head_block_number, 5);
+    }
+
+    #[test]
+    fn test_recent_block_hashes() {
+        let index = BlockIndex::new();
+
+        // Insert blocks 0..5
+        for i in 0..5 {
+            index.insert_block(create_test_block(i, B256::repeat_byte(i as u8)), vec![], vec![]);
+        }
+
+        // Head=5 should return hashes for blocks 0..5
+        let hashes = index.recent_block_hashes(5);
+        assert_eq!(hashes.len(), 5);
+        for i in 0..5 {
+            assert_eq!(hashes[&i], B256::repeat_byte(i as u8));
+        }
+
+        // Head=0 should return empty
+        let hashes = index.recent_block_hashes(0);
+        assert!(hashes.is_empty());
+
+        // Head=3 should return blocks 0..3
+        let hashes = index.recent_block_hashes(3);
+        assert_eq!(hashes.len(), 3);
+        assert!(hashes.contains_key(&0));
+        assert!(hashes.contains_key(&1));
+        assert!(hashes.contains_key(&2));
+        assert!(!hashes.contains_key(&3));
     }
 }

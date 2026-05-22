@@ -281,6 +281,7 @@ impl<S> IndexedStateProvider<S> {
             Some(b) => self.resolve_block_number(&b)?,
             None => self.index.head_block_number(),
         };
+        let recent_hashes = self.index.recent_block_hashes(block_num);
         if let Some(indexed) = self.index.get_block_by_number(block_num) {
             let header = Header {
                 number: indexed.number,
@@ -289,7 +290,8 @@ impl<S> IndexedStateProvider<S> {
                 base_fee_per_gas: indexed.base_fee_per_gas,
                 ..Header::default()
             };
-            Ok(BlockContext::new(header, indexed.parent_hash, B256::ZERO))
+            Ok(BlockContext::new(header, indexed.parent_hash, B256::ZERO)
+                .with_recent_block_hashes(recent_hashes))
         } else {
             let header = Header {
                 number: 0,

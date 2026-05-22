@@ -125,7 +125,7 @@ fn index_recovered_block(
 
 async fn recover_finalized_state<FB, FC>(
     ledger: &LedgerService,
-    block_index: Option<&Arc<kora_indexer::BlockIndex>>,
+    block_index: &Arc<kora_indexer::BlockIndex>,
     finalized_blocks: &FB,
     finalizations_by_height: &FC,
     provider: &RevmContextProvider,
@@ -163,9 +163,7 @@ where
                 continue;
             };
 
-            if let Some(index) = block_index {
-                index_recovered_block(index, &block, provider);
-            }
+            index_recovered_block(block_index, &block, provider);
             head = Some(block);
             recovered += 1;
         }
@@ -208,6 +206,14 @@ impl From<ThresholdScheme> for ConstantSchemeProvider {
 #[derive(Clone, Debug)]
 struct RevmContextProvider {
     gas_limit: u64,
+    block_index: Arc<BlockIndex>,
+}
+
+impl RevmContextProvider {
+    /// Collect recent block hashes from the block index for the BLOCKHASH opcode.
+    fn recent_block_hashes(&self, current_height: u64) -> std::collections::HashMap<u64, B256> {
+        self.block_index.recent_block_hashes(current_height)
+    }
 }
 
 impl BlockContextProvider for RevmContextProvider {
@@ -220,7 +226,9 @@ impl BlockContextProvider for RevmContextProvider {
             base_fee_per_gas: Some(0),
             ..Default::default()
         };
+        let recent_hashes = self.recent_block_hashes(block.height);
         BlockContext::new(header, B256::ZERO, block.prevrandao)
+            .with_recent_block_hashes(recent_hashes)
     }
 }
 
@@ -442,19 +450,16 @@ impl NodeRunner for ProductionRunner {
         let mempool_broadcast =
             self.rpc_config.as_ref().map(|_| kora_rpc::mempool_event_channel().0);
         let ledger = LedgerService::new(state.clone());
-        let block_index = self.rpc_config.as_ref().map(|_| {
-            let index = Arc::new(BlockIndex::new());
-            seed_genesis_block_index(&index, &ledger.genesis_block(), gas_limit);
-            index
-        });
+        let block_index = Arc::new(BlockIndex::new());
+        seed_genesis_block_index(&block_index, &ledger.genesis_block(), gas_limit);
         spawn_ledger_observers(ledger.clone(), context.clone());
         let txpool = ledger.txpool().await;
         spawn_txpool_cleanup(txpool.clone(), context.clone());
 
-        let context_provider = RevmContextProvider { gas_limit };
+        let context_provider = RevmContextProvider { gas_limit, block_index: block_index.clone() };
         recover_finalized_state(
             &ledger,
-            block_index.as_ref(),
+            &block_index,
             &finalized_blocks,
             &finalizations_by_height,
             &context_provider,
@@ -468,11 +473,8 @@ impl NodeRunner for ProductionRunner {
 
             let qmdb_state = state.qmdb_state().await;
             let rpc_executor = Arc::new(RevmExecutor::new(self.chain_id));
-            let indexed_provider = kora_rpc::IndexedStateProvider::new(
-                block_index.clone().expect("block index is initialized with RPC"),
-                qmdb_state,
-                rpc_executor,
-            );
+            let indexed_provider =
+                kora_rpc::IndexedStateProvider::new(block_index.clone(), qmdb_state, rpc_executor);
             let tx_ledger = ledger.clone();
             let tx_state = state.qmdb_state().await;
             let chain_id = self.chain_id;
@@ -532,10 +534,8 @@ impl NodeRunner for ProductionRunner {
             context.clone(),
             finalized_executor,
             context_provider,
-        );
-        if let Some(block_index) = block_index {
-            finalized_reporter = finalized_reporter.with_block_index(block_index);
-        }
+        )
+        .with_block_index(block_index);
         if let Some(sender) = mempool_broadcast {
             finalized_reporter = finalized_reporter.with_mempool_broadcast(sender);
         }

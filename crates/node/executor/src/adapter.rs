@@ -4,6 +4,8 @@
 //! the sync REVM interface. When executing inside a Tokio runtime, we use `block_in_place`
 //! so async storage can continue making progress on runtime workers.
 
+use std::collections::HashMap;
+
 use alloy_primitives::{Address, B256, KECCAK256_EMPTY, U256};
 use kora_traits::{StateDbError, StateDbRead};
 use revm::{bytecode::Bytecode, database_interface::DatabaseRef, state::AccountInfo};
@@ -26,13 +28,15 @@ fn block_on<F: std::future::Future>(f: F) -> F::Output {
 #[derive(Clone, Debug)]
 pub struct StateDbAdapter<S> {
     state: S,
+    /// Recent block hashes keyed by block number, used by the BLOCKHASH opcode.
+    block_hashes: HashMap<u64, B256>,
 }
 
 impl<S> StateDbAdapter<S> {
-    /// Create a new adapter wrapping the given state.
+    /// Create a new adapter wrapping the given state and recent block hashes.
     #[must_use]
-    pub const fn new(state: S) -> Self {
-        Self { state }
+    pub const fn new(state: S, block_hashes: HashMap<u64, B256>) -> Self {
+        Self { state, block_hashes }
     }
 
     /// Get the underlying state reference.
@@ -73,9 +77,8 @@ impl<S: StateDbRead> DatabaseRef for StateDbAdapter<S> {
         }
     }
 
-    fn block_hash_ref(&self, _number: u64) -> Result<B256, Self::Error> {
-        // Block hash lookups not supported yet
-        Ok(B256::ZERO)
+    fn block_hash_ref(&self, number: u64) -> Result<B256, Self::Error> {
+        Ok(self.block_hashes.get(&number).copied().unwrap_or(B256::ZERO))
     }
 }
 
@@ -85,7 +88,43 @@ mod tests {
 
     #[test]
     fn adapter_new() {
-        let adapter = StateDbAdapter::new(());
+        let adapter = StateDbAdapter::new((), HashMap::new());
         assert_eq!(adapter.state(), &());
+    }
+
+    #[test]
+    fn block_hash_ref_returns_known_hash() {
+        let mut hashes = HashMap::new();
+        let expected = B256::repeat_byte(0xab);
+        hashes.insert(42, expected);
+        let adapter = StateDbAdapter::new((), hashes);
+
+        let result = DatabaseRef::block_hash_ref(&adapter, 42).unwrap();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn block_hash_ref_returns_zero_for_unknown() {
+        let adapter = StateDbAdapter::new((), HashMap::new());
+
+        let result = DatabaseRef::block_hash_ref(&adapter, 999).unwrap();
+        assert_eq!(result, B256::ZERO);
+    }
+
+    #[test]
+    fn block_hash_ref_multiple_entries() {
+        let mut hashes = HashMap::new();
+        let hash_10 = B256::repeat_byte(0x10);
+        let hash_11 = B256::repeat_byte(0x11);
+        let hash_12 = B256::repeat_byte(0x12);
+        hashes.insert(10, hash_10);
+        hashes.insert(11, hash_11);
+        hashes.insert(12, hash_12);
+        let adapter = StateDbAdapter::new((), hashes);
+
+        assert_eq!(DatabaseRef::block_hash_ref(&adapter, 10).unwrap(), hash_10);
+        assert_eq!(DatabaseRef::block_hash_ref(&adapter, 11).unwrap(), hash_11);
+        assert_eq!(DatabaseRef::block_hash_ref(&adapter, 12).unwrap(), hash_12);
+        assert_eq!(DatabaseRef::block_hash_ref(&adapter, 13).unwrap(), B256::ZERO);
     }
 }

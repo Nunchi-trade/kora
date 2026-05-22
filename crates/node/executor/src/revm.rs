@@ -213,7 +213,7 @@ impl RevmExecutor {
         params: CallParams,
         context: &BlockContext,
     ) -> Result<Bytes, ExecutionError> {
-        let adapter = StateDbAdapter::new(state.clone());
+        let adapter = StateDbAdapter::new(state.clone(), context.recent_block_hashes.clone());
         let db = State::builder().with_database_ref(adapter).build();
 
         type Db<S> = State<revm::database::WrapDatabaseRef<StateDbAdapter<S>>>;
@@ -361,7 +361,7 @@ impl<S: StateDb> BlockExecutor<S> for RevmExecutor {
         context: &BlockContext,
         txs: &[Self::Tx],
     ) -> Result<ExecutionOutcome, ExecutionError> {
-        let adapter = StateDbAdapter::new(state.clone());
+        let adapter = StateDbAdapter::new(state.clone(), context.recent_block_hashes.clone());
 
         let db = State::builder().with_database_ref(adapter).build();
 
