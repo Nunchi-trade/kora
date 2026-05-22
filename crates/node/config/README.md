@@ -20,6 +20,21 @@ validator_key = "path/to/key"
 threshold = 2
 participants = ["pk1", "pk2", "pk3"]
 
+[consensus.block_codec]
+max_txs = 10000
+max_tx_bytes = 8388608
+
+[consensus.simplex]
+replay_buffer_bytes = 16777216
+write_buffer_bytes = 16777216
+leader_timeout_secs = 5
+certification_timeout_secs = 10
+timeout_retry_secs = 2
+fetch_timeout_secs = 5
+activity_timeout_views = 20
+skip_timeout_views = 10
+fetch_concurrent = 8
+
 [network]
 listen_addr = "0.0.0.0:30303"
 bootstrap_peers = ["peer1:30303", "peer2:30303"]

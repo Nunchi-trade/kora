@@ -28,17 +28,19 @@ let scheme = load_threshold_scheme("/path/to/dkg/output")?;
 // Create bootstrap configuration with genesis allocations
 let bootstrap = BootstrapConfig::default();
 
-// Create the runner
+// Load node configuration
+let config = NodeConfig::load("/path/to/config.toml")?;
+let rpc_addr = config.rpc.http_addr.parse()?;
+
+// Create the runner (gas limit comes from config.execution.gas_limit at runtime)
 let runner = ProductionRunner::new(
     scheme,
-    1337,           // chain ID
-    30_000_000,     // gas limit
+    config.chain_id,
     bootstrap,
 )
-.with_rpc(node_state, "0.0.0.0:8545".parse().unwrap());
+.with_rpc(node_state, rpc_addr);
 
 // Run as standalone process (blocks until shutdown)
-let config = NodeConfig::load("/path/to/config.toml")?;
 runner.run_standalone(config)?;
 ```
 
@@ -48,7 +50,7 @@ runner.run_standalone(config)?;
 use kora_runner::ProductionRunner;
 use kora_service::{NodeRunContext, NodeRunner};
 
-let runner = ProductionRunner::new(scheme, chain_id, gas_limit, bootstrap);
+let runner = ProductionRunner::new(scheme, chain_id, bootstrap);
 
 // Build transport and context manually
 let ctx = NodeRunContext::new(runtime_context, config, transport);
@@ -117,8 +119,6 @@ The runner is configured through:
 |-----------|-------------|
 | `scheme` | BLS12-381 threshold signing scheme from DKG |
 | `chain_id` | EVM chain identifier |
-| `gas_limit` | Maximum gas per block |
-| `KORA_RUNTIME_DIR` | Optional environment override for Commonware runtime storage. Defaults to `{data_dir}/runtime`. |
 | `bootstrap` | Genesis allocations and bootstrap transactions |
 | `rpc_config` | Optional RPC server configuration |
 
