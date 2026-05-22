@@ -22,7 +22,8 @@ use commonware_consensus::{
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519};
 use commonware_p2p::{Manager, TrackedPeers};
 use commonware_runtime::{
-    Clock as _, Metrics as _, Spawner, ThreadPooler as _, buffer::paged::CacheRef, tokio,
+    Clock as _, Handle as RuntimeHandle, Metrics as _, Spawner, ThreadPooler as _,
+    buffer::paged::CacheRef, tokio,
 };
 use commonware_storage::archive::{Archive, Identifier as ArchiveId};
 use commonware_utils::{NZU64, NZUsize, acknowledgement::Exact, ordered::Set};
@@ -37,7 +38,7 @@ use kora_service::{NodeRunContext, NodeRunner};
 use kora_simplex::{DEFAULT_MAILBOX_SIZE as MAILBOX_SIZE, DefaultPool};
 use kora_transport::NetworkTransport;
 use kora_txpool::{PoolConfig, TransactionPool, TransactionValidator};
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::{RevmApplication, RunnerError, scheme::ThresholdScheme};
 
@@ -251,6 +252,52 @@ fn spawn_txpool_cleanup(pool: TransactionPool, context: tokio::Context) {
                 debug!(removed, "expired transactions cleaned from txpool");
             }
         }
+    });
+}
+
+/// Monitor critical consensus infrastructure tasks for unexpected termination.
+///
+/// Each of the three handles (`engine`, `marshal`, `broadcast`) wraps a
+/// long-lived actor that must never exit while the node is running.  If any of
+/// them resolves it means the actor either panicked (the commonware runtime
+/// catches panics and returns [`commonware_runtime::Error::Exited`]) or the
+/// runtime context was shut down.  In either case the node can no longer make
+/// progress on consensus, so we log an error and abort the process.
+fn spawn_consensus_monitor(
+    context: tokio::Context,
+    engine_handle: RuntimeHandle<()>,
+    marshal_handle: RuntimeHandle<()>,
+    broadcast_handle: RuntimeHandle<()>,
+) {
+    spawn_task_watchdog(&context, "consensus_engine", engine_handle);
+    spawn_task_watchdog(&context, "marshal_actor", marshal_handle);
+    spawn_task_watchdog(&context, "broadcast_engine", broadcast_handle);
+}
+
+/// Spawn a watchdog that awaits a critical task handle and aborts the process
+/// if the task ever terminates.  Under normal operation the handle never
+/// resolves; if it does, consensus is irrecoverably broken.
+fn spawn_task_watchdog(context: &tokio::Context, name: &'static str, handle: RuntimeHandle<()>) {
+    context.with_label(name).shared(true).spawn(move |_| async move {
+        match handle.await {
+            Ok(()) => {
+                error!(task = name, "critical task exited cleanly — this should never happen for a long-lived consensus actor");
+            }
+            Err(commonware_runtime::Error::Exited) => {
+                error!(task = name, "critical task panicked (runtime caught panic and returned Error::Exited)");
+            }
+            Err(commonware_runtime::Error::Closed) => {
+                warn!(task = name, "critical task terminated because the runtime context was shut down");
+            }
+            Err(ref e) => {
+                error!(task = name, error = %e, error_debug = ?e, "critical task failed with unexpected error");
+            }
+        }
+        error!(
+            task = name,
+            "consensus infrastructure is dead, aborting process for supervisor restart"
+        );
+        std::process::abort();
     });
 }
 
@@ -509,7 +556,7 @@ impl NodeRunner for ProductionRunner {
             transport.oracle.clone(),
             block_cfg,
         );
-        broadcast_engine.start(transport.marshal.blocks);
+        let broadcast_handle = broadcast_engine.start(transport.marshal.blocks);
 
         let (actor, marshal_mailbox, _last_processed_height) =
             kora_marshal::ActorInitializer::init_with_strategy::<_, Block, _, _, _, Exact, _>(
@@ -522,7 +569,7 @@ impl NodeRunner for ProductionRunner {
                 strategy.clone(),
             )
             .await;
-        actor.start(finalized_reporter, buffer, resolver);
+        let marshal_handle = actor.start(finalized_reporter, buffer, resolver);
 
         let epocher = FixedEpocher::new(NZU64!(EPOCH_LENGTH));
         let executor = RevmExecutor::new(self.chain_id);
@@ -581,7 +628,13 @@ impl NodeRunner for ProductionRunner {
                 forwarding: simplex::ForwardingPolicy::SilentLeader,
             },
         );
-        engine.start(transport.simplex.votes, transport.simplex.certs, transport.simplex.resolver);
+        let engine_handle = engine.start(
+            transport.simplex.votes,
+            transport.simplex.certs,
+            transport.simplex.resolver,
+        );
+
+        spawn_consensus_monitor(context, engine_handle, marshal_handle, broadcast_handle);
 
         info!("Validator started successfully");
         Ok(ledger)
