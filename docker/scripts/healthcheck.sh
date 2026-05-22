@@ -11,7 +11,11 @@ case "$MODE" in
         nc -z localhost 30303
         ;;
     ready)
-        [[ -f "/data/.ready" ]] && nc -z localhost 30303
+        # Verify the RPC server is responsive with a real method call
+        RESULT=$(curl -sf -X POST http://localhost:8545 \
+            -H 'Content-Type: application/json' \
+            -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' 2>/dev/null) || exit 1
+        echo "$RESULT" | jq -e '.result' >/dev/null 2>&1
         ;;
     *)
         exit 1

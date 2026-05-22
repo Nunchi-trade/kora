@@ -20,6 +20,11 @@ x-node-common: &node-common
   image: kora:local
   networks:
     - kora-net
+  logging:
+    driver: json-file
+    options:
+      max-size: "50m"
+      max-file: "5"
   environment:
     - RUST_LOG=${RUST_LOG:-info}
     - CHAIN_ID=${CHAIN_ID:-1337}
@@ -27,6 +32,13 @@ x-node-common: &node-common
 x-validator-common: &validator-common
   <<: *node-common
   restart: unless-stopped
+  stop_grace_period: 30s
+  stop_signal: SIGTERM
+  deploy:
+    resources:
+      limits:
+        memory: 4G
+        cpus: "2"
   tmpfs:
     - /runtime:size=1g,mode=1777
   healthcheck:
@@ -291,7 +303,7 @@ services:
       - KORA_RUNTIME_DIR=${KORA_RUNTIME_DIR:-/runtime}
       - IS_BOOTSTRAP=false
       - BOOTSTRAP_PEERS=node0:30303
-      - HEALTHCHECK_MODE=ready
+      - HEALTHCHECK_MODE=p2p
     ports:
       - "30500:30303"
 

@@ -441,7 +441,8 @@ impl ProductionRunner {
 
             let _ledger = self.run(ctx).await?;
 
-            futures::future::pending::<()>().await;
+            tokio::signal::ctrl_c().await.ok();
+            info!("Received shutdown signal, stopping...");
             Ok::<(), RunnerError>(())
         })
     }
