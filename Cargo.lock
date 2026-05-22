@@ -3525,6 +3525,7 @@ dependencies = [
  "axum",
  "jsonrpsee",
  "k256",
+ "kora-domain",
  "kora-executor",
  "kora-indexer",
  "kora-traits",

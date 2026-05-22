@@ -14,12 +14,14 @@ use alloy_consensus::{
 use alloy_eips::eip2718::Decodable2718 as _;
 use alloy_primitives::{Address, B256, Bytes, U64, U256};
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
+use kora_domain::MempoolEvent;
 use tokio::sync::RwLock;
 
 use crate::{
     error::RpcError,
     filters::{Filter, FilterChanges, FilterStore},
     state_provider::StateProvider,
+    subscription::{MempoolEventSender, PendingTxEvent, PendingTxEventSender, PendingTxInfo},
     types::{
         BlockNumberOrTag, BlockTag, BlockTransactions, CallRequest, RpcBlock, RpcLog, RpcLogFilter,
         RpcTransaction, RpcTransactionReceipt,
@@ -272,6 +274,8 @@ pub struct EthApiImpl<S: StateProvider> {
     tx_submit: Option<TxSubmitCallback>,
     state_provider: Arc<RwLock<S>>,
     pending_txs: Arc<RwLock<HashMap<B256, RpcTransaction>>>,
+    pending_tx_broadcast: Option<PendingTxEventSender>,
+    mempool_broadcast: Option<MempoolEventSender>,
     gas_oracle_config: GasOracleConfig,
     gas_oracle_cache: Arc<RwLock<Option<CachedGasOracleEstimate>>>,
     /// Insertion-ordered record of pending transaction hashes so that
@@ -315,11 +319,27 @@ impl<S: StateProvider + 'static> EthApiImpl<S> {
             tx_submit,
             state_provider: Arc::new(RwLock::new(state_provider)),
             pending_txs: Arc::new(RwLock::new(HashMap::new())),
+            pending_tx_broadcast: None,
+            mempool_broadcast: None,
             gas_oracle_config,
             gas_oracle_cache: Arc::new(RwLock::new(None)),
             pending_tx_order: Arc::new(RwLock::new(Vec::new())),
             filter_store: Arc::new(FilterStore::default()),
         }
+    }
+
+    /// Attach a pending transaction broadcast channel.
+    #[must_use]
+    pub fn with_pending_tx_broadcast(mut self, pending_tx_broadcast: PendingTxEventSender) -> Self {
+        self.pending_tx_broadcast = Some(pending_tx_broadcast);
+        self
+    }
+
+    /// Attach a Kora mempool event broadcast channel.
+    #[must_use]
+    pub fn with_mempool_broadcast(mut self, mempool_broadcast: MempoolEventSender) -> Self {
+        self.mempool_broadcast = Some(mempool_broadcast);
+        self
     }
 
     /// Override the default recent-block gas oracle configuration.
@@ -418,12 +438,18 @@ impl<S: StateProvider + 'static> EthApiServer for EthApiImpl<S> {
         let tx_hash = alloy_primitives::keccak256(&data);
         let pending_tx = raw_tx_to_pending_rpc(&data)?;
 
-        if let Some(ref submit) = self.tx_submit {
+        let accepted = if let Some(ref submit) = self.tx_submit {
             submit(data).await?;
-        }
+            true
+        } else {
+            false
+        };
 
-        self.pending_txs.write().await.insert(tx_hash, pending_tx);
+        self.pending_txs.write().await.insert(tx_hash, pending_tx.clone());
         self.pending_tx_order.write().await.push(tx_hash);
+        if accepted {
+            self.broadcast_pending_tx(tx_hash, pending_tx);
+        }
         Ok(tx_hash)
     }
 
@@ -773,6 +799,28 @@ impl<S: StateProvider + 'static> EthApiServer for EthApiImpl<S> {
             return Ok(false);
         };
         Ok(self.filter_store.remove(id))
+    }
+}
+
+impl<S: StateProvider> EthApiImpl<S> {
+    fn broadcast_pending_tx(&self, tx_hash: B256, pending_tx: RpcTransaction) {
+        if let Some(sender) = &self.pending_tx_broadcast {
+            let _ = sender.send(PendingTxEvent::Added(PendingTxInfo {
+                hash: tx_hash,
+                full_tx: Some(pending_tx.clone()),
+            }));
+        }
+
+        if let Some(sender) = &self.mempool_broadcast {
+            let _ = sender.send(MempoolEvent::TxAdded {
+                hash: tx_hash,
+                from: pending_tx.from,
+                to: pending_tx.to,
+                value: pending_tx.value,
+                gas_price: pending_tx.gas_price,
+                nonce: pending_tx.nonce.to::<u64>(),
+            });
+        }
     }
 }
 
@@ -1146,10 +1194,12 @@ mod tests {
     use alloy_primitives::{Signature, TxKind};
     use async_trait::async_trait;
     use k256::ecdsa::SigningKey;
+    use kora_domain::MempoolEvent;
     use sha3::{Digest as _, Keccak256};
 
     use super::*;
     use crate::{
+        PendingTxEvent, mempool_event_channel, pending_tx_channel,
         state_provider::NoopStateProvider,
         types::{AddressFilter, BlockTag, TopicFilter},
     };
@@ -1917,6 +1967,44 @@ mod tests {
         assert!(result.is_ok());
         assert!(submitted.load(std::sync::atomic::Ordering::Relaxed));
         assert_eq!(result.unwrap(), alloy_primitives::keccak256(&tx_data));
+    }
+
+    #[tokio::test]
+    async fn eth_send_raw_transaction_broadcasts_after_acceptance() {
+        let callback: TxSubmitCallback = Arc::new(move |_| Box::pin(async { Ok(()) }));
+        let (pending_tx, mut pending_rx) = pending_tx_channel();
+        let (mempool_tx, mut mempool_rx) = mempool_event_channel();
+        let api = EthApiImpl::with_tx_submit(1, NoopStateProvider, callback)
+            .with_pending_tx_broadcast(pending_tx)
+            .with_mempool_broadcast(mempool_tx);
+        let tx_data = signed_test_tx(1, 3);
+        let hash = EthApiServer::send_raw_transaction(&api, tx_data).await.unwrap();
+
+        let PendingTxEvent::Added(info) = pending_rx.try_recv().unwrap();
+        assert_eq!(info.hash, hash);
+        assert_eq!(info.full_tx.as_ref().map(|tx| tx.hash), Some(hash));
+
+        assert!(matches!(
+            mempool_rx.try_recv().unwrap(),
+            MempoolEvent::TxAdded { hash: event_hash, nonce: 3, .. } if event_hash == hash
+        ));
+    }
+
+    #[tokio::test]
+    async fn invalid_raw_transaction_does_not_broadcast() {
+        let callback: TxSubmitCallback = Arc::new(move |_| Box::pin(async { Ok(()) }));
+        let (pending_tx, mut pending_rx) = pending_tx_channel();
+        let (mempool_tx, mut mempool_rx) = mempool_event_channel();
+        let api = EthApiImpl::with_tx_submit(1, NoopStateProvider, callback)
+            .with_pending_tx_broadcast(pending_tx)
+            .with_mempool_broadcast(mempool_tx);
+
+        let result =
+            EthApiServer::send_raw_transaction(&api, Bytes::from_static(b"not a tx")).await;
+
+        assert!(result.is_err());
+        assert!(pending_rx.try_recv().is_err());
+        assert!(mempool_rx.try_recv().is_err());
     }
 
     #[tokio::test]
