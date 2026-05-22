@@ -17,7 +17,6 @@ alloy-consensus.workspace = true
 alloy-eips.workspace = true
 
 tokio.workspace = true
-futures.workspace = true
 
 clap.workspace = true
 serde.workspace = true

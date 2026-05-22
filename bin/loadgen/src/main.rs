@@ -16,13 +16,28 @@ use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{Address, Bytes, Signature, TxKind, U256, keccak256};
 use clap::Parser;
 use eyre::{Result, WrapErr as _};
-use futures::stream::{FuturesUnordered, StreamExt};
 use k256::ecdsa::SigningKey;
 use sha3::{Digest as _, Keccak256};
+use tokio::sync::Semaphore;
 use tracing::{error, info, warn};
 
 const MIN_LOADGEN_ACCOUNTS: usize = 1;
 const MAX_LOADGEN_ACCOUNTS: usize = u8::MAX as usize;
+
+/// Intrinsic gas for a simple ETH transfer (21,000).
+const TRANSFER_GAS_LIMIT: u64 = 21_000;
+
+/// Maximum retry attempts before giving up on a transaction.
+const MAX_RETRY_ATTEMPTS: u64 = 10;
+
+/// Base delay between retries; grows exponentially (base * 2^attempt).
+const RETRY_BASE_DELAY: Duration = Duration::from_millis(100);
+
+/// HTTP request timeout for RPC calls.
+const RPC_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Maximum idle connections per host in the HTTP connection pool.
+const RPC_POOL_MAX_IDLE: usize = 100;
 
 /// Load generator CLI.
 #[derive(Parser, Debug)]
@@ -154,6 +169,9 @@ fn parse_json_rpc_quantity(quantity: &str) -> Result<u64> {
 }
 
 /// HTTP client for RPC calls.
+///
+/// Multiple `RpcClient`s share a single underlying `reqwest::Client` connection
+/// pool, which is more efficient than creating separate pools per endpoint.
 #[derive(Clone)]
 struct RpcClient {
     client: reqwest::Client,
@@ -161,12 +179,7 @@ struct RpcClient {
 }
 
 impl RpcClient {
-    fn new(url: String) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .pool_max_idle_per_host(100)
-            .build()
-            .expect("build http client");
+    fn new(url: String, client: reqwest::Client) -> Self {
         Self { client, url }
     }
 
@@ -212,31 +225,32 @@ impl RpcClient {
     }
 }
 
-async fn send_raw_transaction_to_any(clients: &[RpcClient], raw_tx: Bytes) -> Result<String> {
-    let mut sends = FuturesUnordered::new();
+/// Send a transaction to a specific client (by index). Falls back to trying
+/// all clients if the target rejects the transaction.
+async fn send_raw_transaction_to(
+    clients: &[RpcClient],
+    raw_tx: Bytes,
+    target_idx: usize,
+) -> Result<String> {
+    let idx = target_idx % clients.len();
 
-    for client in clients {
-        let client = client.clone();
-        let tx = raw_tx.clone();
-        sends.push(async move { client.send_raw_transaction(&tx).await });
-    }
-
-    let mut first_hash = None;
-    let mut errors = Vec::new();
-
-    while let Some(result) = sends.next().await {
-        match result {
-            Ok(hash) => {
-                first_hash.get_or_insert(hash);
+    // Try the target client first
+    match clients[idx].send_raw_transaction(&raw_tx).await {
+        Ok(hash) => return Ok(hash),
+        Err(e) => {
+            // If target rejects, try remaining clients as fallback
+            let mut errors = vec![e.to_string()];
+            for (i, client) in clients.iter().enumerate() {
+                if i == idx {
+                    continue;
+                }
+                match client.send_raw_transaction(&raw_tx).await {
+                    Ok(hash) => return Ok(hash),
+                    Err(e) => errors.push(e.to_string()),
+                }
             }
-            Err(error) => errors.push(error.to_string()),
+            eyre::bail!("all RPC endpoints rejected transaction: {}", errors.join("; "))
         }
-    }
-
-    if let Some(hash) = first_hash {
-        Ok(hash)
-    } else {
-        eyre::bail!("all RPC endpoints rejected transaction: {}", errors.join("; "))
     }
 }
 
@@ -275,9 +289,15 @@ async fn main() -> Result<()> {
 
     let receiver = Address::repeat_byte(0xBB);
     let transfer_amount = U256::from(1u64);
-    let gas_limit = 21_000u64;
 
-    let clients: Arc<Vec<RpcClient>> = Arc::new(rpc_urls.into_iter().map(RpcClient::new).collect());
+    let http_client = reqwest::Client::builder()
+        .timeout(RPC_TIMEOUT)
+        .pool_max_idle_per_host(RPC_POOL_MAX_IDLE)
+        .build()
+        .expect("build http client");
+    let clients: Arc<Vec<RpcClient>> = Arc::new(
+        rpc_urls.into_iter().map(|url| RpcClient::new(url, http_client.clone())).collect(),
+    );
 
     if !args.dry_run {
         for account in &accounts {
@@ -301,7 +321,7 @@ async fn main() -> Result<()> {
                 receiver,
                 transfer_amount,
                 nonce,
-                gas_limit,
+                TRANSFER_GAS_LIMIT,
             );
             success_count.fetch_add(1, Ordering::Relaxed);
             if (i + 1) % 1000 == 0 {
@@ -309,50 +329,98 @@ async fn main() -> Result<()> {
             }
         }
     } else {
-        let mut futures = FuturesUnordered::new();
+        // Per-account sequential sends with cross-account parallelism.
+        // Each account sends its transactions one at a time (ensuring nonce ordering),
+        // but all accounts run in parallel. A semaphore limits total in-flight requests.
+        let num_accounts = accounts.len();
+        let txs_per_account = args.total_txs / num_accounts as u64;
+        let remainder = args.total_txs % num_accounts as u64;
 
-        for i in 0..args.total_txs {
-            let account = accounts[i as usize % accounts.len()].clone();
+        // Global concurrency limiter — bounds total in-flight HTTP requests
+        if args.concurrency == 0 {
+            eyre::bail!("--concurrency must be >= 1");
+        }
+        let semaphore = Arc::new(Semaphore::new(args.concurrency));
+
+        let mut handles = Vec::with_capacity(num_accounts);
+
+        for (idx, account) in accounts.iter().enumerate() {
+            let account = account.clone();
             let clients = clients.clone();
             let success = success_count.clone();
             let failure = failure_count.clone();
+            let semaphore = semaphore.clone();
             let verbose = args.verbose;
+            let chain_id = args.chain_id;
 
-            let nonce = account.next_nonce();
-            let tx = sign_eip1559_transfer(
-                &account.key,
-                args.chain_id,
-                receiver,
-                transfer_amount,
-                nonce,
-                gas_limit,
-            );
+            // Each account is pinned to one validator (avoids stale copies in other mempools)
+            let target_validator = idx;
 
-            let fut = async move {
-                match send_raw_transaction_to_any(&clients, tx).await {
-                    Ok(hash) => {
-                        success.fetch_add(1, Ordering::Relaxed);
-                        if verbose {
-                            info!(nonce, hash = %hash, "tx sent");
+            // First `remainder` accounts send one extra tx
+            let count = txs_per_account + if (idx as u64) < remainder { 1 } else { 0 };
+
+            let handle = tokio::spawn(async move {
+                for _ in 0..count {
+                    let nonce = account.next_nonce();
+                    let tx = sign_eip1559_transfer(
+                        &account.key,
+                        chain_id,
+                        receiver,
+                        transfer_amount,
+                        nonce,
+                        TRANSFER_GAS_LIMIT,
+                    );
+
+                    // Retry with exponential backoff if pool rejects (nonce gap / pool full).
+                    // The semaphore permit is acquired per-attempt and dropped after the HTTP
+                    // call completes, so backoff sleeps do not consume concurrency slots.
+                    let mut attempts = 0u32;
+                    let mut succeeded = false;
+                    loop {
+                        let _permit = semaphore.acquire().await.expect("semaphore closed");
+                        let result =
+                            send_raw_transaction_to(&clients, tx.clone(), target_validator).await;
+                        drop(_permit);
+
+                        match result {
+                            Ok(hash) => {
+                                success.fetch_add(1, Ordering::Relaxed);
+                                if verbose {
+                                    info!(nonce, hash = %hash, account = %account.address, "tx sent");
+                                }
+                                succeeded = true;
+                                break;
+                            }
+                            Err(e) => {
+                                attempts += 1;
+                                if u64::from(attempts) >= MAX_RETRY_ATTEMPTS {
+                                    warn!(nonce, error = %e, account = %account.address, "tx failed after retries");
+                                    break;
+                                }
+                                // Exponential backoff: 100ms, 200ms, 400ms, ...
+                                let delay = RETRY_BASE_DELAY * 2u32.saturating_pow(attempts - 1);
+                                tokio::time::sleep(delay).await;
+                            }
                         }
                     }
-                    Err(e) => {
+
+                    if !succeeded {
+                        // Restore the nonce so the next iteration retries with the same value,
+                        // avoiding a permanent nonce gap from an unconsumed sequence number.
+                        account.set_nonce(nonce);
                         failure.fetch_add(1, Ordering::Relaxed);
-                        warn!(nonce, error = %e, "tx failed");
                     }
+                    // Nonce N completes before nonce N+1 is assigned for this account
                 }
-            };
+            });
 
-            futures.push(fut);
-
-            // Limit concurrency by waiting when we hit the limit
-            if futures.len() >= args.concurrency {
-                futures.next().await;
-            }
+            handles.push(handle);
         }
 
-        // Drain remaining futures
-        while futures.next().await.is_some() {}
+        // Wait for all account tasks to finish
+        for handle in handles {
+            handle.await?;
+        }
     }
 
     let elapsed = start.elapsed();
@@ -428,5 +496,37 @@ mod tests {
         for quantity in ["", "10", "0x", "0xzz"] {
             assert!(parse_json_rpc_quantity(quantity).is_err());
         }
+    }
+
+    #[test]
+    fn sign_eip1559_transfer_produces_valid_envelope() {
+        let account = Account::new(1);
+        let to = Address::repeat_byte(0xBB);
+        let raw =
+            sign_eip1559_transfer(&account.key, 1337, to, U256::from(1), 0, TRANSFER_GAS_LIMIT);
+        // EIP-2718 type-2 envelope starts with 0x02
+        assert!(!raw.is_empty());
+        assert_eq!(raw[0], 0x02, "expected EIP-1559 type prefix");
+    }
+
+    #[test]
+    fn retry_backoff_is_exponential() {
+        let delays: Vec<Duration> =
+            (1..=5).map(|attempt| RETRY_BASE_DELAY * 2u32.saturating_pow(attempt - 1)).collect();
+        assert_eq!(delays[0], Duration::from_millis(100));
+        assert_eq!(delays[1], Duration::from_millis(200));
+        assert_eq!(delays[2], Duration::from_millis(400));
+        assert_eq!(delays[3], Duration::from_millis(800));
+        assert_eq!(delays[4], Duration::from_millis(1600));
+    }
+
+    #[test]
+    fn nonce_increments_sequentially() {
+        let account = Account::new(1);
+        assert_eq!(account.next_nonce(), 0);
+        assert_eq!(account.next_nonce(), 1);
+        assert_eq!(account.next_nonce(), 2);
+        account.set_nonce(42);
+        assert_eq!(account.next_nonce(), 42);
     }
 }
