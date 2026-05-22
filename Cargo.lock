@@ -3280,6 +3280,7 @@ dependencies = [
  "rstest",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -3377,12 +3378,15 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "futures",
+ "k256",
  "kora-qmdb",
  "kora-traits",
  "revm",
  "rstest",
+ "sha3",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

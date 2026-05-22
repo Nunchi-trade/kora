@@ -5,12 +5,15 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use alloy_consensus::Header;
-use alloy_primitives::{Address, B256, Bytes, U256};
+use alloy_consensus::{Header, SignableTransaction as _, TxEip1559, TxEnvelope};
+use alloy_eips::eip2718::Encodable2718;
+use alloy_primitives::{Address, B256, Bytes, Signature, TxKind, U256, keccak256};
+use k256::ecdsa::SigningKey;
 use kora_executor::{BlockContext, BlockExecutor, RevmExecutor};
 use kora_qmdb::{AccountUpdate, ChangeSet};
 use kora_traits::{StateDb, StateDbError, StateDbRead, StateDbWrite};
 use rstest::rstest;
+use sha3::{Digest as _, Keccak256};
 
 /// Account data stored in the mock state database.
 #[derive(Clone, Debug, Default)]
@@ -583,5 +586,181 @@ fn test_execute_with_populated_state() {
     // Empty transactions still produce empty outcome.
     assert!(outcome.changes.is_empty());
     assert!(outcome.receipts.is_empty());
+    assert_eq!(outcome.gas_used, 0);
+}
+
+// ----------------------------------------------------------------------------
+// Helpers for creating signed transactions
+// ----------------------------------------------------------------------------
+
+/// Create a signing key from a deterministic seed byte.
+fn signing_key_from_seed(seed: u8) -> SigningKey {
+    let mut secret = [0u8; 32];
+    secret[31] = seed;
+    SigningKey::from_bytes((&secret).into()).expect("valid key")
+}
+
+/// Derive an Ethereum address from a signing key.
+fn address_from_key(key: &SigningKey) -> Address {
+    let encoded = key.verifying_key().to_encoded_point(false);
+    let pubkey = encoded.as_bytes();
+    let hash = keccak256(&pubkey[1..]);
+    Address::from_slice(&hash[12..])
+}
+
+/// Sign an EIP-1559 transfer and return the raw encoded bytes.
+fn sign_eip1559_transfer(
+    key: &SigningKey,
+    chain_id: u64,
+    to: Address,
+    value: U256,
+    nonce: u64,
+    gas_limit: u64,
+) -> Bytes {
+    let tx = TxEip1559 {
+        chain_id,
+        nonce,
+        gas_limit,
+        max_fee_per_gas: 0,
+        max_priority_fee_per_gas: 0,
+        to: TxKind::Call(to),
+        value,
+        access_list: Default::default(),
+        input: Bytes::new(),
+    };
+
+    let digest = Keccak256::new_with_prefix(tx.encoded_for_signing());
+    let (sig, recid) = key.sign_digest_recoverable(digest).expect("sign tx");
+    let signature = Signature::from((sig, recid));
+    let signed = tx.into_signed(signature);
+    let envelope = TxEnvelope::from(signed);
+    let mut raw_bytes = Vec::new();
+    envelope.encode_2718(&mut raw_bytes);
+    Bytes::from(raw_bytes)
+}
+
+// ----------------------------------------------------------------------------
+// Tests for block gas limit enforcement
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_execute_enforces_block_gas_limit() {
+    let chain_id = 1u64;
+    let executor = RevmExecutor::new(chain_id);
+    let state = MockStateDb::new();
+
+    // Set up a sender with enough balance for transfers.
+    let sender_key = signing_key_from_seed(1);
+    let sender = address_from_key(&sender_key);
+    let receiver = Address::from([0xBB; 20]);
+
+    state.insert_account(
+        sender,
+        MockAccount { nonce: 0, balance: U256::from(10_000_000_000u64), ..Default::default() },
+    );
+
+    // Insert receiver as an existing (empty) account to ensure the 21_000 gas
+    // assumption holds regardless of fork rules for new-account creation.
+    state.insert_account(receiver, MockAccount::default());
+
+    // Each basic transfer uses 21_000 gas.
+    // Create 3 transactions, each requiring 21_000 gas.
+    let tx1 = sign_eip1559_transfer(&sender_key, chain_id, receiver, U256::from(1), 0, 21_000);
+    let tx2 = sign_eip1559_transfer(&sender_key, chain_id, receiver, U256::from(1), 1, 21_000);
+    let tx3 = sign_eip1559_transfer(&sender_key, chain_id, receiver, U256::from(1), 2, 21_000);
+
+    // Set block gas limit to only fit 2 transactions (42_000).
+    // The third transaction (cumulative would be 63_000 > 42_000) should be skipped.
+    let header = Header { gas_limit: 42_000, number: 1, timestamp: 1000, ..Default::default() };
+    let context = BlockContext::new(header, B256::ZERO, B256::ZERO);
+
+    let outcome =
+        executor.execute(&state, &context, &[tx1, tx2, tx3]).expect("execution should succeed");
+
+    // Only 2 transactions should have been executed, and both should succeed.
+    assert_eq!(
+        outcome.receipts.len(),
+        2,
+        "only 2 of 3 transactions should execute within gas limit"
+    );
+    assert!(
+        outcome.receipts.iter().all(|r| r.success()),
+        "all executed transactions should succeed"
+    );
+    assert_eq!(outcome.gas_used, 42_000, "cumulative gas should equal 2 * 21_000");
+}
+
+#[test]
+fn test_execute_within_gas_limit_processes_all_transactions() {
+    let chain_id = 1u64;
+    let executor = RevmExecutor::new(chain_id);
+    let state = MockStateDb::new();
+
+    let sender_key = signing_key_from_seed(1);
+    let sender = address_from_key(&sender_key);
+    let receiver = Address::from([0xBB; 20]);
+
+    state.insert_account(
+        sender,
+        MockAccount { nonce: 0, balance: U256::from(10_000_000_000u64), ..Default::default() },
+    );
+
+    // Insert receiver as an existing (empty) account to ensure the 21_000 gas
+    // assumption holds regardless of fork rules for new-account creation.
+    state.insert_account(receiver, MockAccount::default());
+
+    // Create 3 transactions, each requiring 21_000 gas.
+    let tx1 = sign_eip1559_transfer(&sender_key, chain_id, receiver, U256::from(1), 0, 21_000);
+    let tx2 = sign_eip1559_transfer(&sender_key, chain_id, receiver, U256::from(1), 1, 21_000);
+    let tx3 = sign_eip1559_transfer(&sender_key, chain_id, receiver, U256::from(1), 2, 21_000);
+
+    // Set block gas limit high enough for all 3 transactions (63_000).
+    let header = Header { gas_limit: 63_000, number: 1, timestamp: 1000, ..Default::default() };
+    let context = BlockContext::new(header, B256::ZERO, B256::ZERO);
+
+    let outcome =
+        executor.execute(&state, &context, &[tx1, tx2, tx3]).expect("execution should succeed");
+
+    // All 3 transactions should have been executed and all should succeed.
+    assert_eq!(outcome.receipts.len(), 3, "all 3 transactions should execute within gas limit");
+    assert!(
+        outcome.receipts.iter().all(|r| r.success()),
+        "all executed transactions should succeed"
+    );
+    assert_eq!(outcome.gas_used, 63_000, "cumulative gas should equal 3 * 21_000");
+}
+
+#[test]
+fn test_execute_single_tx_exceeding_block_gas_limit_produces_empty_outcome() {
+    let chain_id = 1u64;
+    let executor = RevmExecutor::new(chain_id);
+    let state = MockStateDb::new();
+
+    let sender_key = signing_key_from_seed(1);
+    let sender = address_from_key(&sender_key);
+    let receiver = Address::from([0xBB; 20]);
+
+    state.insert_account(
+        sender,
+        MockAccount { nonce: 0, balance: U256::from(10_000_000_000u64), ..Default::default() },
+    );
+
+    // Insert receiver as an existing (empty) account to ensure the 21_000 gas
+    // assumption holds regardless of fork rules for new-account creation.
+    state.insert_account(receiver, MockAccount::default());
+
+    // Transaction requires 21_000 gas but block limit is only 10_000.
+    let tx = sign_eip1559_transfer(&sender_key, chain_id, receiver, U256::from(1), 0, 21_000);
+
+    let header = Header { gas_limit: 10_000, number: 1, timestamp: 1000, ..Default::default() };
+    let context = BlockContext::new(header, B256::ZERO, B256::ZERO);
+
+    let outcome = executor.execute(&state, &context, &[tx]).expect("execution should succeed");
+
+    // The transaction should not have been executed.
+    assert!(
+        outcome.receipts.is_empty(),
+        "no transactions should execute when gas limit is too low"
+    );
     assert_eq!(outcome.gas_used, 0);
 }
