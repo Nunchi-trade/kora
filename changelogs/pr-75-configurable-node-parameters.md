@@ -17,9 +17,8 @@ making it impossible to tune them without recompiling:
   transaction were module-level constants in the runner.
 - **Leader election**: Hardcoded `view % 4` assumed exactly four validators,
   producing incorrect leader rotation for any other validator set size.
-- **Validator indexing**: The DKG ceremony produces 1-indexed share indices,
-  but the leader election expected 0-indexed values. There was no explicit
-  conversion, which could cause off-by-one leadership mismatches.
+- **Validator indexing**: The DKG ceremony produces 0-indexed share indices,
+  and leader election also expects 0-indexed values.
 
 ## Solution
 
@@ -67,9 +66,7 @@ duplicate source of truth.
 
 `NodeState::with_validator_count()` replaces the old `view % 4` leader
 calculation with `view % validator_count`, and the constructor validates that
-`validator_index < validator_count`. The CLI converts the 1-indexed DKG
-`share_index` to 0-based via `checked_sub(1)`, with an error if the index is
-unexpectedly zero.
+`validator_index < validator_count`.
 
 ## Files modified
 
@@ -79,8 +76,7 @@ unexpectedly zero.
   descriptive error on failure.
 - Converts `dkg_output.participants` (a `usize`) to `u32` with overflow
   checking, and rejects zero.
-- Converts `dkg_output.share_index` from 1-indexed to 0-indexed using
-  `checked_sub(1)`.
+- Uses `dkg_output.share_index` directly as the validator index.
 - Calls `NodeState::with_validator_count()` instead of `NodeState::new()`.
 - Removes the `gas_limit` argument from `ProductionRunner::new()`.
 

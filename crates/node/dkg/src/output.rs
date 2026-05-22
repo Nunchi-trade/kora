@@ -15,7 +15,7 @@ pub struct DkgOutput {
     pub threshold: u32,
     /// Total number of participants in the DKG ceremony.
     pub participants: usize,
-    /// This participant's index in the DKG ceremony (1-indexed).
+    /// This participant's index in the DKG ceremony (0-indexed).
     pub share_index: u32,
     /// This participant's secret share of the distributed key.
     pub share_secret: Vec<u8>,

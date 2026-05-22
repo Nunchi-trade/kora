@@ -167,11 +167,12 @@ impl Cli {
         if validator_count == 0 {
             return Err(eyre::eyre!("DKG participant count must be non-zero"));
         }
-        // share_index from DKG is 1-indexed; convert to 0-based for leader election.
-        let validator_index = dkg_output
-            .share_index
-            .checked_sub(1)
-            .ok_or_else(|| eyre::eyre!("DKG share_index is 0 but must be >= 1 (1-indexed)"))?;
+        let validator_index = dkg_output.share_index;
+        if validator_index >= validator_count {
+            return Err(eyre::eyre!(
+                "DKG share_index ({validator_index}) must be less than participant count ({validator_count})"
+            ));
+        }
         let node_state =
             NodeState::with_validator_count(config.chain_id, validator_index, validator_count);
 
