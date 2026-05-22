@@ -43,6 +43,10 @@ pub enum RpcError {
     #[error("transaction not found")]
     TransactionNotFound,
 
+    /// Filter not found.
+    #[error("filter not found")]
+    FilterNotFound,
+
     /// Account not found.
     #[error("account not found: {0}")]
     AccountNotFound(String),
@@ -77,6 +81,7 @@ impl From<RpcError> for ErrorObjectOwned {
         let (code, message) = match &err {
             RpcError::BlockNotFound => (codes::RESOURCE_NOT_FOUND, err.to_string()),
             RpcError::TransactionNotFound => (codes::RESOURCE_NOT_FOUND, err.to_string()),
+            RpcError::FilterNotFound => (codes::SERVER_ERROR, err.to_string()),
             RpcError::AccountNotFound(_) => (codes::RESOURCE_NOT_FOUND, err.to_string()),
             RpcError::InvalidBlockNumber(_) => (codes::INVALID_PARAMS, err.to_string()),
             RpcError::InvalidTransaction(_) => (codes::INVALID_PARAMS, err.to_string()),
@@ -123,6 +128,12 @@ mod tests {
     fn rpc_error_display_transaction_not_found() {
         let err = RpcError::TransactionNotFound;
         assert_eq!(err.to_string(), "transaction not found");
+    }
+
+    #[test]
+    fn rpc_error_display_filter_not_found() {
+        let err = RpcError::FilterNotFound;
+        assert_eq!(err.to_string(), "filter not found");
     }
 
     #[test]
@@ -181,6 +192,14 @@ mod tests {
         let obj: ErrorObjectOwned = err.into();
         assert_eq!(obj.code(), codes::RESOURCE_NOT_FOUND);
         assert_eq!(obj.message(), "transaction not found");
+    }
+
+    #[test]
+    fn rpc_error_to_error_object_filter_not_found() {
+        let err = RpcError::FilterNotFound;
+        let obj: ErrorObjectOwned = err.into();
+        assert_eq!(obj.code(), codes::SERVER_ERROR);
+        assert_eq!(obj.message(), "filter not found");
     }
 
     #[test]
