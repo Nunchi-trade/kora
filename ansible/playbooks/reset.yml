@@ -1,0 +1,7 @@
+---
+# Wipe devnet clean: stop containers, remove volumes, optionally remove image
+- name: Reset devnet
+  hosts: devnet
+  become: true
+  roles:
+    - reset

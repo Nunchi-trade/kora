@@ -1,0 +1,12 @@
+---
+- name: Sync project to remote server
+  ansible.posix.synchronize:
+    src: "{{ playbook_dir }}/../../"
+    dest: "{{ remote_project_dir }}/"
+    delete: true
+    rsync_opts:
+      - "--exclude=.git"
+      - "--exclude=target/"
+      - "--exclude=.DS_Store"
+      - "--exclude=testnet-artifacts/"
+      - "--exclude=ansible/"

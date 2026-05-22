@@ -1,0 +1,7 @@
+---
+# Start/restart Prometheus + Grafana observability stack
+- name: Start observability
+  hosts: devnet
+  become: true
+  roles:
+    - observe

@@ -1,0 +1,17 @@
+# Kora devnet Ansible inventory
+#
+# Copy this file to hosts.yml and fill in your values:
+#   cp hosts.yml.example hosts.yml
+#
+# Requirements:
+#   - Target must be Arch Linux (playbooks use pacman)
+#   - Root SSH access via key-based authentication
+#   - hosts.yml is gitignored to protect server IPs
+all:
+  children:
+    devnet:
+      hosts:
+        hetzner-devnet:
+          ansible_host: YOUR_SERVER_IP
+          ansible_user: root
+          ansible_python_interpreter: /usr/bin/python3

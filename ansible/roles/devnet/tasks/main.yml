@@ -1,0 +1,127 @@
+---
+- name: Stop existing validators
+  ansible.builtin.command:
+    cmd: >
+      docker compose -f {{ compose_file }} stop
+      validator-node0 validator-node1 validator-node2 validator-node3 secondary-node0
+  changed_when: true
+  failed_when: false
+
+- name: Check if DKG shares exist
+  ansible.builtin.shell: |
+    for i in 0 1 2 3; do
+      volume="{{ compose_project_name }}_data_node${i}"
+      docker volume inspect "$volume" >/dev/null 2>&1 || exit 1
+      docker run --rm -v "${volume}:/data" alpine \
+        test -f /data/share.key -a -f /data/output.json || exit 1
+    done
+  register: dkg_check
+  changed_when: false
+  failed_when: false
+
+- name: Run init-config (trusted dealer DKG)
+  ansible.builtin.command:
+    cmd: docker compose -f {{ compose_file }} run --rm init-config
+  environment:
+    RUST_LOG: "{{ rust_log }}"
+    CHAIN_ID: "{{ chain_id }}"
+  when: dkg_check.rc != 0 and dkg_mode == "trusted"
+  changed_when: true
+
+- name: Run init-setup (interactive DKG - setup only)
+  ansible.builtin.command:
+    cmd: docker compose -f {{ compose_file }} run --rm init-setup
+  environment:
+    RUST_LOG: "{{ rust_log }}"
+    CHAIN_ID: "{{ chain_id }}"
+  when: dkg_check.rc != 0 and dkg_mode == "interactive"
+  changed_when: true
+
+- name: Run interactive DKG ceremony
+  when: dkg_check.rc != 0 and dkg_mode == "interactive"
+  block:
+    - name: Start DKG nodes
+      ansible.builtin.command:
+        cmd: >
+          docker compose -f {{ compose_file }} --profile interactive-dkg up -d
+          dkg-node0 dkg-node1 dkg-node2 dkg-node3
+      changed_when: true
+
+    - name: Wait for DKG ceremony to complete
+      ansible.builtin.shell: |
+        EXITED=$(docker compose -f {{ compose_file }} ps -a --format json 2>/dev/null | \
+          jq -r 'select(.Service | startswith("dkg-")) | select(.State == "exited") | select(.ExitCode == 0) | .Service' 2>/dev/null | wc -l | tr -d ' ')
+        FAILED=$(docker compose -f {{ compose_file }} ps -a --format json 2>/dev/null | \
+          jq -r 'select(.Service | startswith("dkg-")) | select(.State == "exited") | select(.ExitCode != 0) | .Service' 2>/dev/null | wc -l | tr -d ' ')
+        [[ "$FAILED" -gt 0 ]] && exit 1
+        [[ "$EXITED" -ge 4 ]] && exit 0
+        exit 2
+      register: dkg_result
+      until: dkg_result.rc == 0
+      retries: 60
+      delay: 5
+      changed_when: false
+      failed_when: dkg_result.rc == 1
+
+    - name: Stop DKG containers
+      ansible.builtin.command:
+        cmd: >
+          docker compose -f {{ compose_file }} --profile interactive-dkg stop
+          dkg-node0 dkg-node1 dkg-node2 dkg-node3
+      changed_when: true
+      failed_when: false
+
+- name: Clear runtime state from data volumes
+  ansible.builtin.shell: |
+    for volume in \
+      {{ compose_project_name }}_data_node0 \
+      {{ compose_project_name }}_data_node1 \
+      {{ compose_project_name }}_data_node2 \
+      {{ compose_project_name }}_data_node3 \
+      {{ compose_project_name }}_data_secondary0; do
+      docker volume inspect "$volume" >/dev/null 2>&1 || continue
+      docker run --rm -v "${volume}:/data" alpine rm -rf /data/runtime 2>/dev/null || true
+    done
+  changed_when: true
+
+- name: Start validators and secondary
+  ansible.builtin.command:
+    cmd: >
+      docker compose -f {{ compose_file }} up -d
+      validator-node0 validator-node1 validator-node2 validator-node3 secondary-node0
+  environment:
+    RUST_LOG: "{{ rust_log }}"
+    CHAIN_ID: "{{ chain_id }}"
+  changed_when: true
+
+- name: Wait for validators to become healthy
+  ansible.builtin.shell: |
+    HEALTHY=$(docker compose -f {{ compose_file }} ps --format json 2>/dev/null | \
+      jq -r 'select(.Service | startswith("validator-")) | select(.Health == "healthy") | .Service' 2>/dev/null | wc -l | tr -d ' ')
+    [[ "$HEALTHY" -ge {{ num_validators }} ]]
+  register: health_result
+  until: health_result.rc == 0
+  retries: "{{ health_retries }}"
+  delay: "{{ health_delay }}"
+  changed_when: false
+
+- name: Wait for secondary peer to become healthy
+  ansible.builtin.shell: |
+    HEALTH=$(docker compose -f {{ compose_file }} ps --format json 2>/dev/null | \
+      jq -r 'select(.Service == "secondary-node0") | .Health' 2>/dev/null)
+    [[ "$HEALTH" == "healthy" ]]
+  register: secondary_health
+  until: secondary_health.rc == 0
+  retries: "{{ health_retries }}"
+  delay: "{{ health_delay }}"
+  changed_when: false
+
+- name: Print devnet status
+  ansible.builtin.debug:
+    msg: |
+      Devnet is healthy!
+        Validators: {{ num_validators }}/{{ num_validators }} healthy
+        Secondary:  healthy
+        RPC:        http://{{ ansible_host }}:8545-8548
+        P2P:        {{ ansible_host }}:30400-30403
+        Secondary:  {{ ansible_host }}:30500

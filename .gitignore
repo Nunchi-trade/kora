@@ -4,3 +4,6 @@ target/
 *.swp
 *.swo
 .env
+
+# Ansible inventory contains real server IPs — use hosts.yml.example as template
+ansible/inventory/hosts.yml

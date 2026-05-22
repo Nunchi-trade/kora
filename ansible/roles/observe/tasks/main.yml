@@ -1,0 +1,52 @@
+---
+- name: Start observability stack
+  ansible.builtin.command:
+    cmd: >
+      docker compose -f {{ compose_file }} --profile observability up -d
+      prometheus loki promtail grafana
+  environment:
+    GF_SECURITY_ADMIN_PASSWORD: "{{ grafana_admin_password }}"
+  changed_when: true
+
+- name: Wait for Prometheus to be ready
+  ansible.builtin.uri:
+    url: "http://localhost:{{ prometheus_port }}/-/ready"
+    method: GET
+    status_code: 200
+  register: prom_health
+  until: prom_health.status == 200
+  retries: 12
+  delay: 5
+
+- name: Wait for Loki to be ready
+  ansible.builtin.uri:
+    url: "http://localhost:{{ loki_port }}/ready"
+    method: GET
+    status_code: 200
+  register: loki_health
+  until: loki_health.status == 200
+  retries: 12
+  delay: 5
+
+- name: Wait for Grafana to be ready
+  ansible.builtin.uri:
+    url: "http://localhost:{{ grafana_port }}/api/health"
+    method: GET
+    status_code: 200
+  register: grafana_health
+  until: grafana_health.status == 200
+  retries: 12
+  delay: 5
+
+- name: Print observability endpoints
+  ansible.builtin.debug:
+    msg: |
+      Observability stack is ready!
+        Prometheus: http://{{ ansible_host }}:{{ prometheus_port }}
+        Loki:       http://{{ ansible_host }}:{{ loki_port }}
+        Grafana:    http://{{ ansible_host }}:{{ grafana_port }} (user: admin, password set via grafana_admin_password)
+      Dashboards:
+        Overview:          http://{{ ansible_host }}:{{ grafana_port }}/d/kora-overview
+        Performance:       http://{{ ansible_host }}:{{ grafana_port }}/d/kora-performance
+        Stall Diagnostics: http://{{ ansible_host }}:{{ grafana_port }}/d/kora-stall-diagnostics
+        Logs Explorer:     http://{{ ansible_host }}:{{ grafana_port }}/d/kora-logs

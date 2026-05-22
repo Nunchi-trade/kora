@@ -1,0 +1,12 @@
+---
+# One-time server provisioning: install system deps, firewall, Docker
+- name: Provision devnet server
+  hosts: devnet
+  become: true
+  roles:
+    - role: base
+      tags: [base]
+    - role: firewall
+      tags: [firewall]
+    - role: docker
+      tags: [docker]
