@@ -17,10 +17,15 @@ kora-qmdb = { path = "../../storage/qmdb" }
 kora-traits = { path = "../../storage/traits" }
 revm.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
+k256.workspace = true
 rstest.workspace = true
+sha3.workspace = true
 tokio = { workspace = true, features = ["macros"] }
 
 [lints]
