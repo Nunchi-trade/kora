@@ -7,9 +7,10 @@ use std::{
 
 use alloy_consensus::{Transaction, TxEnvelope};
 use alloy_eips::eip2718::{Decodable2718, Encodable2718};
-use alloy_primitives::{Address, B256, Bytes};
-use kora_domain::{Tx, TxId};
+use alloy_primitives::{Address, B256, Bytes, U256};
+use kora_domain::{MempoolEvent, Tx, TxId};
 use parking_lot::RwLock;
+use tokio::sync::broadcast;
 use tracing::{debug, trace, warn};
 
 use crate::{
@@ -86,56 +87,77 @@ impl PoolInner {
 pub struct TransactionPool {
     inner: RwLock<PoolInner>,
     config: PoolConfig,
+    events: Option<broadcast::Sender<MempoolEvent>>,
 }
 
 impl TransactionPool {
     /// Creates a new transaction pool with the given configuration.
     #[must_use]
     pub fn new(config: PoolConfig) -> Self {
-        Self { inner: RwLock::new(PoolInner::new()), config }
+        Self { inner: RwLock::new(PoolInner::new()), config, events: None }
+    }
+
+    /// Creates a new transaction pool that broadcasts mempool lifecycle events.
+    #[must_use]
+    pub fn new_with_events(config: PoolConfig, events: broadcast::Sender<MempoolEvent>) -> Self {
+        Self { inner: RwLock::new(PoolInner::new()), config, events: Some(events) }
     }
 
     /// Adds a validated transaction to the pool.
     pub fn add(&self, tx: OrderedTransaction) -> Result<(), TxPoolError> {
-        let mut inner = self.inner.write();
+        let added_event = tx_added_event(&tx);
+        let mut replaced_hash = None;
 
-        if inner.by_hash.contains_key(&tx.hash) {
-            return Err(TxPoolError::AlreadyExists);
-        }
+        {
+            let mut inner = self.inner.write();
 
-        let sender = tx.sender;
-        let queue =
-            inner.by_sender.entry(sender).or_insert_with(|| SenderQueue::new(sender, tx.nonce));
-
-        if queue.total_count() >= self.config.max_txs_per_sender {
-            return Err(TxPoolError::SenderFull(sender));
-        }
-
-        if let Some(replaced) = queue.insert(tx.clone()) {
-            if replaced.hash == tx.hash {
+            if inner.by_hash.contains_key(&tx.hash) {
                 return Err(TxPoolError::AlreadyExists);
             }
-            inner.by_hash.remove(&replaced.hash);
-            debug!(hash = ?replaced.hash, "replaced transaction");
+
+            let sender = tx.sender;
+            let queue =
+                inner.by_sender.entry(sender).or_insert_with(|| SenderQueue::new(sender, tx.nonce));
+
+            if queue.total_count() >= self.config.max_txs_per_sender {
+                return Err(TxPoolError::SenderFull(sender));
+            }
+
+            if let Some(replaced) = queue.insert(tx.clone()) {
+                if replaced.hash == tx.hash {
+                    return Err(TxPoolError::AlreadyExists);
+                }
+                inner.by_hash.remove(&replaced.hash);
+                replaced_hash = Some(replaced.hash);
+                debug!(hash = ?replaced.hash, "replaced transaction");
+            }
+
+            inner.by_hash.insert(tx.hash, tx);
+            inner.update_counts();
+
+            if inner.pending_count > self.config.max_pending_txs {
+                warn!(
+                    count = inner.pending_count,
+                    max = self.config.max_pending_txs,
+                    "pool exceeds pending limit"
+                );
+            }
+
+            if inner.queued_count > self.config.max_queued_txs {
+                warn!(
+                    count = inner.queued_count,
+                    max = self.config.max_queued_txs,
+                    "pool exceeds queued limit"
+                );
+            }
         }
 
-        inner.by_hash.insert(tx.hash, tx);
-        inner.update_counts();
-
-        if inner.pending_count > self.config.max_pending_txs {
-            warn!(
-                count = inner.pending_count,
-                max = self.config.max_pending_txs,
-                "pool exceeds pending limit"
-            );
-        }
-
-        if inner.queued_count > self.config.max_queued_txs {
-            warn!(
-                count = inner.queued_count,
-                max = self.config.max_queued_txs,
-                "pool exceeds queued limit"
-            );
+        if let Some(events) = &self.events {
+            if let Some(hash) = replaced_hash {
+                let _ =
+                    events.send(MempoolEvent::TxEvicted { hash, reason: "replaced".to_string() });
+            }
+            let _ = events.send(added_event);
         }
 
         Ok(())
@@ -164,24 +186,39 @@ impl TransactionPool {
         self.inner.read().by_hash.get(hash).cloned()
     }
 
-    /// Removes a transaction by its hash.
-    pub fn remove(&self, hash: &B256) -> Option<OrderedTransaction> {
-        let mut inner = self.inner.write();
+    /// Removes a transaction by its hash, emitting a `TxEvicted` event with the
+    /// provided `reason`.
+    pub fn remove_with_reason(&self, hash: &B256, reason: &str) -> Option<OrderedTransaction> {
+        let tx = {
+            let mut inner = self.inner.write();
 
-        let tx = inner.by_hash.remove(hash)?;
-        let sender = tx.sender;
+            let tx = inner.by_hash.remove(hash)?;
+            let sender = tx.sender;
 
-        if let Some(queue) = inner.by_sender.get_mut(&sender) {
-            queue.pending.retain(|t| t.hash != *hash);
-            queue.queued.retain(|t| t.hash != *hash);
+            if let Some(queue) = inner.by_sender.get_mut(&sender) {
+                queue.pending.retain(|t| t.hash != *hash);
+                queue.queued.retain(|t| t.hash != *hash);
 
-            if queue.is_empty() {
-                inner.by_sender.remove(&sender);
+                if queue.is_empty() {
+                    inner.by_sender.remove(&sender);
+                }
             }
+
+            inner.update_counts();
+            tx
+        };
+
+        if let Some(events) = &self.events {
+            let _ =
+                events.send(MempoolEvent::TxEvicted { hash: *hash, reason: reason.to_string() });
         }
 
-        inner.update_counts();
         Some(tx)
+    }
+
+    /// Removes a transaction by its hash.
+    pub fn remove(&self, hash: &B256) -> Option<OrderedTransaction> {
+        self.remove_with_reason(hash, "removed")
     }
 
     /// Removes confirmed transactions for a sender up to the given nonce.
@@ -267,7 +304,19 @@ impl Clone for TransactionPool {
                 queued_count: inner.queued_count,
             }),
             config: self.config.clone(),
+            events: self.events.clone(),
         }
+    }
+}
+
+fn tx_added_event(tx: &OrderedTransaction) -> MempoolEvent {
+    MempoolEvent::TxAdded {
+        hash: tx.hash,
+        from: tx.sender,
+        to: tx.envelope.to(),
+        value: tx.envelope.value(),
+        gas_price: U256::from(tx.effective_gas_price),
+        nonce: tx.nonce,
     }
 }
 
@@ -479,6 +528,48 @@ mod tests {
     }
 
     #[test]
+    fn pool_broadcasts_tx_added_on_insert() {
+        let (events, mut receiver) = broadcast::channel(16);
+        let pool = TransactionPool::new_with_events(PoolConfig::default(), events);
+        let sender = random_address();
+        let tx = make_ordered_tx(sender, 0, 100);
+
+        pool.add(tx.clone()).unwrap();
+
+        let event = receiver.try_recv().unwrap();
+        assert_eq!(event, MempoolEvent::TxAdded {
+            hash: tx.hash,
+            from: tx.sender,
+            to: tx.envelope.to(),
+            value: tx.envelope.value(),
+            gas_price: U256::from(tx.effective_gas_price),
+            nonce: tx.nonce,
+        });
+    }
+
+    #[test]
+    fn pool_broadcasts_replaced_transaction_as_evicted() {
+        let (events, mut receiver) = broadcast::channel(16);
+        let pool = TransactionPool::new_with_events(PoolConfig::default(), events);
+        let sender = random_address();
+        let low_fee = make_ordered_tx(sender, 0, 100);
+        let high_fee = make_ordered_tx(sender, 0, 200);
+
+        pool.add(low_fee.clone()).unwrap();
+        pool.add(high_fee.clone()).unwrap();
+
+        let _ = receiver.try_recv().unwrap();
+        assert_eq!(receiver.try_recv().unwrap(), MempoolEvent::TxEvicted {
+            hash: low_fee.hash,
+            reason: "replaced".to_string()
+        });
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            MempoolEvent::TxAdded { hash, .. } if hash == high_fee.hash
+        ));
+    }
+
+    #[test]
     fn pool_duplicate_rejected() {
         let config = PoolConfig::default();
         let pool = TransactionPool::new(config);
@@ -623,6 +714,46 @@ mod tests {
         assert_eq!(txs.len(), 2);
         assert_eq!(tx_nonce(&txs[0]), tx1.nonce);
         assert_eq!(tx_nonce(&txs[1]), tx2.nonce);
+    }
+
+    #[test]
+    fn pool_remove_broadcasts_tx_evicted() {
+        let (events, mut receiver) = broadcast::channel(16);
+        let pool = TransactionPool::new_with_events(PoolConfig::default(), events);
+        let sender = random_address();
+        let tx = make_ordered_tx(sender, 0, 100);
+        let hash = tx.hash;
+
+        pool.add(tx).unwrap();
+        // drain the TxAdded event
+        let _ = receiver.try_recv().unwrap();
+
+        pool.remove(&hash);
+
+        assert_eq!(receiver.try_recv().unwrap(), MempoolEvent::TxEvicted {
+            hash,
+            reason: "removed".to_string()
+        });
+    }
+
+    #[test]
+    fn pool_remove_with_reason_broadcasts_custom_reason() {
+        let (events, mut receiver) = broadcast::channel(16);
+        let pool = TransactionPool::new_with_events(PoolConfig::default(), events);
+        let sender = random_address();
+        let tx = make_ordered_tx(sender, 0, 100);
+        let hash = tx.hash;
+
+        pool.add(tx).unwrap();
+        // drain the TxAdded event
+        let _ = receiver.try_recv().unwrap();
+
+        pool.remove_with_reason(&hash, "expired");
+
+        assert_eq!(receiver.try_recv().unwrap(), MempoolEvent::TxEvicted {
+            hash,
+            reason: "expired".to_string()
+        });
     }
 
     #[test]

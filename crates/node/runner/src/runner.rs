@@ -377,6 +377,10 @@ impl NodeRunner for ProductionRunner {
         .await
         .context("init qmdb")?;
 
+        let pending_tx_broadcast =
+            self.rpc_config.as_ref().map(|_| kora_rpc::pending_tx_channel().0);
+        let mempool_broadcast =
+            self.rpc_config.as_ref().map(|_| kora_rpc::mempool_event_channel().0);
         let ledger = LedgerService::new(state.clone());
         let block_index = self.rpc_config.as_ref().map(|_| {
             let index = Arc::new(BlockIndex::new());
@@ -433,7 +437,7 @@ impl NodeRunner for ProductionRunner {
                     }
                 })
             });
-            let rpc = kora_rpc::RpcServer::with_state_provider(
+            let mut rpc = kora_rpc::RpcServer::with_state_provider(
                 node_state.clone(),
                 *addr,
                 self.chain_id,
@@ -441,6 +445,12 @@ impl NodeRunner for ProductionRunner {
             )
             .with_tx_submit(tx_submit)
             .with_peer_count(self.scheme.participants().len().saturating_sub(1) as u64);
+            if let Some(sender) = pending_tx_broadcast.clone() {
+                rpc = rpc.with_pending_tx_broadcast(sender);
+            }
+            if let Some(sender) = mempool_broadcast.clone() {
+                rpc = rpc.with_mempool_broadcast(sender);
+            }
             drop(rpc.start());
             info!(addr = %addr, "RPC server started with live state provider");
         }
@@ -459,6 +469,9 @@ impl NodeRunner for ProductionRunner {
         );
         if let Some(block_index) = block_index {
             finalized_reporter = finalized_reporter.with_block_index(block_index);
+        }
+        if let Some(sender) = mempool_broadcast {
+            finalized_reporter = finalized_reporter.with_mempool_broadcast(sender);
         }
 
         let scheme_provider = ConstantSchemeProvider::from(self.scheme.clone());
