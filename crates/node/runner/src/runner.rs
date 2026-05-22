@@ -416,6 +416,9 @@ impl NodeRunner for ProductionRunner {
         .context("recover finalized state")?;
 
         if let Some((node_state, addr)) = &self.rpc_config {
+            let peer_count = self.scheme.participants().len().saturating_sub(1) as u64;
+            node_state.set_peer_count(peer_count);
+
             let qmdb_state = state.qmdb_state().await;
             let rpc_executor = Arc::new(RevmExecutor::new(self.chain_id));
             let indexed_provider = kora_rpc::IndexedStateProvider::new(
@@ -460,7 +463,7 @@ impl NodeRunner for ProductionRunner {
             )
             .with_tx_submit(tx_submit)
             .with_txpool(txpool.clone())
-            .with_peer_count(self.scheme.participants().len().saturating_sub(1) as u64);
+            .with_peer_count(peer_count);
             if let Some(sender) = pending_tx_broadcast.clone() {
                 rpc = rpc.with_pending_tx_broadcast(sender);
             }
