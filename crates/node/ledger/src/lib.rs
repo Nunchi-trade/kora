@@ -8,6 +8,7 @@
 use std::{collections::BTreeSet, fmt, sync::Arc};
 
 use alloy_primitives::{Address, B256, U256};
+use commonware_consensus::Block as _;
 use commonware_cryptography::Committable as _;
 use commonware_runtime::{Metrics as _, tokio};
 use futures::{channel::mpsc::UnboundedReceiver, lock::Mutex};
@@ -119,8 +120,54 @@ impl LedgerView {
         partition_prefix: String,
         genesis_alloc: Vec<(Address, U256)>,
     ) -> LedgerResult<Self> {
+        Self::init_with_genesis_timestamp(context, partition_prefix, genesis_alloc, 0).await
+    }
+
+    /// Initialize a ledger view with an explicit genesis block timestamp.
+    pub async fn init_with_genesis_timestamp(
+        context: tokio::Context,
+        partition_prefix: String,
+        genesis_alloc: Vec<(Address, U256)>,
+        genesis_timestamp: u64,
+    ) -> LedgerResult<Self> {
         let config = QmdbConfig::new(partition_prefix);
-        Self::init_with_config(context, config, genesis_alloc).await
+        Self::init_with_config_and_genesis_timestamp(
+            context,
+            config,
+            genesis_alloc,
+            genesis_timestamp,
+        )
+        .await
+    }
+
+    /// Initialize a ledger view, optionally applying the genesis allocation to QMDB.
+    pub async fn init_with_genesis(
+        context: tokio::Context,
+        partition_prefix: String,
+        genesis_alloc: Vec<(Address, U256)>,
+        apply_genesis: bool,
+    ) -> LedgerResult<Self> {
+        let config = QmdbConfig::new(partition_prefix);
+        Self::init_with_config_and_genesis(context, config, genesis_alloc, apply_genesis).await
+    }
+
+    /// Initialize a ledger view with explicit timestamp and control over genesis allocation.
+    pub async fn init_with_genesis_options(
+        context: tokio::Context,
+        partition_prefix: String,
+        genesis_alloc: Vec<(Address, U256)>,
+        apply_genesis: bool,
+        genesis_timestamp: u64,
+    ) -> LedgerResult<Self> {
+        let config = QmdbConfig::new(partition_prefix);
+        Self::init_with_config_and_genesis_options(
+            context,
+            config,
+            genesis_alloc,
+            apply_genesis,
+            genesis_timestamp,
+        )
+        .await
     }
 
     /// Initialize a ledger view with an explicit QMDB configuration.
@@ -129,12 +176,58 @@ impl LedgerView {
         config: QmdbConfig,
         genesis_alloc: Vec<(Address, U256)>,
     ) -> LedgerResult<Self> {
-        let qmdb = QmdbLedger::init(context.with_label("qmdb"), config, genesis_alloc).await?;
+        Self::init_with_config_and_genesis(context, config, genesis_alloc, true).await
+    }
+
+    /// Initialize a ledger view with explicit QMDB and genesis timestamp configuration.
+    pub async fn init_with_config_and_genesis_timestamp(
+        context: tokio::Context,
+        config: QmdbConfig,
+        genesis_alloc: Vec<(Address, U256)>,
+        genesis_timestamp: u64,
+    ) -> LedgerResult<Self> {
+        Self::init_with_config_and_genesis_options(
+            context,
+            config,
+            genesis_alloc,
+            true,
+            genesis_timestamp,
+        )
+        .await
+    }
+
+    /// Initialize a ledger view with control over whether genesis is applied to QMDB.
+    pub async fn init_with_config_and_genesis(
+        context: tokio::Context,
+        config: QmdbConfig,
+        genesis_alloc: Vec<(Address, U256)>,
+        apply_genesis: bool,
+    ) -> LedgerResult<Self> {
+        Self::init_with_config_and_genesis_options(context, config, genesis_alloc, apply_genesis, 0)
+            .await
+    }
+
+    /// Initialize a ledger view with explicit QMDB, apply-genesis and timestamp configuration.
+    pub async fn init_with_config_and_genesis_options(
+        context: tokio::Context,
+        config: QmdbConfig,
+        genesis_alloc: Vec<(Address, U256)>,
+        apply_genesis: bool,
+        genesis_timestamp: u64,
+    ) -> LedgerResult<Self> {
+        let qmdb = QmdbLedger::init_with_genesis(
+            context.with_label("qmdb"),
+            config,
+            genesis_alloc,
+            apply_genesis,
+        )
+        .await?;
         let genesis_root = qmdb.root().await?;
 
         let genesis_block = Block {
             parent: BlockId(B256::ZERO),
             height: 0,
+            timestamp: genesis_timestamp,
             prevrandao: B256::ZERO,
             state_root: genesis_root,
             txs: Vec::new(),
@@ -250,6 +343,22 @@ impl LedgerView {
         inner.snapshots.insert(digest, snapshot);
     }
 
+    /// Restore a finalized block as an already-persisted snapshot over the current QMDB state.
+    pub async fn restore_persisted_snapshot(&self, block: &Block) {
+        let inner = self.inner.lock().await;
+        let digest = block.commitment();
+        let state = OverlayState::new(inner.qmdb.state(), QmdbChangeSet::default());
+        let snapshot = Snapshot::new(
+            Some(block.parent()),
+            state,
+            block.state_root,
+            QmdbChangeSet::default(),
+            tx_ids(&block.txs),
+        );
+        inner.snapshots.insert(digest, snapshot);
+        inner.snapshots.mark_persisted(&[digest]);
+    }
+
     /// Fetch the components needed to build a proposal.
     pub async fn proposal_components(
         &self,
@@ -308,13 +417,15 @@ impl LedgerView {
         inner.snapshots.clear_persisting_chain(&chain);
         match result {
             Ok(_) => {
-                if let Some(tip) = chain.last()
-                    && let Some(snapshot) = inner.snapshots.get(tip)
-                {
+                for digest in &chain {
+                    let snapshot = inner
+                        .snapshots
+                        .get(digest)
+                        .ok_or(ConsensusError::SnapshotNotFound(*digest))?;
                     let compact_state =
                         OverlayState::new(inner.qmdb.state(), QmdbChangeSet::default());
                     inner.snapshots.insert(
-                        *tip,
+                        *digest,
                         Snapshot::new(
                             snapshot.parent,
                             compact_state,
@@ -436,6 +547,11 @@ impl LedgerService {
         self.view.cache_snapshot(digest, snapshot).await;
     }
 
+    /// Restore a finalized block as an already-persisted snapshot.
+    pub async fn restore_persisted_snapshot(&self, block: &Block) {
+        self.view.restore_persisted_snapshot(block).await;
+    }
+
     /// Fetch proposal components.
     pub async fn proposal_components(
         &self,
@@ -545,10 +661,10 @@ mod tests {
         )
     }
 
-    fn block_context(height: u64, prevrandao: B256) -> BlockContext {
+    fn block_context(height: u64, timestamp: u64, prevrandao: B256) -> BlockContext {
         let header = Header {
             number: height,
-            timestamp: height,
+            timestamp,
             gas_limit: 30_000_000,
             beneficiary: Address::ZERO,
             base_fee_per_gas: Some(0),
@@ -571,6 +687,23 @@ mod tests {
         LedgerSetup { ledger, service, genesis, genesis_digest }
     }
 
+    #[test]
+    fn init_uses_configured_genesis_timestamp() {
+        let executor = tokio::Runner::default();
+        executor.start(|context| async move {
+            let ledger = LedgerView::init_with_genesis_timestamp(
+                context,
+                next_partition("revm-ledger-genesis-timestamp"),
+                Vec::new(),
+                1_700_000_000,
+            )
+            .await
+            .expect("init ledger");
+
+            assert_eq!(ledger.genesis_block().timestamp, 1_700_000_000);
+        });
+    }
+
     async fn build_block_snapshot(
         service: &LedgerService,
         parent: &Block,
@@ -579,7 +712,8 @@ mod tests {
         txs: Vec<Tx>,
     ) -> BuiltBlock {
         let executor = RevmExecutor::new(CHAIN_ID);
-        let context = block_context(height, PREVRANDAO);
+        let timestamp = Block::next_timestamp(0, parent.timestamp).expect("timestamp overflow");
+        let context = block_context(height, timestamp, PREVRANDAO);
         let txs_bytes: Vec<Bytes> = txs.iter().map(|tx| tx.bytes.clone()).collect();
         let outcome =
             executor.execute(&parent_snapshot.state, &context, &txs_bytes).expect("execute txs");
@@ -589,8 +723,14 @@ mod tests {
             .compute_root(parent_digest, outcome.changes.clone())
             .await
             .expect("compute root");
-        let block =
-            Block { parent: parent.id(), height, prevrandao: PREVRANDAO, state_root: root, txs };
+        let block = Block {
+            parent: parent.id(),
+            height,
+            timestamp,
+            prevrandao: PREVRANDAO,
+            state_root: root,
+            txs,
+        };
         let digest = block.commitment();
         let next_state = OverlayState::new(parent_snapshot.state.base(), merged_changes);
         service
@@ -609,11 +749,10 @@ mod tests {
             let to_key = key_from_byte(TO_BYTE_A);
             let from = Evm::address_from_key(&from_key);
             let to = Evm::address_from_key(&to_key);
-            let setup = setup_ledger(
-                context,
-                "revm-ledger-merge",
-                vec![(from, U256::from(GENESIS_BALANCE)), (to, U256::ZERO)],
-            )
+            let setup = setup_ledger(context, "revm-ledger-merge", vec![
+                (from, U256::from(GENESIS_BALANCE)),
+                (to, U256::ZERO),
+            ])
             .await;
             let parent_snapshot = setup
                 .service
@@ -655,6 +794,89 @@ mod tests {
     }
 
     #[test]
+    fn persist_snapshot_compacts_all_persisted_chain_snapshots() {
+        // Tokio runtime required for WrapDatabaseAsync in the QMDB adapter.
+        let executor = tokio::Runner::default();
+        executor.start(|context| async move {
+            // Arrange
+            let from_key = key_from_byte(FROM_BYTE_A);
+            let to_key = key_from_byte(TO_BYTE_A);
+            let from = Evm::address_from_key(&from_key);
+            let to = Evm::address_from_key(&to_key);
+            let setup = setup_ledger(context, "revm-ledger-compact-chain", vec![
+                (from, U256::from(GENESIS_BALANCE)),
+                (to, U256::ZERO),
+            ])
+            .await;
+            let parent_snapshot = setup
+                .service
+                .parent_snapshot(setup.genesis_digest)
+                .await
+                .expect("genesis snapshot");
+            let block1 = build_block_snapshot(
+                &setup.service,
+                &setup.genesis,
+                parent_snapshot,
+                HEIGHT_ONE,
+                vec![transfer_tx(&from_key, to, TRANSFER_ONE, 0)],
+            )
+            .await;
+            let parent_snapshot =
+                setup.service.parent_snapshot(block1.digest).await.expect("block1 snapshot");
+            let block2 = build_block_snapshot(
+                &setup.service,
+                &block1.block,
+                parent_snapshot,
+                HEIGHT_TWO,
+                vec![transfer_tx(&from_key, to, TRANSFER_TWO, 1)],
+            )
+            .await;
+
+            let block1_before =
+                setup.service.parent_snapshot(block1.digest).await.expect("block1 snapshot");
+            let block2_before =
+                setup.service.parent_snapshot(block2.digest).await.expect("block2 snapshot");
+            assert!(!block1_before.changes.is_empty());
+            assert!(!block2_before.changes.is_empty());
+
+            let block1_parent = block1_before.parent;
+            let block1_state_root = block1_before.state_root;
+            let block1_tx_ids = block1_before.tx_ids.clone();
+            let block2_parent = block2_before.parent;
+            let block2_state_root = block2_before.state_root;
+            let block2_tx_ids = block2_before.tx_ids.clone();
+
+            // Act
+            let persisted =
+                setup.ledger.persist_snapshot(block2.digest).await.expect("persist snapshot");
+
+            // Assert
+            assert!(persisted);
+            let block1_after =
+                setup.service.parent_snapshot(block1.digest).await.expect("block1 snapshot");
+            let block2_after =
+                setup.service.parent_snapshot(block2.digest).await.expect("block2 snapshot");
+
+            assert!(block1_after.changes.is_empty());
+            assert!(block2_after.changes.is_empty());
+            assert!(
+                block1_after.state.changes_is_empty(),
+                "block1 overlay change set should be empty after compaction"
+            );
+            assert!(
+                block2_after.state.changes_is_empty(),
+                "block2 overlay change set should be empty after compaction"
+            );
+            assert_eq!(block1_after.parent, block1_parent);
+            assert_eq!(block1_after.state_root, block1_state_root);
+            assert_eq!(block1_after.tx_ids, block1_tx_ids);
+            assert_eq!(block2_after.parent, block2_parent);
+            assert_eq!(block2_after.state_root, block2_state_root);
+            assert_eq!(block2_after.tx_ids, block2_tx_ids);
+        });
+    }
+
+    #[test]
     fn empty_child_inherits_parent_state_root_after_persist() {
         // Tokio runtime required for WrapDatabaseAsync in the QMDB adapter.
         let executor = tokio::Runner::default();
@@ -665,11 +887,10 @@ mod tests {
             let to_key = key_from_byte(TO_BYTE_A);
             let from = Evm::address_from_key(&from_key);
             let to = Evm::address_from_key(&to_key);
-            let setup = setup_ledger(
-                context,
-                "revm-ledger-empty-child",
-                vec![(from, U256::from(GENESIS_BALANCE)), (to, U256::ZERO)],
-            )
+            let setup = setup_ledger(context, "revm-ledger-empty-child", vec![
+                (from, U256::from(GENESIS_BALANCE)),
+                (to, U256::ZERO),
+            ])
             .await;
             let parent_snapshot = setup
                 .service
@@ -709,11 +930,10 @@ mod tests {
             let to_key = key_from_byte(TO_BYTE_A);
             let from = Evm::address_from_key(&from_key);
             let to = Evm::address_from_key(&to_key);
-            let setup = setup_ledger(
-                context,
-                "revm-ledger-duplicate",
-                vec![(from, U256::from(GENESIS_BALANCE)), (to, U256::ZERO)],
-            )
+            let setup = setup_ledger(context, "revm-ledger-duplicate", vec![
+                (from, U256::from(GENESIS_BALANCE)),
+                (to, U256::ZERO),
+            ])
             .await;
             let parent_snapshot = setup
                 .service
@@ -810,16 +1030,12 @@ mod tests {
             let to_key_b = key_from_byte(TO_BYTE_B);
             let from_b = Evm::address_from_key(&from_key_b);
             let to_b = Evm::address_from_key(&to_key_b);
-            let setup = setup_ledger(
-                context,
-                "revm-ledger-unrelated",
-                vec![
-                    (from_a, U256::from(GENESIS_BALANCE)),
-                    (to_a, U256::ZERO),
-                    (from_b, U256::from(DUPLICATE_BALANCE)),
-                    (to_b, U256::ZERO),
-                ],
-            )
+            let setup = setup_ledger(context, "revm-ledger-unrelated", vec![
+                (from_a, U256::from(GENESIS_BALANCE)),
+                (to_a, U256::ZERO),
+                (from_b, U256::from(DUPLICATE_BALANCE)),
+                (to_b, U256::ZERO),
+            ])
             .await;
             let parent_snapshot = setup
                 .service
@@ -879,11 +1095,10 @@ mod tests {
             let to_key = key_from_byte(TO_BYTE_A);
             let from = Evm::address_from_key(&from_key);
             let to = Evm::address_from_key(&to_key);
-            let setup = setup_ledger(
-                context,
-                "revm-ledger-updates",
-                vec![(from, U256::from(GENESIS_BALANCE)), (to, U256::ZERO)],
-            )
+            let setup = setup_ledger(context, "revm-ledger-updates", vec![
+                (from, U256::from(GENESIS_BALANCE)),
+                (to, U256::ZERO),
+            ])
             .await;
             let parent_snapshot = setup
                 .service

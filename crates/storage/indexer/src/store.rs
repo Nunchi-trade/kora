@@ -233,7 +233,7 @@ impl BlockIndex {
 
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::{Address, B256, Bytes, U256};
+    use alloy_primitives::{Address, B256, Bloom, Bytes, U256};
 
     use super::*;
 
@@ -262,6 +262,13 @@ mod tests {
             value: U256::ZERO,
             gas_limit: 21_000,
             gas_price: 1_000_000_000,
+            tx_type: 0,
+            chain_id: Some(1337),
+            max_fee_per_gas: None,
+            max_priority_fee_per_gas: None,
+            v: 27,
+            r: U256::from(1),
+            s: U256::from(2),
             input: Bytes::new(),
             nonce: 0,
         }
@@ -279,6 +286,9 @@ mod tests {
             gas_used: 21_000,
             contract_address: None,
             logs: vec![],
+            logs_bloom: Bloom::ZERO,
+            tx_type: 0,
+            effective_gas_price: 1_000_000_000,
             status: true,
         }
     }
@@ -344,6 +354,10 @@ mod tests {
             topics: vec![topic],
             data: Bytes::new(),
             log_index: 0,
+            block_number: 1,
+            block_hash,
+            transaction_hash: B256::repeat_byte(2),
+            transaction_index: 0,
         };
 
         let receipt = IndexedReceipt {
@@ -357,6 +371,9 @@ mod tests {
             gas_used: 21_000,
             contract_address: None,
             logs: vec![log],
+            logs_bloom: Bloom::ZERO,
+            tx_type: 0,
+            effective_gas_price: 1_000_000_000,
             status: true,
         };
 

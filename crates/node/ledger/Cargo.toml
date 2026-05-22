@@ -21,6 +21,7 @@ kora-traits = { path = "../../storage/traits" }
 kora-txpool = { path = "../txpool" }
 
 # Commonware
+commonware-consensus.workspace = true
 commonware-cryptography.workspace = true
 commonware-runtime.workspace = true
 

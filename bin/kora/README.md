@@ -35,7 +35,7 @@ Run as a validator (requires completed DKG):
 kora validator --peers peers.json
 ```
 
-The `--chain-id` and `--data-dir` flags can override configuration values. Set `RUST_LOG` to control log level (e.g., `info`, `debug`, `kora=trace`).
+The `--chain-id` and `--data-dir` flags can override configuration values. Set `RUST_LOG` to control log level (e.g., `info`, `debug`, `kora=trace`). Set `KORA_RUNTIME_DIR` to override the Commonware runtime storage directory.
 
 ## Configuration
 

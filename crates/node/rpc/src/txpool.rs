@@ -152,7 +152,7 @@ fn ordered_tx_to_rpc(tx: &OrderedTransaction) -> RpcTransaction {
         chain_id: envelope.chain_id().map(U64::from),
         max_fee_per_gas: max_fee_per_gas(envelope).map(U256::from),
         max_priority_fee_per_gas: max_priority_fee_per_gas(envelope).map(U256::from),
-        v: U64::from(u64::from(signature.v())),
+        v: U256::from(u64::from(signature.v())),
         r: signature.r(),
         s: signature.s(),
     }

@@ -34,6 +34,13 @@ pub enum ConsensusError {
         /// Actual state root.
         actual: StateRoot,
     },
+
+    /// Timestamp overflow (parent timestamp is `u64::MAX`).
+    #[error("timestamp overflow: cannot produce a timestamp after {parent_timestamp}")]
+    TimestampOverflow {
+        /// The parent block's timestamp that caused the overflow.
+        parent_timestamp: u64,
+    },
 }
 
 #[cfg(test)]
@@ -90,6 +97,14 @@ mod tests {
         assert!(msg.contains("state root mismatch"));
         assert!(msg.contains("expected"));
         assert!(msg.contains("got"));
+    }
+
+    #[test]
+    fn test_timestamp_overflow_display() {
+        let err = ConsensusError::TimestampOverflow { parent_timestamp: u64::MAX };
+        let msg = err.to_string();
+        assert!(msg.contains("timestamp overflow"));
+        assert!(msg.contains(&u64::MAX.to_string()));
     }
 
     #[test]

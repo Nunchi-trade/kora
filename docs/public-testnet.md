@@ -145,10 +145,10 @@ Artifact ownership:
 - Do not publish `validator.key` or `share.key`.
 
 The current `keygen setup` command generates validator identity keys centrally.
-For this first testnet, that means the coordinator must distribute each private
-key securely. A later tooling improvement should support operator-generated
-identity keys or an endpoint/participant manifest so operators do not need to
-receive private identity material from a coordinator.
+This is a workflow issue that needs to be fixed: each operator should generate
+its own `validator.key` locally and provide only the public key to the
+coordinator. Until that tooling exists, the coordinator must distribute each
+private key securely and should not retain copies.
 
 ## Generate Initial Artifacts
 
@@ -190,17 +190,6 @@ Example shape:
 }
 ```
 
-Verify the public endpoints before DKG with a temporary TCP listener on each
-validator host, or verify them immediately after all DKG processes have started:
-
-```sh
-nc -vz validator-0.testnet.kora.network 30303
-nc -vz validator-1.testnet.kora.network 30303
-nc -vz validator-2.testnet.kora.network 30303
-nc -vz validator-3.testnet.kora.network 30303
-```
-
-Run those checks from more than one network location if possible.
 
 ## Run Interactive DKG
 

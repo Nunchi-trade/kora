@@ -41,7 +41,7 @@ impl BuildSenderState {
             }
 
             if excluded.contains(&ordered_tx_id(tx)) {
-                self.expected_nonce = tx.nonce + 1;
+                self.expected_nonce = tx.nonce.saturating_add(1);
                 self.index += 1;
                 continue;
             }
@@ -523,14 +523,11 @@ impl Mempool for TransactionPool {
             .iter()
             .filter(|(_, queue)| !queue.pending.is_empty())
             .map(|(sender, queue)| {
-                (
-                    *sender,
-                    BuildSenderState {
-                        txs: queue.pending.clone(),
-                        index: 0,
-                        expected_nonce: queue.next_nonce,
-                    },
-                )
+                (*sender, BuildSenderState {
+                    txs: queue.pending.clone(),
+                    index: 0,
+                    expected_nonce: queue.next_nonce,
+                })
             })
             .collect();
         let pending_count = senders.values().map(|state| state.txs.len()).sum();
@@ -650,6 +647,19 @@ mod tests {
     fn tx_nonce(tx: &Tx) -> u64 {
         let mut data = tx.bytes.as_ref();
         TxEnvelope::decode_2718(&mut data).unwrap().nonce()
+    }
+
+    fn tx_nonce_and_gas_price(tx: &Tx) -> (u64, u128) {
+        let mut data = tx.bytes.as_ref();
+        let envelope = TxEnvelope::decode_2718(&mut data).unwrap();
+        let gas_price = match &envelope {
+            TxEnvelope::Legacy(tx) => tx.tx().gas_price,
+            TxEnvelope::Eip2930(tx) => tx.tx().gas_price,
+            TxEnvelope::Eip1559(tx) => tx.tx().max_fee_per_gas,
+            TxEnvelope::Eip4844(tx) => tx.tx().tx().max_fee_per_gas,
+            TxEnvelope::Eip7702(tx) => tx.tx().max_fee_per_gas,
+        };
+        (envelope.nonce(), gas_price)
     }
 
     #[test]
@@ -835,6 +845,54 @@ mod tests {
     }
 
     #[test]
+    fn pool_remove_confirmed_removes_queued_hashes() {
+        let pool = TransactionPool::new(PoolConfig::default());
+        let sender = random_address();
+        let tx0 = make_ordered_tx(sender, 0, 100);
+        let tx2 = make_ordered_tx(sender, 2, 100);
+
+        pool.add(tx0.clone()).unwrap();
+        pool.add(tx2.clone()).unwrap();
+
+        assert_eq!(pool.len(), 2);
+        assert_eq!(pool.pending_count(), 1);
+        assert_eq!(pool.queued_count(), 1);
+        assert!(pool.contains(&tx2.hash));
+
+        pool.remove_confirmed(&sender, 2);
+
+        assert_eq!(pool.len(), 0);
+        assert_eq!(pool.pending_count(), 0);
+        assert_eq!(pool.queued_count(), 0);
+        assert!(!pool.contains(&tx0.hash));
+        assert!(!pool.contains(&tx2.hash));
+    }
+
+    #[test]
+    fn pool_remove_confirmed_preserves_queued_progress_after_gap() {
+        let pool = TransactionPool::new(PoolConfig::default());
+        let sender = random_address();
+        let tx0 = make_ordered_tx(sender, 0, 100);
+        let tx2 = make_ordered_tx(sender, 2, 100);
+
+        pool.add(tx0).unwrap();
+        pool.add(tx2.clone()).unwrap();
+        pool.remove_confirmed(&sender, 0);
+
+        assert_eq!(pool.len(), 1);
+        assert!(pool.contains(&tx2.hash));
+        assert!(pool.build(10, &BTreeSet::new()).is_empty());
+
+        let tx1 = make_ordered_tx(sender, 1, 100);
+        pool.add(tx1.clone()).unwrap();
+
+        let txs = pool.build(10, &BTreeSet::new());
+        assert_eq!(txs.len(), 2);
+        assert_eq!(tx_nonce(&txs[0]), tx1.nonce);
+        assert_eq!(tx_nonce(&txs[1]), tx2.nonce);
+    }
+
+    #[test]
     fn pool_clear() {
         let config = PoolConfig::default();
         let pool = TransactionPool::new(config);
@@ -913,6 +971,40 @@ mod tests {
     }
 
     #[test]
+    fn pool_prune_batches_highest_confirmed_nonce_per_sender() {
+        let pool = TransactionPool::new(PoolConfig::default());
+        let sender_a = random_address();
+        let sender_b = random_address();
+        let a0 = make_ordered_tx(sender_a, 0, 100);
+        let a1 = make_ordered_tx(sender_a, 1, 100);
+        let a2 = make_ordered_tx(sender_a, 2, 100);
+        let a3 = make_ordered_tx(sender_a, 3, 100);
+        let b0 = make_ordered_tx(sender_b, 0, 101);
+        let b1 = make_ordered_tx(sender_b, 1, 101);
+
+        for tx in [&a0, &a1, &a2, &a3, &b0, &b1] {
+            pool.add(tx.clone()).unwrap();
+        }
+
+        pool.prune(&[ordered_tx_id(&a1), ordered_tx_id(&b0)]);
+
+        assert_eq!(pool.len(), 3);
+        assert!(!pool.contains(&a0.hash));
+        assert!(!pool.contains(&a1.hash));
+        assert!(!pool.contains(&b0.hash));
+        assert!(pool.contains(&a2.hash));
+        assert!(pool.contains(&a3.hash));
+        assert!(pool.contains(&b1.hash));
+
+        let sender_a_nonces: Vec<_> =
+            pool.pending_for_sender(&sender_a).into_iter().map(|tx| tx.nonce).collect();
+        let sender_b_nonces: Vec<_> =
+            pool.pending_for_sender(&sender_b).into_iter().map(|tx| tx.nonce).collect();
+        assert_eq!(sender_a_nonces, vec![2, 3]);
+        assert_eq!(sender_b_nonces, vec![1]);
+    }
+
+    #[test]
     fn pool_prune_promotes_queued_transactions_after_gap_fills() {
         let pool = TransactionPool::new(PoolConfig::default());
         let sender = random_address();
@@ -932,5 +1024,24 @@ mod tests {
         assert_eq!(txs.len(), 2);
         assert_eq!(tx_nonce(&txs[0]), tx1.nonce);
         assert_eq!(tx_nonce(&txs[1]), tx2.nonce);
+    }
+
+    #[test]
+    fn pool_build_preserves_sender_nonce_order_under_fee_pressure() {
+        let pool = TransactionPool::new(PoolConfig::default());
+        let sender_a = random_address();
+        let sender_b = random_address();
+        let a0 = make_ordered_tx(sender_a, 0, 10);
+        let a1 = make_ordered_tx(sender_a, 1, 1_000);
+        let b0 = make_ordered_tx(sender_b, 0, 500);
+
+        pool.add(a0).unwrap();
+        pool.add(a1).unwrap();
+        pool.add(b0).unwrap();
+
+        let txs = pool.build(10, &BTreeSet::new());
+        let order: Vec<_> = txs.iter().map(tx_nonce_and_gas_price).collect();
+
+        assert_eq!(order, vec![(0, 500), (0, 10), (1, 1_000)]);
     }
 }

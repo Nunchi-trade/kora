@@ -72,7 +72,33 @@ impl Mempool for InMemoryMempool {
 
 #[cfg(test)]
 mod tests {
+    use alloy_consensus::{Transaction as _, TxEnvelope, transaction::SignerRecoverable as _};
+    use alloy_eips::eip2718::Decodable2718 as _;
+    use alloy_primitives::{Address, U256};
+    use k256::ecdsa::SigningKey;
+    use kora_domain::evm::Evm;
+
     use super::*;
+
+    fn signing_key_from_seed(seed: u8) -> SigningKey {
+        let mut secret = [0u8; 32];
+        secret[31] = seed;
+        SigningKey::from_bytes((&secret).into()).expect("valid key")
+    }
+
+    fn signed_transfer(sender_seed: u8, recipient_seed: u8, nonce: u64, value: u64) -> Tx {
+        let sender_key = signing_key_from_seed(sender_seed);
+        let recipient_key = signing_key_from_seed(recipient_seed);
+        let recipient = Evm::address_from_key(&recipient_key);
+        Evm::sign_eip1559_transfer(&sender_key, 1, recipient, U256::from(value), nonce, 21_000)
+    }
+
+    fn signed_order_key(tx: &Tx) -> (Address, u64, TxId) {
+        let mut data = tx.bytes.as_ref();
+        let envelope = TxEnvelope::decode_2718(&mut data).expect("signed tx");
+        let sender = envelope.recover_signer().expect("recover signer");
+        (sender, envelope.nonce(), tx.id())
+    }
 
     #[test]
     fn mempool_insert_and_build() {
@@ -122,5 +148,31 @@ mod tests {
         let txs = mempool.build(10, &excluded);
         assert_eq!(txs.len(), 1);
         assert_eq!(txs[0], tx2);
+    }
+
+    #[test]
+    fn mempool_build_orders_signed_txs_by_sender_nonce_and_id() {
+        let mempool = InMemoryMempool::new();
+        let txs = vec![
+            signed_transfer(2, 9, 1, 10),
+            signed_transfer(1, 9, 0, 20),
+            signed_transfer(2, 8, 0, 30),
+            signed_transfer(1, 8, 0, 40),
+            signed_transfer(1, 7, 1, 50),
+            signed_transfer(2, 7, 0, 60),
+        ];
+
+        for tx in txs.iter().rev() {
+            assert!(mempool.insert(tx.clone()));
+        }
+
+        let mut expected = txs;
+        expected.sort_by_key(signed_order_key);
+
+        let built = mempool.build(10, &std::collections::BTreeSet::new());
+        let built_ids: Vec<_> = built.iter().map(Tx::id).collect();
+        let expected_ids: Vec<_> = expected.iter().map(Tx::id).collect();
+
+        assert_eq!(built_ids, expected_ids);
     }
 }
