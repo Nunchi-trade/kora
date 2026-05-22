@@ -701,10 +701,11 @@ mod tests {
             let to_key = key_from_byte(TO_BYTE_A);
             let from = Evm::address_from_key(&from_key);
             let to = Evm::address_from_key(&to_key);
-            let setup = setup_ledger(context, "revm-ledger-merge", vec![
-                (from, U256::from(GENESIS_BALANCE)),
-                (to, U256::ZERO),
-            ])
+            let setup = setup_ledger(
+                context,
+                "revm-ledger-merge",
+                vec![(from, U256::from(GENESIS_BALANCE)), (to, U256::ZERO)],
+            )
             .await;
             let parent_snapshot = setup
                 .service
@@ -755,10 +756,11 @@ mod tests {
             let to_key = key_from_byte(TO_BYTE_A);
             let from = Evm::address_from_key(&from_key);
             let to = Evm::address_from_key(&to_key);
-            let setup = setup_ledger(context, "revm-ledger-compact-chain", vec![
-                (from, U256::from(GENESIS_BALANCE)),
-                (to, U256::ZERO),
-            ])
+            let setup = setup_ledger(
+                context,
+                "revm-ledger-compact-chain",
+                vec![(from, U256::from(GENESIS_BALANCE)), (to, U256::ZERO)],
+            )
             .await;
             let parent_snapshot = setup
                 .service
@@ -839,10 +841,11 @@ mod tests {
             let to_key = key_from_byte(TO_BYTE_A);
             let from = Evm::address_from_key(&from_key);
             let to = Evm::address_from_key(&to_key);
-            let setup = setup_ledger(context, "revm-ledger-empty-child", vec![
-                (from, U256::from(GENESIS_BALANCE)),
-                (to, U256::ZERO),
-            ])
+            let setup = setup_ledger(
+                context,
+                "revm-ledger-empty-child",
+                vec![(from, U256::from(GENESIS_BALANCE)), (to, U256::ZERO)],
+            )
             .await;
             let parent_snapshot = setup
                 .service
@@ -882,10 +885,11 @@ mod tests {
             let to_key = key_from_byte(TO_BYTE_A);
             let from = Evm::address_from_key(&from_key);
             let to = Evm::address_from_key(&to_key);
-            let setup = setup_ledger(context, "revm-ledger-duplicate", vec![
-                (from, U256::from(GENESIS_BALANCE)),
-                (to, U256::ZERO),
-            ])
+            let setup = setup_ledger(
+                context,
+                "revm-ledger-duplicate",
+                vec![(from, U256::from(GENESIS_BALANCE)), (to, U256::ZERO)],
+            )
             .await;
             let parent_snapshot = setup
                 .service
@@ -982,12 +986,16 @@ mod tests {
             let to_key_b = key_from_byte(TO_BYTE_B);
             let from_b = Evm::address_from_key(&from_key_b);
             let to_b = Evm::address_from_key(&to_key_b);
-            let setup = setup_ledger(context, "revm-ledger-unrelated", vec![
-                (from_a, U256::from(GENESIS_BALANCE)),
-                (to_a, U256::ZERO),
-                (from_b, U256::from(DUPLICATE_BALANCE)),
-                (to_b, U256::ZERO),
-            ])
+            let setup = setup_ledger(
+                context,
+                "revm-ledger-unrelated",
+                vec![
+                    (from_a, U256::from(GENESIS_BALANCE)),
+                    (to_a, U256::ZERO),
+                    (from_b, U256::from(DUPLICATE_BALANCE)),
+                    (to_b, U256::ZERO),
+                ],
+            )
             .await;
             let parent_snapshot = setup
                 .service
@@ -1047,10 +1055,11 @@ mod tests {
             let to_key = key_from_byte(TO_BYTE_A);
             let from = Evm::address_from_key(&from_key);
             let to = Evm::address_from_key(&to_key);
-            let setup = setup_ledger(context, "revm-ledger-updates", vec![
-                (from, U256::from(GENESIS_BALANCE)),
-                (to, U256::ZERO),
-            ])
+            let setup = setup_ledger(
+                context,
+                "revm-ledger-updates",
+                vec![(from, U256::from(GENESIS_BALANCE)), (to, U256::ZERO)],
+            )
             .await;
             let parent_snapshot = setup
                 .service

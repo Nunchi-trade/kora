@@ -193,27 +193,33 @@ mod tests {
         let mut storage1 = BTreeMap::new();
         storage1.insert(U256::from(2u64), U256::from(200u64));
         storage1.insert(U256::from(1u64), U256::from(100u64));
-        changes.accounts.insert(Address::from([0x11u8; 20]), AccountChange {
-            touched: true,
-            created: false,
-            selfdestructed: false,
-            nonce: 7,
-            balance: U256::from(1234u64),
-            code_hash: B256::from([0xAAu8; 32]),
-            storage: storage1,
-        });
+        changes.accounts.insert(
+            Address::from([0x11u8; 20]),
+            AccountChange {
+                touched: true,
+                created: false,
+                selfdestructed: false,
+                nonce: 7,
+                balance: U256::from(1234u64),
+                code_hash: B256::from([0xAAu8; 32]),
+                storage: storage1,
+            },
+        );
 
         let mut storage2 = BTreeMap::new();
         storage2.insert(U256::from(5u64), U256::from(42u64));
-        changes.accounts.insert(Address::from([0x22u8; 20]), AccountChange {
-            touched: true,
-            created: true,
-            selfdestructed: false,
-            nonce: 1,
-            balance: U256::from(999u64),
-            code_hash: B256::from([0xBBu8; 32]),
-            storage: storage2,
-        });
+        changes.accounts.insert(
+            Address::from([0x22u8; 20]),
+            AccountChange {
+                touched: true,
+                created: true,
+                selfdestructed: false,
+                nonce: 1,
+                balance: U256::from(999u64),
+                code_hash: B256::from([0xBBu8; 32]),
+                storage: storage2,
+            },
+        );
 
         changes
     }
@@ -277,15 +283,18 @@ mod tests {
         let mut changes = StateChanges::default();
         assert!(changes.is_empty());
 
-        changes.accounts.insert(Address::ZERO, AccountChange {
-            touched: true,
-            created: false,
-            selfdestructed: false,
-            nonce: 1,
-            balance: U256::from(100u64),
-            code_hash: B256::ZERO,
-            storage: BTreeMap::new(),
-        });
+        changes.accounts.insert(
+            Address::ZERO,
+            AccountChange {
+                touched: true,
+                created: false,
+                selfdestructed: false,
+                nonce: 1,
+                balance: U256::from(100u64),
+                code_hash: B256::ZERO,
+                storage: BTreeMap::new(),
+            },
+        );
         assert!(!changes.is_empty());
     }
 
