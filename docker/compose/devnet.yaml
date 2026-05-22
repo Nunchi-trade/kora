@@ -11,6 +11,7 @@ volumes:
   data_node3:
   data_secondary0:
   shared_config:
+  startup_barrier:
   prometheus_data:
   grafana_data:
   loki_data:
@@ -190,12 +191,15 @@ services:
     volumes:
       - shared_config:/shared:ro
       - data_node0:/data
+      - startup_barrier:/barrier
     environment:
       - RUST_LOG=${RUST_LOG:-info}
       - CHAIN_ID=${CHAIN_ID:-1337}
       - KORA_RUNTIME_DIR=${KORA_RUNTIME_DIR:-/runtime}
       - VALIDATOR_INDEX=0
+      - VALIDATOR_COUNT=4
       - IS_BOOTSTRAP=true
+      - PEER_NODES=node0,node1,node2,node3
       - HEALTHCHECK_MODE=ready
     ports:
       - "30400:30303"
@@ -205,20 +209,20 @@ services:
   validator-node1:
     <<: *validator-common
     hostname: node1
-    depends_on:
-      validator-node0:
-        condition: service_healthy
     entrypoint: ["/scripts/entrypoint.sh", "validator"]
     volumes:
       - shared_config:/shared:ro
       - data_node1:/data
+      - startup_barrier:/barrier
     environment:
       - RUST_LOG=${RUST_LOG:-info}
       - CHAIN_ID=${CHAIN_ID:-1337}
       - KORA_RUNTIME_DIR=${KORA_RUNTIME_DIR:-/runtime}
       - VALIDATOR_INDEX=1
+      - VALIDATOR_COUNT=4
       - IS_BOOTSTRAP=false
       - BOOTSTRAP_PEERS=node0:30303
+      - PEER_NODES=node0,node1,node2,node3
       - HEALTHCHECK_MODE=ready
     ports:
       - "30401:30303"
@@ -228,20 +232,20 @@ services:
   validator-node2:
     <<: *validator-common
     hostname: node2
-    depends_on:
-      validator-node0:
-        condition: service_healthy
     entrypoint: ["/scripts/entrypoint.sh", "validator"]
     volumes:
       - shared_config:/shared:ro
       - data_node2:/data
+      - startup_barrier:/barrier
     environment:
       - RUST_LOG=${RUST_LOG:-info}
       - CHAIN_ID=${CHAIN_ID:-1337}
       - KORA_RUNTIME_DIR=${KORA_RUNTIME_DIR:-/runtime}
       - VALIDATOR_INDEX=2
+      - VALIDATOR_COUNT=4
       - IS_BOOTSTRAP=false
       - BOOTSTRAP_PEERS=node0:30303
+      - PEER_NODES=node0,node1,node2,node3
       - HEALTHCHECK_MODE=ready
     ports:
       - "30402:30303"
@@ -251,20 +255,20 @@ services:
   validator-node3:
     <<: *validator-common
     hostname: node3
-    depends_on:
-      validator-node0:
-        condition: service_healthy
     entrypoint: ["/scripts/entrypoint.sh", "validator"]
     volumes:
       - shared_config:/shared:ro
       - data_node3:/data
+      - startup_barrier:/barrier
     environment:
       - RUST_LOG=${RUST_LOG:-info}
       - CHAIN_ID=${CHAIN_ID:-1337}
       - KORA_RUNTIME_DIR=${KORA_RUNTIME_DIR:-/runtime}
       - VALIDATOR_INDEX=3
+      - VALIDATOR_COUNT=4
       - IS_BOOTSTRAP=false
       - BOOTSTRAP_PEERS=node0:30303
+      - PEER_NODES=node0,node1,node2,node3
       - HEALTHCHECK_MODE=ready
     ports:
       - "30403:30303"

@@ -172,6 +172,13 @@ clear_runtime_state() {
     done
 }
 
+clear_startup_barrier() {
+    local volume="kora-devnet_startup_barrier"
+    docker volume inspect "$volume" >/dev/null 2>&1 || return 0
+    docker run --rm -v "${volume}:/barrier" alpine \
+        sh -c 'rm -f /barrier/*.ready' >/dev/null 2>&1 || true
+}
+
 cd "$(dirname "$0")/.."
 
 print_header
@@ -309,6 +316,7 @@ print_phase "2/3" "Starting validators and secondary peers"
 docker compose -f compose/devnet.yaml stop \
     validator-node0 validator-node1 validator-node2 validator-node3 secondary-node0 >/dev/null 2>&1 || true
 clear_runtime_state
+clear_startup_barrier
 
 if [[ "${COMPOSE_PROFILES:-}" == *observability* ]]; then
     run_with_spinner "Launching validator, secondary, and observability containers..." docker compose -f compose/devnet.yaml --profile observability up -d \

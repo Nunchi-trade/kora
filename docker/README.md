@@ -167,8 +167,10 @@ Environment variables (set in `.env` or export):
 | `KORA_RUNTIME_DIR` | /runtime | Commonware runtime storage directory. The Docker devnet mounts this path as 1GiB tmpfs to keep local consensus journal syncs off Docker named volumes. |
 | `COMPOSE_PROFILES` | observability | Comma-separated profiles (observability, distributed-dkg) |
 | `VALIDATOR_INDEX` | - | Node index (0-3), set per container |
+| `VALIDATOR_COUNT` | 0 | Total number of validators. When > 0, entrypoint waits for all validators via a shared barrier volume before starting consensus |
 | `IS_BOOTSTRAP` | - | Whether node is bootstrap node |
 | `BOOTSTRAP_PEERS` | - | Bootstrap peer addresses |
+| `PEER_NODES` | - | Comma-separated list of all validator hostnames (e.g. node0,node1,node2,node3) |
 | `HEALTHCHECK_MODE` | - | Health check mode (dkg, ready) |
 
 ## Secondary Peers

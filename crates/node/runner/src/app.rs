@@ -93,7 +93,18 @@ where
 
         let start = Instant::now();
         let parent_digest = parent.commitment();
-        let parent_snapshot = self.ledger.parent_snapshot(parent_digest).await?;
+        let parent_snapshot = match self.ledger.parent_snapshot(parent_digest).await {
+            Some(snap) => snap,
+            None => {
+                warn!(
+                    parent_height = parent.height,
+                    ?parent_digest,
+                    "build_block: parent snapshot not found — \
+                     node has not yet processed this parent block"
+                );
+                return None;
+            }
+        };
         let snapshot_elapsed = start.elapsed();
 
         let (_, mempool, snapshots) = self.ledger.proposal_components().await;
@@ -329,18 +340,29 @@ where
             let block = self.build_block(&parent, timestamp).await;
             let build_elapsed = build_start.elapsed();
 
-            if let Some(ref b) = block {
-                if let Some(ref state) = node_state {
-                    state.inc_proposed();
+            match block {
+                Some(ref b) => {
+                    if let Some(ref state) = node_state {
+                        state.inc_proposed();
+                    }
+                    debug!(
+                        height = b.height,
+                        timestamp = b.timestamp,
+                        ancestry_ms = ancestry_elapsed.as_millis(),
+                        build_ms = build_elapsed.as_millis(),
+                        total_ms = start.elapsed().as_millis(),
+                        "propose complete"
+                    );
                 }
-                debug!(
-                    height = b.height,
-                    timestamp = b.timestamp,
-                    ancestry_ms = ancestry_elapsed.as_millis(),
-                    build_ms = build_elapsed.as_millis(),
-                    total_ms = start.elapsed().as_millis(),
-                    "propose complete"
-                );
+                None => {
+                    warn!(
+                        parent_height = parent.height,
+                        parent_digest = ?parent.commitment(),
+                        build_ms = build_elapsed.as_millis(),
+                        "propose failed: build_block returned None \
+                         (likely missing parent snapshot — node may still be catching up)"
+                    );
+                }
             }
 
             block
