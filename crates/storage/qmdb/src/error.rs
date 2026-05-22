@@ -21,6 +21,10 @@ pub enum QmdbError {
     /// Code not found for hash.
     #[error("code not found: {0}")]
     CodeNotFound(B256),
+
+    /// Cross-partition commit sequences are inconsistent after a crash.
+    #[error("inconsistent partitions: {0}")]
+    InconsistentPartitions(String),
 }
 
 #[cfg(test)]

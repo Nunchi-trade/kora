@@ -12,6 +12,7 @@ mod types;
 
 mod backend;
 pub use backend::{CommonwareBackend, CommonwareRootProvider};
+pub use kora_qmdb::PartitionCommitSeqs;
 
 mod code;
 pub use code::{CodeStore, CodeStoreError};

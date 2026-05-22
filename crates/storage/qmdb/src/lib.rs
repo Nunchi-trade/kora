@@ -21,7 +21,10 @@ mod root;
 pub use root::StateRoot;
 
 mod store;
-pub use store::{QmdbStore, Stores};
+pub use store::{
+    COMMIT_SEQ_ACCOUNT_KEY, COMMIT_SEQ_CODE_KEY, COMMIT_SEQ_STORAGE_KEY, PartitionCommitSeqs,
+    QmdbStore, Stores,
+};
 
 mod traits;
 pub use traits::{QmdbBatchable, QmdbGettable};

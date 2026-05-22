@@ -23,6 +23,7 @@ commonware-runtime.workspace = true
 commonware-storage.workspace = true
 commonware-utils.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

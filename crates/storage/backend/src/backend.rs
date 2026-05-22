@@ -11,7 +11,8 @@ use commonware_storage::{
 };
 use commonware_utils::{NZU64, NZUsize};
 use kora_handlers::{HandleError, RootProvider};
-use kora_qmdb::{ChangeSet, QmdbStore, StateRoot};
+use kora_qmdb::{ChangeSet, PartitionCommitSeqs, QmdbStore, StateRoot};
+use tracing::{error, info};
 
 use crate::{
     AccountStore, BackendError, CodeStore, QmdbBackendConfig, StorageStore,
@@ -121,6 +122,41 @@ impl CommonwareBackend {
     /// Get the current state root.
     pub fn state_root(&self) -> Result<B256, BackendError> {
         state_root_from_stores(&self.accounts, &self.storage, &self.code)
+    }
+
+    /// Check cross-partition commit sequence consistency.
+    ///
+    /// Reads the commit sequence marker from each QMDB partition and verifies
+    /// they all agree. If no markers exist (backward-compatible with pre-fix
+    /// databases), the check passes. If markers are present but differ, a
+    /// partial commit occurred during a previous crash and the node must not
+    /// start.
+    ///
+    /// Returns the [`PartitionCommitSeqs`] on success so the caller can
+    /// initialize the `QmdbStore` with the correct starting sequence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackendError::InconsistentPartitions`] if the sequences differ,
+    /// or a storage error if reading the markers fails.
+    pub async fn verify_partition_consistency(&self) -> Result<PartitionCommitSeqs, BackendError> {
+        let seqs = read_partition_commit_seqs(&self.accounts, &self.storage, &self.code).await?;
+
+        if let Some(msg) = seqs.inconsistency_message() {
+            error!(
+                accounts_seq = ?seqs.accounts,
+                storage_seq = ?seqs.storage,
+                code_seq = ?seqs.code,
+                "QMDB partition consistency check FAILED"
+            );
+            return Err(BackendError::InconsistentPartitions(msg));
+        }
+
+        info!(
+            commit_seq = ?seqs.accounts.unwrap_or(0),
+            "QMDB partition consistency check passed"
+        );
+        Ok(seqs)
     }
 }
 
@@ -239,6 +275,51 @@ async fn open_dirty_stores(
         storage: stores.storage.into_dirty()?,
         code: stores.code.into_dirty()?,
     })
+}
+
+/// Read commit sequence markers from all three partitions.
+///
+/// This is a standalone helper so it can operate on borrowed stores without
+/// taking ownership. The function uses the well-known sentinel keys defined
+/// in [`kora_qmdb`] to retrieve the sequence numbers.
+async fn read_partition_commit_seqs(
+    accounts: &AccountStore,
+    storage: &StorageStore,
+    code: &CodeStore,
+) -> Result<PartitionCommitSeqs, BackendError> {
+    use kora_qmdb::{
+        AccountEncoding, COMMIT_SEQ_ACCOUNT_KEY, COMMIT_SEQ_CODE_KEY, COMMIT_SEQ_STORAGE_KEY,
+        QmdbGettable,
+    };
+
+    let accounts_seq = match accounts.get(&COMMIT_SEQ_ACCOUNT_KEY).await {
+        Ok(Some(bytes)) => AccountEncoding::decode(&bytes).map(|(nonce, _, _, _)| nonce),
+        Ok(None) => None,
+        Err(e) => return Err(BackendError::Storage(e.to_string())),
+    };
+
+    let storage_seq = match storage.get(&COMMIT_SEQ_STORAGE_KEY).await {
+        Ok(Some(value)) => {
+            let limbs: [u64; 4] = value.into_limbs();
+            if limbs[1] == 0 && limbs[2] == 0 && limbs[3] == 0 { Some(limbs[0]) } else { None }
+        }
+        Ok(None) => None,
+        Err(e) => return Err(BackendError::Storage(e.to_string())),
+    };
+
+    let code_seq = match code.get(&COMMIT_SEQ_CODE_KEY).await {
+        Ok(Some(bytes)) => {
+            if bytes.len() >= 8 {
+                bytes[..8].try_into().ok().map(u64::from_be_bytes)
+            } else {
+                None
+            }
+        }
+        Ok(None) => None,
+        Err(e) => return Err(BackendError::Storage(e.to_string())),
+    };
+
+    Ok(PartitionCommitSeqs { accounts: accounts_seq, storage: storage_seq, code: code_seq })
 }
 
 fn state_root_from_stores(

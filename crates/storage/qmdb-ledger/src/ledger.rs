@@ -12,6 +12,7 @@ use kora_qmdb::StateRoot as QmdbStateRoot;
 use kora_traits::{StateDb, StateDbWrite};
 use thiserror::Error;
 use tokio::sync::RwLock;
+use tracing::info;
 
 /// QMDB configuration for the backend.
 pub type QmdbConfig = QmdbBackendConfig;
@@ -58,6 +59,10 @@ impl QmdbLedger {
     }
 
     /// Initializes the QMDB partitions, optionally applying the genesis allocation.
+    ///
+    /// Runs a cross-partition consistency check before proceeding. If the
+    /// partitions have mismatched commit sequences (indicating a partial commit
+    /// from a previous crash), initialization will fail with an error.
     pub async fn init_with_genesis(
         context: Context,
         config: QmdbConfig,
@@ -65,10 +70,22 @@ impl QmdbLedger {
         apply_genesis: bool,
     ) -> Result<Self, Error> {
         let backend = CommonwareBackend::open(context.clone(), config.clone()).await?;
+
+        // Verify cross-partition consistency before consuming the backend.
+        let seqs = backend.verify_partition_consistency().await?;
+        let starting_seq = seqs.accounts.unwrap_or(0);
+        info!(commit_seq = starting_seq, "QMDB partition consistency verified");
+
         let root_provider = CommonwareRootProvider::new(context, config);
         let (accounts, storage, code) = backend.into_stores();
-        let handle = Handle::new(accounts, storage, code)
-            .with_root_provider(Arc::new(RwLock::new(root_provider)));
+
+        // Create a QmdbStore with the persisted commit sequence so that
+        // subsequent commits continue the monotonic sequence.
+        let mut store = kora_qmdb::QmdbStore::new(accounts, storage, code);
+        store.set_commit_seq(starting_seq);
+        let handle =
+            Handle::from_store(store).with_root_provider(Arc::new(RwLock::new(root_provider)));
+
         if apply_genesis {
             handle.init_genesis(genesis_alloc).await?;
         }
