@@ -361,6 +361,9 @@ impl<S: StateDb> BlockExecutor<S> for RevmExecutor {
         context: &BlockContext,
         txs: &[Self::Tx],
     ) -> Result<ExecutionOutcome, ExecutionError> {
+        // --- pre-execution hook ---
+        let pre_changes = self.pre_execute(context, state)?;
+
         let adapter = StateDbAdapter::new(state.clone(), context.recent_block_hashes.clone());
 
         let db = State::builder().with_database_ref(adapter).build();
@@ -384,6 +387,7 @@ impl<S: StateDb> BlockExecutor<S> for RevmExecutor {
         let mut evm = ctx.build_mainnet();
 
         let mut outcome = ExecutionOutcome::new();
+        outcome.changes.merge(pre_changes);
         let mut cumulative_gas = 0u64;
 
         for tx_bytes in txs {
@@ -440,6 +444,11 @@ impl<S: StateDb> BlockExecutor<S> for RevmExecutor {
         }
 
         outcome.gas_used = cumulative_gas;
+
+        // --- post-execution hook ---
+        let post_changes = self.post_execute(context, state, &outcome.receipts)?;
+        outcome.changes.merge(post_changes);
+
         Ok(outcome)
     }
 
