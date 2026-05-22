@@ -446,6 +446,19 @@ impl TransactionPool {
         self.inner.read().by_hash.contains_key(hash)
     }
 
+    /// Returns `true` if the pool already contains a transaction from `sender`
+    /// with the given `nonce`.
+    ///
+    /// This is a cheap, synchronous check (read-lock only) intended for use by
+    /// the transaction validator to reject same-nonce duplicates at ingress.
+    pub fn has_nonce(&self, sender: &Address, nonce: u64) -> bool {
+        let inner = self.inner.read();
+        let Some(queue) = inner.by_sender.get(sender) else {
+            return false;
+        };
+        queue.pending.iter().chain(queue.queued.iter()).any(|tx| tx.nonce == nonce)
+    }
+
     /// Returns all sender queues for pool introspection.
     pub fn snapshot(&self) -> HashMap<Address, (Vec<OrderedTransaction>, Vec<OrderedTransaction>)> {
         self.inner
@@ -1187,5 +1200,38 @@ mod tests {
         let order: Vec<_> = txs.iter().map(tx_nonce_and_gas_price).collect();
 
         assert_eq!(order, vec![(0, 500), (0, 10), (1, 1_000)]);
+    }
+
+    #[test]
+    fn pool_has_nonce_returns_true_for_pending_tx() {
+        let pool = TransactionPool::new(PoolConfig::default());
+        let sender = random_address();
+        pool.add(make_ordered_tx(sender, 0, 100)).unwrap();
+        pool.add(make_ordered_tx(sender, 1, 100)).unwrap();
+
+        assert!(pool.has_nonce(&sender, 0));
+        assert!(pool.has_nonce(&sender, 1));
+        assert!(!pool.has_nonce(&sender, 2));
+    }
+
+    #[test]
+    fn pool_has_nonce_returns_true_for_queued_tx() {
+        let pool = TransactionPool::new(PoolConfig::default());
+        let sender = random_address();
+        pool.add(make_ordered_tx(sender, 0, 100)).unwrap();
+        // nonce 2 is queued (gap at nonce 1)
+        pool.add(make_ordered_tx(sender, 2, 100)).unwrap();
+
+        assert!(pool.has_nonce(&sender, 0));
+        assert!(!pool.has_nonce(&sender, 1));
+        assert!(pool.has_nonce(&sender, 2));
+    }
+
+    #[test]
+    fn pool_has_nonce_returns_false_for_unknown_sender() {
+        let pool = TransactionPool::new(PoolConfig::default());
+        let sender = random_address();
+
+        assert!(!pool.has_nonce(&sender, 0));
     }
 }

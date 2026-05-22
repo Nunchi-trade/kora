@@ -538,14 +538,17 @@ impl NodeRunner for ProductionRunner {
             let tx_ledger = ledger.clone();
             let tx_state = state.qmdb_state().await;
             let chain_id = self.chain_id;
+            let tx_pool = txpool.clone();
             let tx_submit: kora_rpc::TxSubmitCallback = Arc::new(move |data| {
                 let ledger = tx_ledger.clone();
                 let state = tx_state.clone();
+                let pool = tx_pool.clone();
                 Box::pin(async move {
                     let tx = Tx::new(data);
                     let tx_id = tx.id();
                     let validator =
-                        TransactionValidator::new(chain_id, state, PoolConfig::default());
+                        TransactionValidator::new(chain_id, state, PoolConfig::default())
+                            .with_pool(pool);
                     validator.validate(tx.clone()).await.map_err(|err| {
                         warn!(?tx_id, error = %err, "rpc submit: validator rejected tx");
                         kora_rpc::RpcError::InvalidTransaction(err.to_string())
