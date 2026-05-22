@@ -26,6 +26,9 @@ commonware-cryptography.workspace = true
 # Synchronization
 parking_lot.workspace = true
 
+# Logging
+tracing.workspace = true
+
 # Error handling
 thiserror.workspace = true
 

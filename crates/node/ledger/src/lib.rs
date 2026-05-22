@@ -413,33 +413,40 @@ impl LedgerView {
         };
 
         let result = qmdb.commit_changes(changes).await;
-        let inner = self.inner.lock().await;
-        inner.snapshots.clear_persisting_chain(&chain);
-        match result {
-            Ok(_) => {
-                for digest in &chain {
-                    let snapshot = inner
-                        .snapshots
-                        .get(digest)
-                        .ok_or(ConsensusError::SnapshotNotFound(*digest))?;
-                    let compact_state =
-                        OverlayState::new(inner.qmdb.state(), QmdbChangeSet::default());
-                    inner.snapshots.insert(
-                        *digest,
-                        Snapshot::new(
-                            snapshot.parent,
-                            compact_state,
-                            snapshot.state_root,
-                            QmdbChangeSet::default(),
-                            snapshot.tx_ids,
-                        ),
-                    );
+        let snapshots_handle = {
+            let inner = self.inner.lock().await;
+            inner.snapshots.clear_persisting_chain(&chain);
+            match result {
+                Ok(_) => {
+                    for digest in &chain {
+                        let snapshot = inner
+                            .snapshots
+                            .get(digest)
+                            .ok_or(ConsensusError::SnapshotNotFound(*digest))?;
+                        let compact_state =
+                            OverlayState::new(inner.qmdb.state(), QmdbChangeSet::default());
+                        inner.snapshots.insert(
+                            *digest,
+                            Snapshot::new(
+                                snapshot.parent,
+                                compact_state,
+                                snapshot.state_root,
+                                QmdbChangeSet::default(),
+                                snapshot.tx_ids,
+                            ),
+                        );
+                    }
+                    inner.snapshots.mark_persisted(&chain);
+                    Ok(inner.snapshots.clone())
                 }
-                inner.snapshots.mark_persisted(&chain);
-                Ok(true)
+                Err(err) => Err(LedgerError::from(err)),
             }
-            Err(err) => Err(err.into()),
-        }
+        }?;
+        // Evict oldest persisted snapshots to bound memory usage.
+        // Done outside the `inner` mutex since `InMemorySnapshotStore` uses
+        // its own fine-grained `RwLock`s internally.
+        snapshots_handle.evict_persisted();
+        Ok(true)
     }
 
     /// Remove transactions that are included in a block from the mempool.
