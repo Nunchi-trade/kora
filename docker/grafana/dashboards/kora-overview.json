@@ -6,6 +6,7 @@
   "id": null,
   "links": [
     {"title": "Performance & Block Time", "url": "/d/kora-performance", "type": "link"},
+    {"title": "P2P & Network", "url": "/d/kora-p2p", "type": "link"},
     {"title": "Stall Diagnostics", "url": "/d/kora-stall-diagnostics", "type": "link"},
     {"title": "Logs Explorer", "url": "/d/kora-logs", "type": "link"}
   ],

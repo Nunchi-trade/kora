@@ -1,0 +1,417 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 2,
+  "id": null,
+  "links": [
+    {"title": "Overview", "url": "/d/kora-overview", "type": "link"},
+    {"title": "Performance & Block Time", "url": "/d/kora-performance", "type": "link"},
+    {"title": "Stall Diagnostics", "url": "/d/kora-stall-diagnostics", "type": "link"}
+  ],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "id": 100,
+      "title": "P2P Health Overview",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null}
+          ]},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 3, "w": 4, "x": 0, "y": 1},
+      "id": 1,
+      "options": {"colorMode": "value", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "targets": [{"expr": "network_tracker_directory_tracked", "legendFormat": "", "refId": "A"}],
+      "title": "Tracked Peers",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null}
+          ]},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 3, "w": 4, "x": 4, "y": 1},
+      "id": 2,
+      "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "targets": [{"expr": "count(network_tracker_directory_connected)", "legendFormat": "", "refId": "A"}],
+      "title": "Connected Peers",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null}, {"color": "yellow", "value": 100}, {"color": "red", "value": 1000}
+          ]},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 3, "w": 4, "x": 8, "y": 1},
+      "id": 3,
+      "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "targets": [{"expr": "sum(rate(network_router_messages_dropped_total[1m]))", "legendFormat": "", "refId": "A"}],
+      "title": "Msgs Dropped/s",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 10}
+          ]},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 3, "w": 4, "x": 12, "y": 1},
+      "id": 4,
+      "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "targets": [{"expr": "sum(rate(network_spawner_messages_rate_limited_total[1m]))", "legendFormat": "", "refId": "A"}],
+      "title": "Msgs Rate Limited/s",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null}, {"color": "yellow", "value": 0.01}, {"color": "red", "value": 0.1}
+          ]},
+          "unit": "percentunit"
+        }
+      },
+      "gridPos": {"h": 3, "w": 4, "x": 16, "y": 1},
+      "id": 5,
+      "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "targets": [{"expr": "kora:p2p:drop_ratio or vector(0)", "legendFormat": "", "refId": "A"}],
+      "title": "Drop Ratio",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null}
+          ]},
+          "unit": "Bps"
+        }
+      },
+      "gridPos": {"h": 3, "w": 4, "x": 20, "y": 1},
+      "id": 6,
+      "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "targets": [{"expr": "rate(runtime_outbound_bandwidth_total[1m]) + rate(runtime_inbound_bandwidth_total[1m])", "legendFormat": "", "refId": "A"}],
+      "title": "Total Bandwidth",
+      "type": "stat"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 4},
+      "id": 101,
+      "title": "Channel Message Rates (human-readable names via recording rules)",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Messages sent per second by channel. Uses recording rules to map data_0..data_4 to human-readable names:\n- simplex_votes (data_0)\n- simplex_certs (data_1)\n- simplex_resolver (data_2)\n- broadcast_blocks (data_3)\n- marshal_backfill (data_4)",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 10, "spanNulls": false, "showPoints": "never", "stacking": {"mode": "none"}},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 5},
+      "id": 10,
+      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "kora:p2p:channel_sent:rate1m", "legendFormat": "{{channel}}", "refId": "A"}
+      ],
+      "title": "Messages Sent/s by Channel",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Messages received per second by channel. Uses recording rules to map data_0..data_4 to human-readable names.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 10, "spanNulls": false, "showPoints": "never", "stacking": {"mode": "none"}},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 5},
+      "id": 11,
+      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "kora:p2p:channel_recv:rate1m", "legendFormat": "{{channel}}", "refId": "A"}
+      ],
+      "title": "Messages Received/s by Channel",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Messages dropped per second by channel. High drop rates indicate backpressure or a peer falling behind.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 15, "spanNulls": false, "showPoints": "never", "stacking": {"mode": "normal"}},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 13},
+      "id": 12,
+      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "kora:p2p:channel_dropped:rate1m", "legendFormat": "{{channel}}", "refId": "A"}
+      ],
+      "title": "Messages Dropped/s by Channel",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Raw data_N channel view. Shows all message types including protocol-level (greeting, bit_vec, peers).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 10, "spanNulls": false, "showPoints": "never", "stacking": {"mode": "none"}},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 13},
+      "id": 13,
+      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "sum by (message) (rate(network_spawner_messages_sent_total[1m]))", "legendFormat": "sent: {{message}}", "refId": "A"},
+        {"expr": "sum by (message) (rate(network_spawner_messages_received_total[1m]))", "legendFormat": "recv: {{message}}", "refId": "B"}
+      ],
+      "title": "Raw Message Types (sent + received)",
+      "type": "timeseries"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 21},
+      "id": 102,
+      "title": "Per-Peer Metrics",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Messages sent/s broken down by peer. Peer keys are hex-encoded public keys.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 5, "spanNulls": false, "showPoints": "never"},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 22},
+      "id": 20,
+      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "sum by (peer) (rate(network_spawner_messages_sent_total[1m]))", "legendFormat": "{{peer}}", "refId": "A"}
+      ],
+      "title": "Messages Sent/s by Peer",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Messages received/s broken down by peer.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 5, "spanNulls": false, "showPoints": "never"},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 22},
+      "id": 21,
+      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "sum by (peer) (rate(network_spawner_messages_received_total[1m]))", "legendFormat": "{{peer}}", "refId": "A"}
+      ],
+      "title": "Messages Received/s by Peer",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Messages dropped/s broken down by peer. High drops for a single peer indicate that peer is flooding or the local node cannot keep up with its messages.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 15, "spanNulls": false, "showPoints": "never", "stacking": {"mode": "normal"}},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 30},
+      "id": 22,
+      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "sum by (peer) (rate(network_router_messages_dropped_total[1m]))", "legendFormat": "{{peer}}", "refId": "A"}
+      ],
+      "title": "Messages Dropped/s by Peer",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Resolver peer performance: exponential moving average of response time in ms. Lower is better. 4999ms indicates the peer has not responded yet.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 5, "spanNulls": false, "showPoints": "never"},
+          "unit": "ms"
+        }
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 30},
+      "id": 23,
+      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "lastNotNull"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "engine_resolver_resolver_fetcher_peer_performance", "legendFormat": "{{peer}}", "refId": "A"}
+      ],
+      "title": "Resolver Peer Performance (response EMA)",
+      "type": "timeseries"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 38},
+      "id": 103,
+      "title": "Connections & Bandwidth",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Total inbound and outbound bandwidth in bytes/sec.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 10, "spanNulls": false, "showPoints": "never"},
+          "unit": "Bps"
+        }
+      },
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 39},
+      "id": 30,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "rate(runtime_outbound_bandwidth_total[1m])", "legendFormat": "Node {{validator_index}} outbound", "refId": "A"},
+        {"expr": "rate(runtime_inbound_bandwidth_total[1m])", "legendFormat": "Node {{validator_index}} inbound", "refId": "B"}
+      ],
+      "title": "Bandwidth (bytes/s)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Cumulative dial attempts per peer. High retry counts indicate connectivity problems to that peer.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 5, "spanNulls": false, "showPoints": "never"},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 39},
+      "id": 31,
+      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["lastNotNull"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "rate(network_dialer_attempts_total[1m])", "legendFormat": "{{peer}}", "refId": "A"}
+      ],
+      "title": "Dial Attempts/s by Peer",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Cumulative inbound/outbound TCP connections and handshake failures.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 5, "spanNulls": false, "showPoints": "never"},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 39},
+      "id": 32,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "rate(runtime_inbound_connections_total[1m])", "legendFormat": "Node {{validator_index}} inbound conn/s", "refId": "A"},
+        {"expr": "rate(runtime_outbound_connections_total[1m])", "legendFormat": "Node {{validator_index}} outbound conn/s", "refId": "B"},
+        {"expr": "rate(network_listener_handshakes_blocked_total[1m])", "legendFormat": "Node {{validator_index}} handshakes blocked/s", "refId": "C"},
+        {"expr": "rate(network_listener_handshake_ip_rate_limited_total[1m])", "legendFormat": "Node {{validator_index}} IP rate limited/s", "refId": "D"}
+      ],
+      "title": "Connection Rate & Handshake Failures",
+      "type": "timeseries"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 47},
+      "id": 104,
+      "title": "Consensus Inbound Messages (per-peer)",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Consensus messages received from each peer (Notarize, Nullify, Nullification, Finalization). Useful for identifying peers that have stopped voting.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 10, "spanNulls": false, "showPoints": "never", "stacking": {"mode": "none"}},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 48},
+      "id": 40,
+      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "sum by (peer, message) (rate(engine_batcher_inbound_messages_total[1m]))", "legendFormat": "{{peer}}: {{message}}", "refId": "A"}
+      ],
+      "title": "Inbound Consensus Messages by Peer",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "View of latest vote received from each peer. Peers stuck at a low view number may be stalled or partitioned.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 5, "spanNulls": false, "showPoints": "never"},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 48},
+      "id": 41,
+      "options": {"legend": {"displayMode": "table", "placement": "right", "calcs": ["lastNotNull"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "engine_batcher_latest_vote", "legendFormat": "{{peer}}", "refId": "A"}
+      ],
+      "title": "Latest Vote View per Peer",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 38,
+  "tags": ["kora", "p2p", "network"],
+  "templating": {"list": []},
+  "time": {"from": "now-15m", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Kora P2P & Network",
+  "uid": "kora-p2p",
+  "version": 1
+}
