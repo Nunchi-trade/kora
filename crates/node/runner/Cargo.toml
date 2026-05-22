@@ -36,7 +36,9 @@ commonware-utils.workspace = true
 alloy-consensus = { workspace = true }
 alloy-primitives.workspace = true
 
+axum.workspace = true
 futures.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
 rand.workspace = true

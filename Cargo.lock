@@ -3553,6 +3553,7 @@ dependencies = [
  "alloy-consensus 1.8.3",
  "alloy-primitives",
  "anyhow",
+ "axum",
  "commonware-codec",
  "commonware-consensus",
  "commonware-cryptography",
@@ -3578,6 +3579,7 @@ dependencies = [
  "kora-transport",
  "kora-txpool",
  "rand 0.8.6",
+ "tokio",
  "tracing",
 ]
 

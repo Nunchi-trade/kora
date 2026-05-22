@@ -49,6 +49,10 @@ pub(crate) struct DkgArgs {
 pub(crate) struct ValidatorArgs {
     #[arg(long)]
     pub peers: Option<PathBuf>,
+
+    /// Prometheus metrics server bind address.
+    #[arg(long, default_value = "0.0.0.0:9002")]
+    pub metrics_addr: String,
 }
 
 #[derive(clap::Args, Debug)]
@@ -176,8 +180,12 @@ impl Cli {
         let node_state =
             NodeState::with_validator_count(config.chain_id, validator_index, validator_count);
 
+        let metrics_addr: std::net::SocketAddr = args.metrics_addr.parse().map_err(|err| {
+            eyre::eyre!("invalid --metrics-addr '{}': {}", args.metrics_addr, err)
+        })?;
         let runner = ProductionRunner::new(scheme, config.chain_id, bootstrap)
             .with_rpc(node_state, rpc_addr)
+            .with_metrics_addr(metrics_addr)
             .with_secondary_peers(secondary_participants);
 
         runner.run_standalone(config).map_err(|e| eyre::eyre!("Runner failed: {}", e.0))
