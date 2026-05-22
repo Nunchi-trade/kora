@@ -66,7 +66,11 @@ impl<S: StateDbRead + Send + Sync + 'static> StateProvider for IndexedStateProvi
         address: Address,
         _block: Option<BlockNumberOrTag>,
     ) -> Result<U256, RpcError> {
-        self.state.balance(&address).await.map_err(state_error_to_rpc)
+        match self.state.balance(&address).await {
+            Ok(balance) => Ok(balance),
+            Err(StateDbError::AccountNotFound(_)) => Ok(U256::ZERO),
+            Err(e) => Err(state_error_to_rpc(e)),
+        }
     }
 
     async fn nonce(
@@ -74,7 +78,11 @@ impl<S: StateDbRead + Send + Sync + 'static> StateProvider for IndexedStateProvi
         address: Address,
         _block: Option<BlockNumberOrTag>,
     ) -> Result<u64, RpcError> {
-        self.state.nonce(&address).await.map_err(state_error_to_rpc)
+        match self.state.nonce(&address).await {
+            Ok(nonce) => Ok(nonce),
+            Err(StateDbError::AccountNotFound(_)) => Ok(0),
+            Err(e) => Err(state_error_to_rpc(e)),
+        }
     }
 
     async fn code(
@@ -106,7 +114,11 @@ impl<S: StateDbRead + Send + Sync + 'static> StateProvider for IndexedStateProvi
         slot: U256,
         _block: Option<BlockNumberOrTag>,
     ) -> Result<U256, RpcError> {
-        self.state.storage(&address, &slot).await.map_err(state_error_to_rpc)
+        match self.state.storage(&address, &slot).await {
+            Ok(value) => Ok(value),
+            Err(StateDbError::AccountNotFound(_)) => Ok(U256::ZERO),
+            Err(e) => Err(state_error_to_rpc(e)),
+        }
     }
 
     async fn block_by_number(
@@ -607,6 +619,34 @@ mod tests {
 
         let nonce = provider.nonce(Address::ZERO, None).await.unwrap();
         assert_eq!(nonce, 42);
+    }
+
+    #[tokio::test]
+    async fn test_missing_account_balance_returns_zero() {
+        let index = Arc::new(BlockIndex::new());
+        let provider = IndexedStateProvider::with_chain_id(index, MissingAccountState, 1337);
+
+        let balance = provider.balance(Address::repeat_byte(0xaa), None).await.unwrap();
+        assert_eq!(balance, U256::ZERO);
+    }
+
+    #[tokio::test]
+    async fn test_missing_account_nonce_returns_zero() {
+        let index = Arc::new(BlockIndex::new());
+        let provider = IndexedStateProvider::with_chain_id(index, MissingAccountState, 1337);
+
+        let nonce = provider.nonce(Address::repeat_byte(0xaa), None).await.unwrap();
+        assert_eq!(nonce, 0);
+    }
+
+    #[tokio::test]
+    async fn test_missing_account_storage_returns_zero() {
+        let index = Arc::new(BlockIndex::new());
+        let provider = IndexedStateProvider::with_chain_id(index, MissingAccountState, 1337);
+
+        let value =
+            provider.storage(Address::repeat_byte(0xaa), U256::from(7), None).await.unwrap();
+        assert_eq!(value, U256::ZERO);
     }
 
     #[tokio::test]

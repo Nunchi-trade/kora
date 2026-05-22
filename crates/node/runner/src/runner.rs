@@ -29,6 +29,7 @@ use commonware_utils::{NZU64, NZUsize, acknowledgement::Exact, ordered::Set};
 use futures::StreamExt;
 use kora_domain::{Block, BlockCfg, BootstrapConfig, ConsensusDigest, LedgerEvent, Tx, TxCfg};
 use kora_executor::{BlockContext, RevmExecutor};
+use kora_indexer::{BlockIndex, IndexedBlock};
 use kora_ledger::{LedgerService, LedgerView};
 use kora_marshal::{ArchiveInitializer, BroadcastInitializer, PeerInitializer};
 use kora_reporters::{BlockContextProvider, FinalizedReporter, NodeStateReporter, SeedReporter};
@@ -76,6 +77,24 @@ const fn block_codec_cfg(config: &kora_config::ConsensusBlockCodecConfig) -> Blo
         max_txs: config.max_txs.get(),
         tx: TxCfg { max_tx_bytes: config.max_tx_bytes.get() },
     }
+}
+
+fn seed_genesis_block_index(index: &BlockIndex, genesis: &Block, gas_limit: u64) {
+    index.insert_block(
+        IndexedBlock {
+            hash: genesis.id().0,
+            number: 0,
+            parent_hash: genesis.parent.0,
+            state_root: genesis.state_root.0,
+            timestamp: 0,
+            gas_limit,
+            gas_used: 0,
+            base_fee_per_gas: Some(0),
+            transaction_hashes: Vec::new(),
+        },
+        Vec::new(),
+        Vec::new(),
+    );
 }
 
 fn seed_hash(seed: impl commonware_codec::Encode) -> B256 {
@@ -371,13 +390,16 @@ impl NodeRunner for ProductionRunner {
         .await
         .context("init qmdb")?;
 
-        let block_index =
-            self.rpc_config.as_ref().map(|_| Arc::new(kora_indexer::BlockIndex::new()));
         let pending_tx_broadcast =
             self.rpc_config.as_ref().map(|_| kora_rpc::pending_tx_channel().0);
         let mempool_broadcast =
             self.rpc_config.as_ref().map(|_| kora_rpc::mempool_event_channel().0);
         let ledger = LedgerService::new(state.clone());
+        let block_index = self.rpc_config.as_ref().map(|_| {
+            let index = Arc::new(BlockIndex::new());
+            seed_genesis_block_index(&index, &ledger.genesis_block(), gas_limit);
+            index
+        });
         spawn_ledger_observers(ledger.clone(), context.clone());
         let txpool = ledger.txpool().await;
         spawn_txpool_cleanup(txpool.clone(), context.clone());
@@ -566,8 +588,36 @@ mod tests {
     use std::num::NonZeroUsize;
 
     use kora_config::ConsensusBlockCodecConfig;
+    use kora_domain::{BlockId, StateRoot};
 
     use super::*;
+
+    #[test]
+    fn seed_genesis_block_index_indexes_real_genesis_metadata() {
+        let index = BlockIndex::new();
+        let genesis = Block {
+            parent: BlockId(B256::repeat_byte(0x11)),
+            height: 0,
+            timestamp: 0,
+            prevrandao: B256::repeat_byte(0x22),
+            state_root: StateRoot(B256::repeat_byte(0x33)),
+            txs: Vec::new(),
+        };
+        let gas_limit = 45_000_000;
+
+        seed_genesis_block_index(&index, &genesis, gas_limit);
+
+        let indexed = index.get_block_by_number(0).expect("genesis indexed");
+        assert_eq!(indexed.hash, genesis.id().0);
+        assert_eq!(indexed.number, 0);
+        assert_eq!(indexed.parent_hash, genesis.parent.0);
+        assert_eq!(indexed.state_root, genesis.state_root.0);
+        assert_eq!(indexed.timestamp, 0);
+        assert_eq!(indexed.gas_limit, gas_limit);
+        assert_eq!(indexed.gas_used, 0);
+        assert_eq!(indexed.transaction_hashes, Vec::<B256>::new());
+        assert_eq!(index.get_block_by_hash(&genesis.id().0).expect("genesis by hash").number, 0);
+    }
 
     #[test]
     fn block_codec_cfg_uses_consensus_config() {
