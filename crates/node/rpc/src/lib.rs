@@ -29,6 +29,12 @@ pub use txpool::{TxpoolApiImpl, TxpoolApiServer, TxpoolContent, TxpoolInspect, T
 mod server;
 pub use server::{JsonRpcServer, RpcServer, RpcServerHandle, ServerError};
 
+mod subscription;
+pub use subscription::{
+    MEMPOOL_EVENT_CHANNEL_CAPACITY, MempoolEventSender, PENDING_TX_CHANNEL_CAPACITY,
+    PendingTxEvent, PendingTxEventSender, PendingTxInfo, mempool_event_channel, pending_tx_channel,
+};
+
 mod state;
 pub use state::{NodeState, NodeStatus};
 

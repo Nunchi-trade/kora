@@ -24,13 +24,13 @@ use commonware_cryptography::{Committable as _, bls12381::primitives::variant::V
 use commonware_runtime::{Spawner as _, tokio};
 use commonware_utils::acknowledgement::Acknowledgement as _;
 use kora_consensus::BlockExecution;
-use kora_domain::{Block, ConsensusDigest, PublicKey};
+use kora_domain::{Block, ConsensusDigest, MempoolEvent, PublicKey};
 use kora_executor::{BlockContext, BlockExecutor, ExecutionOutcome};
 use kora_indexer::{BlockIndex, IndexedBlock, IndexedLog, IndexedReceipt, IndexedTransaction};
 use kora_ledger::LedgerService;
 use kora_overlay::OverlayState;
 use kora_qmdb_ledger::QmdbState;
-use kora_rpc::NodeState;
+use kora_rpc::{MempoolEventSender, NodeState};
 use tracing::{error, trace, warn};
 
 /// Provides block execution context for finalized block verification.
@@ -111,6 +111,7 @@ async fn handle_finalized_update<E, P>(
     executor: E,
     provider: P,
     block_index: Option<Arc<BlockIndex>>,
+    mempool_broadcast: Option<MempoolEventSender>,
     update: Update<Block>,
 ) where
     E: BlockExecutor<OverlayState<QmdbState>, Tx = Bytes>,
@@ -227,10 +228,57 @@ async fn handle_finalized_update<E, P>(
                 index_finalized_block(index, &block, block_context, outcome);
             }
             state.prune_mempool(&block.txs).await;
+            publish_mempool_inclusions(mempool_broadcast.as_ref(), &block);
             // Marshal waits for the application to acknowledge processing before advancing the
             // delivery floor. Without this, the node can stall on finalized block delivery.
             ack.acknowledge();
         }
+    }
+}
+
+fn publish_mempool_inclusions(mempool_broadcast: Option<&MempoolEventSender>, block: &Block) {
+    let Some(sender) = mempool_broadcast else {
+        return;
+    };
+
+    let block_hash = block.id().0;
+    for tx in &block.txs {
+        let _ = sender.send(MempoolEvent::TxIncluded {
+            hash: keccak256(&tx.bytes),
+            block_number: block.height,
+            block_hash,
+        });
+    }
+}
+
+#[cfg(test)]
+mod mempool_tests {
+    use alloy_primitives::{B256, Bytes, keccak256};
+    use kora_domain::{BlockId, StateRoot, Tx};
+
+    use super::*;
+
+    #[test]
+    fn publish_mempool_inclusions_broadcasts_tx_included() {
+        let (sender, mut receiver) = kora_rpc::mempool_event_channel();
+        let tx = Tx::new(Bytes::from_static(&[0x01, 0x02, 0x03]));
+        let block = Block {
+            parent: BlockId(B256::ZERO),
+            height: 7,
+            timestamp: 0,
+            prevrandao: B256::ZERO,
+            state_root: StateRoot(B256::ZERO),
+            txs: vec![tx.clone()],
+        };
+        let block_hash = block.id().0;
+
+        publish_mempool_inclusions(Some(&sender), &block);
+
+        assert_eq!(receiver.try_recv().unwrap(), MempoolEvent::TxIncluded {
+            hash: keccak256(&tx.bytes),
+            block_number: block.height,
+            block_hash,
+        });
     }
 }
 
@@ -467,6 +515,8 @@ pub struct FinalizedReporter<E, P> {
     provider: P,
     /// Optional RPC block index updated after finalized blocks are persisted.
     block_index: Option<Arc<BlockIndex>>,
+    /// Optional mempool event channel for RPC subscriptions.
+    mempool_broadcast: Option<MempoolEventSender>,
 }
 
 impl<E, P> fmt::Debug for FinalizedReporter<E, P> {
@@ -487,13 +537,20 @@ where
         executor: E,
         provider: P,
     ) -> Self {
-        Self { state, context, executor, provider, block_index: None }
+        Self { state, context, executor, provider, block_index: None, mempool_broadcast: None }
     }
 
     /// Attach the RPC-visible block index to update when blocks finalize.
     #[must_use]
     pub fn with_block_index(mut self, block_index: Arc<BlockIndex>) -> Self {
         self.block_index = Some(block_index);
+        self
+    }
+
+    /// Attach the mempool event channel used by RPC subscriptions.
+    #[must_use]
+    pub fn with_mempool_broadcast(mut self, mempool_broadcast: MempoolEventSender) -> Self {
+        self.mempool_broadcast = Some(mempool_broadcast);
         self
     }
 }
@@ -511,8 +568,18 @@ where
         let executor = self.executor.clone();
         let provider = self.provider.clone();
         let block_index = self.block_index.clone();
+        let mempool_broadcast = self.mempool_broadcast.clone();
         async move {
-            handle_finalized_update(state, context, executor, provider, block_index, update).await;
+            handle_finalized_update(
+                state,
+                context,
+                executor,
+                provider,
+                block_index,
+                mempool_broadcast,
+                update,
+            )
+            .await;
         }
     }
 }
