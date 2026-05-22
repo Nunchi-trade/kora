@@ -22,7 +22,7 @@ use commonware_consensus::{
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519};
 use commonware_p2p::{Manager, TrackedPeers};
 use commonware_runtime::{
-    Metrics as _, Spawner, ThreadPooler as _, buffer::paged::CacheRef, tokio,
+    Clock as _, Metrics as _, Spawner, ThreadPooler as _, buffer::paged::CacheRef, tokio,
 };
 use commonware_storage::archive::{Archive, Identifier as ArchiveId};
 use commonware_utils::{NZU64, NZUsize, acknowledgement::Exact, ordered::Set};
@@ -35,13 +35,14 @@ use kora_reporters::{BlockContextProvider, FinalizedReporter, NodeStateReporter,
 use kora_service::{NodeRunContext, NodeRunner};
 use kora_simplex::{DEFAULT_MAILBOX_SIZE as MAILBOX_SIZE, DefaultPool};
 use kora_transport::NetworkTransport;
-use kora_txpool::{PoolConfig, TransactionValidator};
+use kora_txpool::{PoolConfig, TransactionPool, TransactionValidator};
 use tracing::{debug, info, trace, warn};
 
 use crate::{RevmApplication, RunnerError, scheme::ThresholdScheme};
 
 const EPOCH_LENGTH: u64 = u64::MAX;
 const PARTITION_PREFIX: &str = "kora";
+const TXPOOL_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 const RUNTIME_DIR_ENV: &str = "KORA_RUNTIME_DIR";
 
 type Peer = ed25519::PublicKey;
@@ -222,6 +223,18 @@ fn spawn_ledger_observers<S: Spawner>(service: LedgerService, spawner: S) {
     });
 }
 
+fn spawn_txpool_cleanup(pool: TransactionPool, context: tokio::Context) {
+    context.with_label("txpool-cleanup").shared(false).spawn(move |ctx| async move {
+        loop {
+            ctx.sleep(TXPOOL_CLEANUP_INTERVAL).await;
+            let removed = pool.cleanup();
+            if removed > 0 {
+                debug!(removed, "expired transactions cleaned from txpool");
+            }
+        }
+    });
+}
+
 /// Production validator node runner.
 #[derive(Clone, Debug)]
 pub struct ProductionRunner {
@@ -366,6 +379,8 @@ impl NodeRunner for ProductionRunner {
             self.rpc_config.as_ref().map(|_| kora_rpc::mempool_event_channel().0);
         let ledger = LedgerService::new(state.clone());
         spawn_ledger_observers(ledger.clone(), context.clone());
+        let txpool = ledger.txpool().await;
+        spawn_txpool_cleanup(txpool.clone(), context.clone());
 
         let context_provider = RevmContextProvider { gas_limit };
         recover_finalized_state(
@@ -422,6 +437,7 @@ impl NodeRunner for ProductionRunner {
                 indexed_provider,
             )
             .with_tx_submit(tx_submit)
+            .with_txpool(txpool.clone())
             .with_peer_count(self.scheme.participants().len().saturating_sub(1) as u64);
             if let Some(sender) = pending_tx_broadcast.clone() {
                 rpc = rpc.with_pending_tx_broadcast(sender);

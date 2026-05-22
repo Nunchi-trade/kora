@@ -22,6 +22,7 @@ use jsonrpsee::{
     },
     types::{ErrorObjectOwned, Id, Request as RpcRequest},
 };
+use kora_txpool::TransactionPool;
 use parking_lot::Mutex;
 use tower::limit::ConcurrencyLimitLayer;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
@@ -38,6 +39,7 @@ use crate::{
     state::NodeState,
     state_provider::{NoopStateProvider, StateProvider},
     subscription::{MempoolEventSender, PendingTxEventSender, subscription_module},
+    txpool::{TxpoolApiImpl, TxpoolApiServer},
 };
 
 /// Error type for RPC server operations.
@@ -226,6 +228,7 @@ pub struct RpcServer<S: StateProvider = NoopStateProvider> {
     jsonrpc_addr: SocketAddr,
     chain_id: u64,
     tx_submit: Option<TxSubmitCallback>,
+    txpool: Option<TransactionPool>,
     state_provider: S,
     cors_config: CorsConfig,
     rate_limit_config: RateLimitConfig,
@@ -244,6 +247,7 @@ impl<S: StateProvider> std::fmt::Debug for RpcServer<S> {
             .field("jsonrpc_addr", &self.jsonrpc_addr)
             .field("chain_id", &self.chain_id)
             .field("tx_submit", &self.tx_submit.is_some())
+            .field("txpool", &self.txpool.is_some())
             .field("pending_tx_broadcast", &self.pending_tx_broadcast.is_some())
             .field("mempool_broadcast", &self.mempool_broadcast.is_some())
             .field("rate_limit_config", &self.rate_limit_config)
@@ -269,6 +273,7 @@ impl RpcServer<NoopStateProvider> {
             jsonrpc_addr: addr,
             chain_id: 1,
             tx_submit: None,
+            txpool: None,
             state_provider: NoopStateProvider,
             cors_config: CorsConfig::default(),
             rate_limit_config: RateLimitConfig::default(),
@@ -288,6 +293,7 @@ impl RpcServer<NoopStateProvider> {
             jsonrpc_addr: addr,
             chain_id,
             tx_submit: None,
+            txpool: None,
             state_provider: NoopStateProvider,
             cors_config: CorsConfig::default(),
             rate_limit_config: RateLimitConfig::default(),
@@ -314,6 +320,7 @@ impl<S: StateProvider + Clone + 'static> RpcServer<S> {
             jsonrpc_addr: addr,
             chain_id,
             tx_submit: None,
+            txpool: None,
             state_provider,
             cors_config: CorsConfig::default(),
             rate_limit_config: RateLimitConfig::default(),
@@ -329,6 +336,13 @@ impl<S: StateProvider + Clone + 'static> RpcServer<S> {
     #[must_use]
     pub fn with_tx_submit(mut self, tx_submit: TxSubmitCallback) -> Self {
         self.tx_submit = Some(tx_submit);
+        self
+    }
+
+    /// Set the transaction pool exposed by the `txpool_*` namespace.
+    #[must_use]
+    pub fn with_txpool(mut self, txpool: TransactionPool) -> Self {
+        self.txpool = Some(txpool);
         self
     }
 
@@ -392,6 +406,7 @@ impl<S: StateProvider + Clone + 'static> RpcServer<S> {
             jsonrpc_addr: config.jsonrpc_addr,
             chain_id: config.chain_id,
             tx_submit: None,
+            txpool: None,
             state_provider,
             cors_config: config.cors,
             rate_limit_config: config.rate_limit,
@@ -413,6 +428,7 @@ impl<S: StateProvider + Clone + 'static> RpcServer<S> {
         let node_state_for_jsonrpc = Arc::clone(&node_state);
         let chain_id = self.chain_id;
         let tx_submit = self.tx_submit;
+        let txpool = self.txpool;
         let cors_layer = build_cors_layer(&self.cors_config);
         let http_rate_limiter = SharedRateLimiter::new(self.rate_limit_config.clone());
         let rpc_rate_limiter = SharedRateLimiter::new(self.rate_limit_config);
@@ -502,6 +518,12 @@ impl<S: StateProvider + Clone + 'static> RpcServer<S> {
                 error!(error = %e, "Failed to merge kora API");
                 return None;
             }
+            if let Some(txpool) = txpool
+                && let Err(e) = module.merge(TxpoolApiImpl::new(txpool).into_rpc())
+            {
+                error!(error = %e, "Failed to merge txpool API");
+                return None;
+            }
             if let Err(e) = module.merge(subscription_api) {
                 error!(error = %e, "Failed to merge subscription API");
                 return None;
@@ -557,6 +579,7 @@ pub struct JsonRpcServer<S: StateProvider = NoopStateProvider> {
     addr: SocketAddr,
     chain_id: u64,
     tx_submit: Option<TxSubmitCallback>,
+    txpool: Option<TransactionPool>,
     state_provider: S,
     rate_limit_config: RateLimitConfig,
     max_connections: u32,
@@ -572,6 +595,7 @@ impl<S: StateProvider> std::fmt::Debug for JsonRpcServer<S> {
             .field("addr", &self.addr)
             .field("chain_id", &self.chain_id)
             .field("tx_submit", &self.tx_submit.is_some())
+            .field("txpool", &self.txpool.is_some())
             .field("pending_tx_broadcast", &self.pending_tx_broadcast.is_some())
             .field("mempool_broadcast", &self.mempool_broadcast.is_some())
             .field("rate_limit_config", &self.rate_limit_config)
@@ -588,6 +612,7 @@ impl JsonRpcServer<NoopStateProvider> {
             addr,
             chain_id,
             tx_submit: None,
+            txpool: None,
             state_provider: NoopStateProvider,
             rate_limit_config: RateLimitConfig::default(),
             max_connections: 100,
@@ -606,6 +631,7 @@ impl<S: StateProvider + Clone + 'static> JsonRpcServer<S> {
             addr,
             chain_id,
             tx_submit: None,
+            txpool: None,
             state_provider,
             rate_limit_config: RateLimitConfig::default(),
             max_connections: 100,
@@ -620,6 +646,13 @@ impl<S: StateProvider + Clone + 'static> JsonRpcServer<S> {
     #[must_use]
     pub fn with_tx_submit(mut self, tx_submit: TxSubmitCallback) -> Self {
         self.tx_submit = Some(tx_submit);
+        self
+    }
+
+    /// Set the transaction pool exposed by the `txpool_*` namespace.
+    #[must_use]
+    pub fn with_txpool(mut self, txpool: TransactionPool) -> Self {
+        self.txpool = Some(txpool);
         self
     }
 
@@ -703,6 +736,9 @@ impl<S: StateProvider + Clone + 'static> JsonRpcServer<S> {
         module.merge(eth_api.into_rpc())?;
         module.merge(net_api.into_rpc())?;
         module.merge(web3_api.into_rpc())?;
+        if let Some(txpool) = self.txpool {
+            module.merge(TxpoolApiImpl::new(txpool).into_rpc())?;
+        }
         module.merge(subscription_api)?;
 
         info!(addr = %self.addr, "Starting JSON-RPC server");

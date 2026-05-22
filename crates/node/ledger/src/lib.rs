@@ -14,7 +14,7 @@ use commonware_runtime::{Metrics as _, tokio};
 use futures::{channel::mpsc::UnboundedReceiver, lock::Mutex};
 use kora_consensus::{
     ConsensusError, Mempool as _, SeedTracker as _, Snapshot, SnapshotStore as _,
-    components::{InMemoryMempool, InMemorySeedTracker, InMemorySnapshotStore},
+    components::{InMemorySeedTracker, InMemorySnapshotStore},
 };
 use kora_domain::{
     Block, BlockId, ConsensusDigest, LedgerEvent, LedgerEvents, StateRoot, Tx, TxId,
@@ -23,10 +23,47 @@ use kora_overlay::OverlayState;
 use kora_qmdb::StateRoot as QmdbStateRoot;
 use kora_qmdb_ledger::{Error as QmdbError, QmdbChangeSet, QmdbConfig, QmdbLedger, QmdbState};
 use kora_traits::{StateDbError, StateDbRead};
+use kora_txpool::{PoolConfig, TransactionPool};
 use thiserror::Error;
 
 /// Snapshot type used by the ledger.
 pub type LedgerSnapshot = Snapshot<OverlayState<QmdbState>>;
+
+/// Ledger mempool adapter backed by the transaction pool.
+#[derive(Clone, Debug)]
+pub struct LedgerMempool {
+    pool: TransactionPool,
+}
+
+impl LedgerMempool {
+    /// Create a new ledger mempool adapter.
+    pub fn new(config: PoolConfig) -> Self {
+        Self { pool: TransactionPool::new(config) }
+    }
+
+    /// Return the underlying transaction pool handle.
+    pub fn txpool(&self) -> TransactionPool {
+        self.pool.clone()
+    }
+}
+
+impl kora_consensus::Mempool for LedgerMempool {
+    fn insert(&self, tx: Tx) -> bool {
+        kora_txpool::Mempool::insert(&self.pool, tx)
+    }
+
+    fn build(&self, max_txs: usize, excluded: &BTreeSet<TxId>) -> Vec<Tx> {
+        kora_txpool::Mempool::build(&self.pool, max_txs, excluded)
+    }
+
+    fn prune(&self, tx_ids: &[TxId]) {
+        kora_txpool::Mempool::prune(&self.pool, tx_ids);
+    }
+
+    fn len(&self) -> usize {
+        kora_txpool::Mempool::len(&self.pool)
+    }
+}
 
 fn tx_ids(txs: &[Tx]) -> BTreeSet<TxId> {
     txs.iter().map(Tx::id).collect()
@@ -67,7 +104,7 @@ impl fmt::Debug for LedgerView {
 /// Internal ledger state guarded by the mutex inside `LedgerView`.
 struct LedgerState {
     /// Pending transactions that are not yet included in finalized blocks.
-    mempool: InMemoryMempool,
+    mempool: LedgerMempool,
     /// Execution snapshots indexed by digest so we can replay ancestors.
     snapshots: InMemorySnapshotStore<OverlayState<QmdbState>>,
     /// Cached seeds for each digest used to compute prevrandao.
@@ -210,7 +247,7 @@ impl LedgerView {
 
         Ok(Self {
             inner: Arc::new(Mutex::new(LedgerState {
-                mempool: InMemoryMempool::new(),
+                mempool: LedgerMempool::new(PoolConfig::default()),
                 snapshots,
                 seeds: InMemorySeedTracker::new(genesis_digest),
                 qmdb,
@@ -238,6 +275,12 @@ impl LedgerView {
     pub async fn submit_tx(&self, tx: Tx) -> bool {
         let inner = self.inner.lock().await;
         inner.mempool.insert(tx)
+    }
+
+    /// Return a handle to the transaction pool.
+    pub async fn txpool(&self) -> TransactionPool {
+        let inner = self.inner.lock().await;
+        inner.mempool.txpool()
     }
 
     /// Query a balance at the given digest.
@@ -319,7 +362,7 @@ impl LedgerView {
     /// Fetch the components needed to build a proposal.
     pub async fn proposal_components(
         &self,
-    ) -> (OverlayState<QmdbState>, InMemoryMempool, InMemorySnapshotStore<OverlayState<QmdbState>>)
+    ) -> (OverlayState<QmdbState>, LedgerMempool, InMemorySnapshotStore<OverlayState<QmdbState>>)
     {
         let inner = self.inner.lock().await;
         let root_state = OverlayState::new(inner.qmdb.state(), QmdbChangeSet::default());
@@ -450,6 +493,11 @@ impl LedgerService {
         inserted
     }
 
+    /// Return a handle to the transaction pool.
+    pub async fn txpool(&self) -> TransactionPool {
+        self.view.txpool().await
+    }
+
     /// Query a balance at the given digest.
     pub async fn query_balance(&self, digest: ConsensusDigest, address: Address) -> Option<U256> {
         self.view.query_balance(digest, address).await
@@ -507,7 +555,7 @@ impl LedgerService {
     /// Fetch proposal components.
     pub async fn proposal_components(
         &self,
-    ) -> (OverlayState<QmdbState>, InMemoryMempool, InMemorySnapshotStore<OverlayState<QmdbState>>)
+    ) -> (OverlayState<QmdbState>, LedgerMempool, InMemorySnapshotStore<OverlayState<QmdbState>>)
     {
         self.view.proposal_components().await
     }

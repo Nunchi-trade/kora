@@ -18,6 +18,7 @@ kora-overlay = { path = "../../storage/overlay" }
 kora-qmdb = { path = "../../storage/qmdb" }
 kora-qmdb-ledger = { path = "../../storage/qmdb-ledger" }
 kora-traits = { path = "../../storage/traits" }
+kora-txpool = { path = "../txpool" }
 
 # Commonware
 commonware-consensus.workspace = true

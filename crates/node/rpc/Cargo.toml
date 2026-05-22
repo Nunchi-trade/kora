@@ -46,6 +46,7 @@ kora-domain = { path = "../domain" }
 kora-executor = { path = "../executor" }
 kora-indexer = { path = "../../storage/indexer" }
 kora-traits = { path = "../../storage/traits" }
+kora-txpool = { path = "../txpool" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros", "time"] }
