@@ -10,6 +10,8 @@
 mod app;
 pub use app::RevmApplication;
 
+pub mod commit_marker;
+
 mod error;
 pub use error::RunnerError;
 

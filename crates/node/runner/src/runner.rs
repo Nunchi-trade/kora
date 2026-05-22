@@ -19,7 +19,7 @@ use commonware_consensus::{
     },
     types::{Epoch, FixedEpocher, ViewDelta},
 };
-use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519};
+use commonware_cryptography::{Committable as _, bls12381::primitives::variant::MinSig, ed25519};
 use commonware_p2p::{Manager, TrackedPeers};
 use commonware_runtime::{
     Clock as _, Handle as RuntimeHandle, Metrics as _, Spawner, ThreadPooler as _,
@@ -129,6 +129,7 @@ async fn recover_finalized_state<FB, FC>(
     finalized_blocks: &FB,
     finalizations_by_height: &FC,
     provider: &RevmContextProvider,
+    data_dir: &Path,
 ) -> anyhow::Result<()>
 where
     FB: Archive<Key = ConsensusDigest, Value = Block>,
@@ -169,8 +170,12 @@ where
         }
     }
 
-    if let Some(head) = head {
-        ledger.restore_persisted_snapshot(&head).await;
+    if let Some(ref head) = head {
+        // Validate the commit marker against the archive head to detect
+        // potential QMDB inconsistencies from a previous crash.
+        validate_commit_marker(data_dir, head);
+
+        ledger.restore_persisted_snapshot(head).await;
         info!(
             height = head.height,
             blocks = recovered,
@@ -179,6 +184,43 @@ where
     }
 
     Ok(())
+}
+
+/// Compare the on-disk commit marker against the archive head block.
+///
+/// This is a best-effort diagnostic check. A missing marker (fresh node or
+/// upgrade from a pre-marker build) is benign and logged at info level. A
+/// mismatch means QMDB may not contain the state corresponding to the
+/// archive head and is logged as a warning so operators can investigate.
+fn validate_commit_marker(data_dir: &Path, archive_head: &Block) {
+    let marker_digest = crate::commit_marker::read_commit_marker(data_dir);
+    let head_digest = archive_head.commitment();
+
+    match marker_digest {
+        None => {
+            info!(
+                archive_head_height = archive_head.height,
+                "no commit marker found; this is expected for fresh nodes or \
+                 first startup after upgrade"
+            );
+        }
+        Some(marker) if marker == head_digest => {
+            info!(
+                archive_head_height = archive_head.height,
+                "commit marker matches archive head; QMDB state is consistent"
+            );
+        }
+        Some(marker) => {
+            warn!(
+                archive_head_height = archive_head.height,
+                marker_digest = %hex::encode(marker.as_ref()),
+                head_digest = %hex::encode(head_digest.as_ref()),
+                "commit marker does not match archive head; QMDB may be behind \
+                 or inconsistent. The node will proceed but state may diverge. \
+                 Consider re-syncing from a trusted snapshot if issues arise."
+            );
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -232,7 +274,7 @@ impl BlockContextProvider for RevmContextProvider {
     }
 }
 
-fn spawn_ledger_observers<S: Spawner>(service: LedgerService, spawner: S) {
+fn spawn_ledger_observers<S: Spawner>(service: LedgerService, spawner: S, data_dir: PathBuf) {
     let mut receiver = service.subscribe();
     spawner.shared(true).spawn(move |_| async move {
         while let Some(event) = receiver.next().await {
@@ -245,6 +287,13 @@ fn spawn_ledger_observers<S: Spawner>(service: LedgerService, spawner: S) {
                 }
                 LedgerEvent::SnapshotPersisted(digest) => {
                     trace!(?digest, "snapshot persisted");
+                    if let Err(e) = crate::commit_marker::write_commit_marker(&data_dir, &digest) {
+                        warn!(
+                            error = %e,
+                            ?digest,
+                            "failed to write commit marker after persist"
+                        );
+                    }
                 }
             }
         }
@@ -462,7 +511,7 @@ impl NodeRunner for ProductionRunner {
         let ledger = LedgerService::new(state.clone());
         let block_index = Arc::new(BlockIndex::new());
         seed_genesis_block_index(&block_index, &ledger.genesis_block(), gas_limit);
-        spawn_ledger_observers(ledger.clone(), context.clone());
+        spawn_ledger_observers(ledger.clone(), context.clone(), config.data_dir.clone());
         let txpool = ledger.txpool().await;
         spawn_txpool_cleanup(txpool.clone(), context.clone());
 
@@ -473,6 +522,7 @@ impl NodeRunner for ProductionRunner {
             &finalized_blocks,
             &finalizations_by_height,
             &context_provider,
+            &config.data_dir,
         )
         .await
         .context("recover finalized state")?;
