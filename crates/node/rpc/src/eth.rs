@@ -1049,7 +1049,7 @@ mod tests {
                 chain_id: None,
                 max_fee_per_gas: None,
                 max_priority_fee_per_gas: None,
-                v: U64::ZERO,
+                v: U256::ZERO,
                 r: U256::ZERO,
                 s: U256::ZERO,
             })
@@ -1115,7 +1115,7 @@ mod tests {
                     chain_id: Some(U64::from(1)),
                     max_fee_per_gas: Some(params.max_fee),
                     max_priority_fee_per_gas: Some(params.max_priority_fee),
-                    v: U64::ZERO,
+                    v: U256::ZERO,
                     r: U256::ZERO,
                     s: U256::ZERO,
                 }
@@ -1313,7 +1313,7 @@ mod tests {
             chain_id: Some(U64::from(1)),
             max_fee_per_gas: Some(gwei(10)),
             max_priority_fee_per_gas: Some(gwei(3)),
-            v: U64::ZERO,
+            v: U256::ZERO,
             r: U256::ZERO,
             s: U256::ZERO,
         };
@@ -1342,7 +1342,7 @@ mod tests {
             chain_id: Some(U64::from(1)),
             max_fee_per_gas: Some(gwei(5)),
             max_priority_fee_per_gas: Some(gwei(4)),
-            v: U64::ZERO,
+            v: U256::ZERO,
             r: U256::ZERO,
             s: U256::ZERO,
         };
@@ -1371,7 +1371,7 @@ mod tests {
             chain_id: Some(U64::from(1)),
             max_fee_per_gas: None,
             max_priority_fee_per_gas: None,
-            v: U64::ZERO,
+            v: U256::ZERO,
             r: U256::ZERO,
             s: U256::ZERO,
         };
@@ -1635,7 +1635,7 @@ mod tests {
             chain_id: None,
             max_fee_per_gas: None,
             max_priority_fee_per_gas: None,
-            v: U64::ZERO,
+            v: U256::ZERO,
             r: U256::ZERO,
             s: U256::ZERO,
         };

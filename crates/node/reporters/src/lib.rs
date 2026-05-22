@@ -566,6 +566,7 @@ mod tests {
         let block = Block {
             parent: BlockId(B256::repeat_byte(0x10)),
             height: 5,
+            timestamp: 1234,
             prevrandao: B256::repeat_byte(0x20),
             state_root: StateRoot(B256::repeat_byte(0x30)),
             txs: vec![Tx::new(tx_bytes)],
