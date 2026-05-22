@@ -435,6 +435,189 @@ mod finalize_error_tests {
     }
 }
 
+#[cfg(test)]
+mod finalize_success_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use alloy_consensus::Header;
+    use alloy_primitives::{B256, Bytes};
+    use commonware_runtime::Runner as _;
+    use commonware_utils::acknowledgement::{Acknowledgement as _, Exact};
+    use kora_domain::Tx;
+    use kora_executor::ExecutionError;
+    use kora_ledger::LedgerView;
+
+    use super::*;
+
+    static PARTITION_COUNTER: AtomicUsize = AtomicUsize::new(20_000);
+
+    fn next_partition(prefix: &str) -> String {
+        let id = PARTITION_COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!("{prefix}-{id}")
+    }
+
+    /// A block executor that always returns an empty successful outcome.
+    ///
+    /// Produces no state changes, so the state root stays the same as the
+    /// parent. This allows `finalize_block` to succeed with a matching root.
+    #[derive(Clone)]
+    struct EmptySuccessExecutor;
+
+    impl BlockExecutor<OverlayState<QmdbState>> for EmptySuccessExecutor {
+        type Tx = Bytes;
+
+        fn execute(
+            &self,
+            _state: &OverlayState<QmdbState>,
+            _context: &BlockContext,
+            _txs: &[Bytes],
+        ) -> Result<ExecutionOutcome, ExecutionError> {
+            Ok(ExecutionOutcome::new())
+        }
+
+        fn validate_header(&self, _header: &Header) -> Result<(), ExecutionError> {
+            Ok(())
+        }
+    }
+
+    /// A trivial block-context provider for tests.
+    #[derive(Clone)]
+    struct StubProvider;
+
+    impl BlockContextProvider for StubProvider {
+        fn context(&self, block: &Block) -> BlockContext {
+            BlockContext::new(Header::default(), block.parent.0, block.prevrandao)
+        }
+    }
+
+    /// When finalization succeeds (executor returns Ok, state root matches),
+    /// the handler must persist the snapshot, prune the mempool, and
+    /// acknowledge the update.
+    #[test]
+    fn successful_finalization_persists_and_acknowledges() {
+        let runner = tokio::Runner::default();
+        runner.start(|context| async move {
+            // -- set up ledger with an empty genesis --
+            let ledger = LedgerView::init(
+                context.clone(),
+                next_partition("reporters-finalize-ok"),
+                Vec::new(),
+            )
+            .await
+            .expect("init ledger");
+            let service = LedgerService::new(ledger);
+            let genesis = service.genesis_block();
+            let genesis_digest = genesis.commitment();
+
+            // Fetch the genesis state root so we can build a matching block.
+            let genesis_root =
+                service.query_state_root(genesis_digest).await.expect("genesis state root");
+
+            // -- insert a dummy tx into the mempool so we can verify pruning --
+            let tx = Tx::new(Bytes::from_static(&[0x01, 0x02]));
+            assert!(service.submit_tx(tx.clone()).await, "tx should be accepted");
+            let pool = service.txpool().await;
+            assert_eq!(pool.len(), 1);
+
+            // -- build a block with no real txs but containing the dummy tx --
+            // EmptySuccessExecutor ignores transactions and produces an empty
+            // changeset, so the state root stays at genesis_root.
+            let block = Block {
+                parent: genesis.id(),
+                height: 1,
+                timestamp: 1,
+                prevrandao: B256::ZERO,
+                state_root: genesis_root,
+                txs: vec![tx],
+            };
+
+            let (ack, waiter) = Exact::handle();
+
+            handle_finalized_update(
+                service.clone(),
+                context,
+                EmptySuccessExecutor,
+                StubProvider,
+                None,
+                None,
+                Update::Block(block.clone(), ack),
+            )
+            .await;
+
+            // -- assert: mempool was pruned --
+            assert_eq!(pool.len(), 0, "mempool must be pruned after successful finalization");
+
+            // -- assert: acknowledgement was delivered --
+            waiter.await.expect("ack must be called after successful finalization");
+
+            // -- assert: snapshot was persisted (state root is queryable) --
+            let block_digest = block.commitment();
+            let stored_root = service.query_state_root(block_digest).await;
+            assert!(stored_root.is_some(), "snapshot must exist after successful finalization");
+            assert_eq!(
+                stored_root.unwrap(),
+                genesis_root,
+                "persisted root must match the block state root"
+            );
+        });
+    }
+
+    /// When a `BlockIndex` is provided, successful finalization must populate
+    /// the index with the finalized block metadata.
+    #[test]
+    fn finalization_updates_block_index() {
+        let runner = tokio::Runner::default();
+        runner.start(|context| async move {
+            let ledger = LedgerView::init(
+                context.clone(),
+                next_partition("reporters-finalize-index"),
+                Vec::new(),
+            )
+            .await
+            .expect("init ledger");
+            let service = LedgerService::new(ledger);
+            let genesis = service.genesis_block();
+            let genesis_digest = genesis.commitment();
+            let genesis_root =
+                service.query_state_root(genesis_digest).await.expect("genesis state root");
+
+            // Build an empty block whose state root matches genesis (no changes).
+            let block = Block {
+                parent: genesis.id(),
+                height: 1,
+                timestamp: 1,
+                prevrandao: B256::ZERO,
+                state_root: genesis_root,
+                txs: Vec::new(),
+            };
+            let block_hash = block.id().0;
+
+            let index = Arc::new(BlockIndex::new());
+            let (ack, waiter) = Exact::handle();
+
+            handle_finalized_update(
+                service.clone(),
+                context,
+                EmptySuccessExecutor,
+                StubProvider,
+                Some(index.clone()),
+                None,
+                Update::Block(block, ack),
+            )
+            .await;
+
+            waiter.await.expect("ack must be called");
+
+            // -- assert: the block was indexed --
+            let indexed = index.get_block_by_hash(&block_hash);
+            assert!(indexed.is_some(), "block must be indexed after finalization");
+            let indexed_block = indexed.unwrap();
+            assert_eq!(indexed_block.number, 1);
+            assert_eq!(indexed_block.hash, block_hash);
+        });
+    }
+}
+
 #[derive(Clone, Debug)]
 struct TxMetadata {
     from: alloy_primitives::Address,

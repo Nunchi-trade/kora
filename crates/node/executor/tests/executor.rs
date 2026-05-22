@@ -764,3 +764,134 @@ fn test_execute_single_tx_exceeding_block_gas_limit_produces_empty_outcome() {
     );
     assert_eq!(outcome.gas_used, 0);
 }
+
+// ----------------------------------------------------------------------------
+// Tests for real signed EIP-1559 transaction execution with state changes
+// ----------------------------------------------------------------------------
+
+/// Execute a real signed EIP-1559 transfer and verify that:
+/// - The transaction succeeds.
+/// - The sender's nonce is incremented.
+/// - The receiver's balance increases by the transfer value.
+/// - The receipt contains the correct transaction hash.
+/// - The total gas used equals the basic transfer cost (21,000).
+#[test]
+fn test_execute_signed_eip1559_transfer_verifies_state_changes() {
+    let chain_id = 1u64;
+    let executor = RevmExecutor::new(chain_id);
+    let state = MockStateDb::new();
+
+    let sender_key = signing_key_from_seed(1);
+    let sender = address_from_key(&sender_key);
+    let receiver = Address::from([0xBB; 20]);
+
+    let initial_balance = U256::from(10_000_000_000u64);
+    let transfer_value = U256::from(1_000);
+
+    state.insert_account(
+        sender,
+        MockAccount { nonce: 0, balance: initial_balance, ..Default::default() },
+    );
+    // Insert receiver as existing (empty) account so the 21,000 gas assumption holds.
+    state.insert_account(receiver, MockAccount::default());
+
+    let tx_bytes =
+        sign_eip1559_transfer(&sender_key, chain_id, receiver, transfer_value, 0, 21_000);
+    let tx_hash = keccak256(&tx_bytes);
+
+    let header = Header { gas_limit: 30_000_000, number: 1, timestamp: 1000, ..Default::default() };
+    let context = BlockContext::new(header, B256::ZERO, B256::ZERO);
+
+    let outcome =
+        executor.execute(&state, &context, &[tx_bytes]).expect("execution should succeed");
+
+    // Exactly one receipt produced.
+    assert_eq!(outcome.receipts.len(), 1, "should produce exactly one receipt");
+
+    // Transaction succeeded.
+    assert!(outcome.receipts[0].success(), "transfer should succeed");
+
+    // Receipt hash matches the transaction hash.
+    assert_eq!(outcome.receipts[0].tx_hash, tx_hash, "receipt must contain correct tx hash");
+
+    // Gas accounting: a simple transfer costs exactly 21,000 gas.
+    assert_eq!(outcome.gas_used, 21_000, "total gas used should be 21,000");
+    assert_eq!(outcome.receipts[0].gas_used, 21_000, "per-tx gas should be 21,000");
+
+    // State changes must reflect the transfer.
+    let sender_update =
+        outcome.changes.accounts.get(&sender).expect("sender must appear in change set");
+    assert_eq!(sender_update.nonce, 1, "sender nonce must increment to 1");
+    assert_eq!(
+        sender_update.balance,
+        initial_balance - transfer_value,
+        "sender balance must decrease by transfer value (zero base fee means no gas cost)"
+    );
+
+    let receiver_update =
+        outcome.changes.accounts.get(&receiver).expect("receiver must appear in change set");
+    assert_eq!(
+        receiver_update.balance, transfer_value,
+        "receiver balance must equal the transfer value"
+    );
+}
+
+/// Execute two sequential signed EIP-1559 transfers from the same sender
+/// and verify nonce increments and cumulative balance changes.
+#[test]
+fn test_execute_multiple_signed_transfers_sequential_nonces() {
+    let chain_id = 1u64;
+    let executor = RevmExecutor::new(chain_id);
+    let state = MockStateDb::new();
+
+    let sender_key = signing_key_from_seed(1);
+    let sender = address_from_key(&sender_key);
+    let receiver = Address::from([0xCC; 20]);
+
+    let initial_balance = U256::from(10_000_000_000u64);
+    let value_1 = U256::from(100);
+    let value_2 = U256::from(200);
+
+    state.insert_account(
+        sender,
+        MockAccount { nonce: 0, balance: initial_balance, ..Default::default() },
+    );
+    state.insert_account(receiver, MockAccount::default());
+
+    let tx1 = sign_eip1559_transfer(&sender_key, chain_id, receiver, value_1, 0, 21_000);
+    let tx2 = sign_eip1559_transfer(&sender_key, chain_id, receiver, value_2, 1, 21_000);
+
+    let header = Header { gas_limit: 30_000_000, number: 1, timestamp: 1000, ..Default::default() };
+    let context = BlockContext::new(header, B256::ZERO, B256::ZERO);
+
+    let outcome =
+        executor.execute(&state, &context, &[tx1, tx2]).expect("execution should succeed");
+
+    // Both transactions should succeed.
+    assert_eq!(outcome.receipts.len(), 2, "should produce two receipts");
+    assert!(outcome.receipts[0].success(), "first transfer should succeed");
+    assert!(outcome.receipts[1].success(), "second transfer should succeed");
+
+    // Gas accounting.
+    assert_eq!(outcome.gas_used, 42_000, "total gas should be 2 * 21,000");
+
+    // Cumulative gas in receipts.
+    assert_eq!(outcome.receipts[0].cumulative_gas_used(), 21_000);
+    assert_eq!(outcome.receipts[1].cumulative_gas_used(), 42_000);
+
+    // Final state changes reflect both transfers.
+    let sender_update = outcome.changes.accounts.get(&sender).expect("sender in changes");
+    assert_eq!(sender_update.nonce, 2, "sender nonce must be 2 after two transactions");
+    assert_eq!(
+        sender_update.balance,
+        initial_balance - value_1 - value_2,
+        "sender balance must decrease by total transferred (zero base fee)"
+    );
+
+    let receiver_update = outcome.changes.accounts.get(&receiver).expect("receiver in changes");
+    assert_eq!(
+        receiver_update.balance,
+        value_1 + value_2,
+        "receiver must have sum of both transfers"
+    );
+}
