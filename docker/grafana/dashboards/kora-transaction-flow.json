@@ -1,0 +1,306 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    {"title": "Overview", "url": "/d/kora-overview", "type": "link", "icon": "dashboard"},
+    {"title": "Performance", "url": "/d/kora-performance", "type": "link", "icon": "dashboard"},
+    {"title": "Stall Diagnostics", "url": "/d/kora-stall-diagnostics", "type": "link", "icon": "dashboard"},
+    {"title": "Logs Explorer", "url": "/d/kora-logs", "type": "link", "icon": "dashboard"}
+  ],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "id": 100,
+      "title": "Transaction Throughput",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"steps": [{"color": "red", "value": null}, {"color": "yellow", "value": 1}, {"color": "green", "value": 50}]}
+        }
+      },
+      "gridPos": {"h": 4, "w": 4, "x": 0, "y": 1},
+      "id": 1,
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}},
+      "title": "Blocks/sec",
+      "type": "stat",
+      "targets": [{"expr": "kora:blocks_per_sec", "legendFormat": "blocks/sec"}]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "unit": "s",
+          "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 0.05}, {"color": "red", "value": 0.1}]}
+        }
+      },
+      "gridPos": {"h": 4, "w": 4, "x": 4, "y": 1},
+      "id": 2,
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}},
+      "title": "Block Time",
+      "type": "stat",
+      "targets": [{"expr": "kora:block_time", "legendFormat": "block time"}]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "unit": "percentunit",
+          "thresholds": {"steps": [{"color": "red", "value": null}, {"color": "yellow", "value": 0.5}, {"color": "green", "value": 0.7}]}
+        }
+      },
+      "gridPos": {"h": 4, "w": 4, "x": 8, "y": 1},
+      "id": 3,
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}},
+      "title": "Consensus Efficiency",
+      "type": "stat",
+      "targets": [{"expr": "kora:consensus_efficiency", "legendFormat": "efficiency"}]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "unit": "percentunit",
+          "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 0.2}, {"color": "red", "value": 0.4}]}
+        }
+      },
+      "gridPos": {"h": 4, "w": 4, "x": 12, "y": 1},
+      "id": 4,
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}},
+      "title": "Skip Rate",
+      "type": "stat",
+      "targets": [{"expr": "kora:skip_rate", "legendFormat": "skip rate"}]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 2}, {"color": "red", "value": 5}]}
+        }
+      },
+      "gridPos": {"h": 4, "w": 4, "x": 16, "y": 1},
+      "id": 5,
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}},
+      "title": "Nullifications/s",
+      "type": "stat",
+      "targets": [{"expr": "kora:nullification_rate", "legendFormat": "nullifications/s"}]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 5}, {"color": "red", "value": 10}]}
+        }
+      },
+      "gridPos": {"h": 4, "w": 4, "x": 20, "y": 1},
+      "id": 6,
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}},
+      "title": "Height Drift",
+      "type": "stat",
+      "targets": [{"expr": "kora:height_drift", "legendFormat": "drift"}]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 5},
+      "id": 200,
+      "title": "Finalized Height & Consensus Progress",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short", "custom": {"lineWidth": 2, "fillOpacity": 10}}},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 6},
+      "id": 7,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}},
+      "title": "Finalized Height (all validators)",
+      "type": "timeseries",
+      "targets": [
+        {"expr": "finalized_height", "legendFormat": "{{instance}}"}
+      ]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short", "custom": {"lineWidth": 2, "fillOpacity": 10}}},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 6},
+      "id": 8,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}},
+      "title": "Consensus View (all validators)",
+      "type": "timeseries",
+      "targets": [
+        {"expr": "engine_voter_state_current_view", "legendFormat": "view {{instance}}"}
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 14},
+      "id": 300,
+      "title": "Block Building & Execution",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {"lineWidth": 2, "fillOpacity": 10}}},
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 15},
+      "id": 9,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
+      "title": "Block Build Duration (p50/p95/p99)",
+      "type": "timeseries",
+      "targets": [
+        {"expr": "kora:build_duration:p50", "legendFormat": "p50"},
+        {"expr": "kora:build_duration:p95", "legendFormat": "p95"},
+        {"expr": "kora:build_duration:p99", "legendFormat": "p99"}
+      ]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {"lineWidth": 2, "fillOpacity": 10}}},
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 15},
+      "id": 10,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
+      "title": "Finalization Latency (p50/p95/p99)",
+      "type": "timeseries",
+      "targets": [
+        {"expr": "kora:finalization_latency:p50", "legendFormat": "p50"},
+        {"expr": "kora:finalization_latency:p95", "legendFormat": "p95"},
+        {"expr": "kora:finalization_latency:p99", "legendFormat": "p99"}
+      ]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "ops", "custom": {"lineWidth": 2, "fillOpacity": 20, "stacking": {"mode": "normal"}}}},
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 15},
+      "id": 11,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
+      "title": "Nullifications vs Timeouts (rate)",
+      "type": "timeseries",
+      "targets": [
+        {"expr": "sum(rate(engine_voter_state_nullifications_total[1m]))", "legendFormat": "nullifications/s"},
+        {"expr": "sum(rate(engine_voter_state_timeouts_total[1m]))", "legendFormat": "timeouts/s"}
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 23},
+      "id": 400,
+      "title": "Per-Node Skip Rate & Health",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1, "custom": {"lineWidth": 2, "fillOpacity": 10}}},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+      "id": 12,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}},
+      "title": "Skip Rate per Node",
+      "type": "timeseries",
+      "targets": [
+        {"expr": "1 - (rate(finalized_height[5m]) / rate(engine_voter_state_current_view[5m]))", "legendFormat": "{{instance}}"}
+      ]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short", "custom": {"lineWidth": 2, "fillOpacity": 10}}},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+      "id": 13,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}},
+      "title": "Resolver Blocked Peers",
+      "type": "timeseries",
+      "targets": [
+        {"expr": "engine_resolver_resolver_peers_blocked", "legendFormat": "blocked {{instance}}"}
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 32},
+      "id": 500,
+      "title": "Resource Usage",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "bytes", "custom": {"lineWidth": 2, "fillOpacity": 10}}},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 33},
+      "id": 14,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}},
+      "title": "Memory (RSS) per Node",
+      "type": "timeseries",
+      "targets": [
+        {"expr": "runtime_process_rss", "legendFormat": "{{instance}}"}
+      ]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "Bps", "custom": {"lineWidth": 2, "fillOpacity": 10}}},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 33},
+      "id": 15,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom"}},
+      "title": "Storage Write Rate",
+      "type": "timeseries",
+      "targets": [
+        {"expr": "rate(runtime_storage_write_bytes_total[1m])", "legendFormat": "{{instance}}"}
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 41},
+      "id": 600,
+      "title": "Stall Indicators",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short", "custom": {"lineWidth": 2, "fillOpacity": 30, "thresholdsStyle": {"mode": "area"}}, "thresholds": {"steps": [{"color": "transparent", "value": null}, {"color": "red", "value": 1}]}}},
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 42},
+      "id": 16,
+      "title": "Views Without Finalization (STALL INDICATOR)",
+      "type": "timeseries",
+      "targets": [
+        {"expr": "rate(engine_voter_state_current_view[1m]) > 0 and rate(finalized_height[1m]) < 0.001", "legendFormat": "STALLED {{instance}}"}
+      ]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short", "custom": {"lineWidth": 2, "fillOpacity": 30, "thresholdsStyle": {"mode": "area"}}, "thresholds": {"steps": [{"color": "transparent", "value": null}, {"color": "orange", "value": 5}]}}},
+      "gridPos": {"h": 6, "w": 8, "x": 8, "y": 42},
+      "id": 17,
+      "title": "Timeout Rate by Reason",
+      "type": "timeseries",
+      "targets": [
+        {"expr": "sum by (reason) (rate(engine_voter_state_timeouts_total[1m]))", "legendFormat": "{{reason}}"}
+      ]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short", "custom": {"lineWidth": 2, "fillOpacity": 10}}},
+      "gridPos": {"h": 6, "w": 8, "x": 16, "y": 42},
+      "id": 18,
+      "title": "Broadcast Failures",
+      "type": "timeseries",
+      "targets": [
+        {"expr": "sum(rate(broadcast_get_total{status=\"Failure\"}[1m]))", "legendFormat": "failures/s"},
+        {"expr": "sum(rate(broadcast_get_total{status=\"Success\"}[1m]))", "legendFormat": "success/s"}
+      ]
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 38,
+  "tags": ["kora", "transactions", "loadtest"],
+  "templating": {"list": []},
+  "time": {"from": "now-15m", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Kora Transaction Flow & Load Test",
+  "uid": "kora-txflow",
+  "version": 1
+}

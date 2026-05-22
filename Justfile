@@ -69,6 +69,10 @@ devnet-status:
 devnet-stats:
     cd docker && just stats
 
+# Devnet health diagnostics report
+devnet-health:
+    cd docker && just health
+
 # Build docker images
 docker-build:
     cd docker && just build
@@ -84,3 +88,19 @@ loadtest:
 # Stress test (10000 txs with 50 accounts)
 stresstest:
     cargo run --release -p loadgen --bin loadgen -- --total-txs 10000 --accounts 50 --broadcast-rpc-urls http://127.0.0.1:8546,http://127.0.0.1:8547,http://127.0.0.1:8548
+
+# Provision the remote server (one-time)
+remote-provision:
+    cd ansible && ansible-playbook playbooks/provision.yml
+
+# Deploy to remote server
+remote-deploy *args:
+    cd ansible && ansible-playbook playbooks/deploy.yml {{args}}
+
+# Reset remote devnet (clean slate)
+remote-reset:
+    cd ansible && ansible-playbook playbooks/reset.yml
+
+# Start observability on remote
+remote-observe:
+    cd ansible && ansible-playbook playbooks/observe.yml

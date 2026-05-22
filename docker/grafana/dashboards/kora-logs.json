@@ -1,0 +1,277 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 2,
+  "id": null,
+  "links": [
+    {"title": "Overview Dashboard", "url": "/d/kora-overview", "type": "link"},
+    {"title": "Performance & Block Time", "url": "/d/kora-performance", "type": "link"},
+    {"title": "Stall Diagnostics", "url": "/d/kora-stall-diagnostics", "type": "link"}
+  ],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "id": 300,
+      "title": "Log Volume & Errors",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "loki", "uid": "loki"},
+      "description": "Log lines per second by level across all nodes. Spikes in WARN/ERROR precede stalls.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 20, "spanNulls": false, "showPoints": "never", "stacking": {"mode": "normal"}},
+          "unit": "short"
+        },
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "ERROR"}, "properties": [{"id": "color", "value": {"fixedColor": "red", "mode": "fixed"}}]},
+          {"matcher": {"id": "byName", "options": "WARN"}, "properties": [{"id": "color", "value": {"fixedColor": "orange", "mode": "fixed"}}]},
+          {"matcher": {"id": "byName", "options": "INFO"}, "properties": [{"id": "color", "value": {"fixedColor": "green", "mode": "fixed"}}]},
+          {"matcher": {"id": "byName", "options": "DEBUG"}, "properties": [{"id": "color", "value": {"fixedColor": "blue", "mode": "fixed"}}]}
+        ]
+      },
+      "gridPos": {"h": 5, "w": 12, "x": 0, "y": 1},
+      "id": 301,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"datasource": {"type": "loki", "uid": "loki"}, "expr": "sum by (level) (rate({node_type=~\"validator|secondary\"}[1m]))", "legendFormat": "{{level}}", "refId": "A"}
+      ],
+      "title": "Log Volume by Level",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "loki", "uid": "loki"},
+      "description": "Error + warning rate per node. Asymmetric rates indicate per-node issues.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 10, "spanNulls": false, "showPoints": "never"},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 5, "w": 12, "x": 12, "y": 1},
+      "id": 302,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"datasource": {"type": "loki", "uid": "loki"}, "expr": "sum by (service) (rate({node_type=~\"validator|secondary\"} |~ \"(?i)(ERROR|WARN)\" [1m]))", "legendFormat": "{{service}}", "refId": "A"}
+      ],
+      "title": "Error+Warn Rate per Node",
+      "type": "timeseries"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 6},
+      "id": 310,
+      "title": "Critical Error Patterns (Stall Indicators)",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "loki", "uid": "loki"},
+      "description": "Voter panics — fatal consensus crashes. Any hit means a node's consensus died.",
+      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 7},
+      "id": 311,
+      "options": {
+        "showTime": true,
+        "showLabels": true,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none"
+      },
+      "targets": [
+        {"datasource": {"type": "loki", "uid": "loki"}, "expr": "{node_type=~\"validator|secondary\"} |~ \"task panicked|voter should not finish|PANIC\"", "refId": "A"}
+      ],
+      "title": "Voter Panics / Task Crashes",
+      "type": "logs"
+    },
+    {
+      "datasource": {"type": "loki", "uid": "loki"},
+      "description": "Resolver 'invalid data received' — indicates catch-up failure after restart.",
+      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 13},
+      "id": 312,
+      "options": {
+        "showTime": true,
+        "showLabels": true,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none"
+      },
+      "targets": [
+        {"datasource": {"type": "loki", "uid": "loki"}, "expr": "{node_type=~\"validator|secondary\"} |~ \"invalid data received\"", "refId": "A"}
+      ],
+      "title": "Resolver Invalid Data (Catch-up Failures)",
+      "type": "logs"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 19},
+      "id": 320,
+      "title": "Transaction & Mempool Errors",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "loki", "uid": "loki"},
+      "description": "Duplicate transaction rejections. Bursts indicate tx storm or rebroadcast.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 20, "spanNulls": false, "showPoints": "never"},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 5, "w": 8, "x": 0, "y": 20},
+      "id": 321,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"datasource": {"type": "loki", "uid": "loki"}, "expr": "sum by (service) (rate({node_type=\"validator\"} |~ \"ledger.submit_tx returned false\" [1m]))", "legendFormat": "{{service}}", "refId": "A"}
+      ],
+      "title": "Duplicate TX Rejections/s",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "loki", "uid": "loki"},
+      "description": "Transaction validation failures (nonce too low, etc).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 20, "spanNulls": false, "showPoints": "never"},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 5, "w": 8, "x": 8, "y": 20},
+      "id": 322,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"datasource": {"type": "loki", "uid": "loki"}, "expr": "sum by (service) (rate({node_type=\"validator\"} |~ \"validator rejected tx\" [1m]))", "legendFormat": "{{service}}", "refId": "A"}
+      ],
+      "title": "TX Validation Failures/s",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "loki", "uid": "loki"},
+      "description": "Block execution failures — the executor aborting blocks due to bad transactions.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 20, "spanNulls": false, "showPoints": "never"},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 5, "w": 8, "x": 16, "y": 20},
+      "id": 323,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"datasource": {"type": "loki", "uid": "loki"}, "expr": "sum by (service) (rate({node_type=\"validator\"} |~ \"execution failed|state root mismatch\" [1m]))", "legendFormat": "{{service}}", "refId": "A"}
+      ],
+      "title": "Block Execution Failures/s",
+      "type": "timeseries"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 25},
+      "id": 330,
+      "title": "Finalization & Persistence Errors",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "loki", "uid": "loki"},
+      "description": "Persistence failures, state root mismatches, and finalization errors. These indicate the FinalizedReporter early-return bug path.",
+      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 26},
+      "id": 331,
+      "options": {
+        "showTime": true,
+        "showLabels": true,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none"
+      },
+      "targets": [
+        {"datasource": {"type": "loki", "uid": "loki"}, "expr": "{node_type=~\"validator|secondary\"} |~ \"failed to persist|failed to execute finalized|failed to compute qmdb|state root mismatch|missing parent snapshot\"", "refId": "A"}
+      ],
+      "title": "Finalization & Persistence Errors",
+      "type": "logs"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 32},
+      "id": 340,
+      "title": "Consensus Activity Logs",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "loki", "uid": "loki"},
+      "description": "Consensus initialization, restarts, and state changes. Key for tracking node restart behavior.",
+      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 33},
+      "id": 341,
+      "options": {
+        "showTime": true,
+        "showLabels": true,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none"
+      },
+      "targets": [
+        {"datasource": {"type": "loki", "uid": "loki"}, "expr": "{node_type=~\"validator|secondary\"} |~ \"consensus initialized|Validator started|recovered finalized|Starting production|nullification floor\"", "refId": "A"}
+      ],
+      "title": "Consensus Lifecycle Events",
+      "type": "logs"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 39},
+      "id": 350,
+      "title": "Full Log Stream",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "loki", "uid": "loki"},
+      "description": "Full log stream filtered to WARN and ERROR. Use this for ad-hoc investigation.",
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 40},
+      "id": 351,
+      "options": {
+        "showTime": true,
+        "showLabels": true,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none"
+      },
+      "targets": [
+        {"datasource": {"type": "loki", "uid": "loki"}, "expr": "{node_type=~\"validator|secondary\"} |~ \"(?i)(ERROR|WARN)\"", "refId": "A"}
+      ],
+      "title": "All Warnings & Errors",
+      "type": "logs"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 38,
+  "tags": ["kora", "logs"],
+  "templating": {"list": []},
+  "time": {"from": "now-30m", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Kora Logs Explorer",
+  "uid": "kora-logs",
+  "version": 1
+}

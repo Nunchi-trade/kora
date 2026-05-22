@@ -1,97 +1,536 @@
 {
-  "annotations": {
-    "list": []
-  },
+  "annotations": {"list": []},
   "editable": true,
   "fiscalYearStartMonth": 0,
-  "graphTooltip": 0,
+  "graphTooltip": 2,
   "id": null,
-  "links": [],
+  "links": [
+    {"title": "Performance & Block Time", "url": "/d/kora-performance", "type": "link"},
+    {"title": "Stall Diagnostics", "url": "/d/kora-stall-diagnostics", "type": "link"},
+    {"title": "Logs Explorer", "url": "/d/kora-logs", "type": "link"}
+  ],
   "panels": [
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "id": 100,
+      "title": "Overview",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {
         "defaults": {
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {"color": "green", "value": null}
-            ]
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
-      "id": 1,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto"
-      },
-      "pluginVersion": "10.0.0",
-      "targets": [
-        {
-          "expr": "count(up{job=\"kora-validators\"})",
-          "refId": "A"
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "red", "value": null}, {"color": "yellow", "value": 3}, {"color": "green", "value": 4}
+          ]}
         }
-      ],
-      "title": "Active Validators",
+      },
+      "gridPos": {"h": 3, "w": 3, "x": 0, "y": 1},
+      "id": 1,
+      "options": {"colorMode": "background", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "targets": [{"expr": "count(up{job=\"kora-validators\"} == 1)", "refId": "A"}],
+      "title": "Validators Up",
       "type": "stat"
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {
         "defaults": {
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {"color": "green", "value": null}
-            ]
-          },
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]},
           "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
-      "id": 2,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": ["lastNotNull"],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "auto"
-      },
-      "pluginVersion": "10.0.0",
-      "targets": [
-        {
-          "expr": "up{job=\"kora-validators\"}",
-          "legendFormat": "Node {{validator_index}}",
-          "refId": "A"
         }
-      ],
-      "title": "Node Health",
+      },
+      "gridPos": {"h": 3, "w": 3, "x": 3, "y": 1},
+      "id": 2,
+      "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "targets": [{"expr": "max(finalized_height)", "refId": "A"}],
+      "title": "Finalized Height",
       "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 3, "w": 3, "x": 6, "y": 1},
+      "id": 3,
+      "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "targets": [{"expr": "avg(rate(finalized_height[1m]))", "refId": "A"}],
+      "title": "Blocks/sec",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null}, {"color": "yellow", "value": 0.05}, {"color": "red", "value": 0.2}
+          ]},
+          "unit": "s"
+        }
+      },
+      "gridPos": {"h": 3, "w": 3, "x": 9, "y": 1},
+      "id": 4,
+      "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "targets": [{"expr": "avg(rate(engine_voter_finalization_latency_sum[1m]) / rate(engine_voter_finalization_latency_count[1m]))", "refId": "A"}],
+      "title": "Avg Finalization Latency",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 10}
+          ]},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 3, "w": 3, "x": 12, "y": 1},
+      "id": 5,
+      "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "targets": [{"expr": "sum(rate(engine_voter_state_nullifications_total[5m]))", "refId": "A"}],
+      "title": "Nullifications/s",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 10}
+          ]},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 3, "w": 3, "x": 15, "y": 1},
+      "id": 6,
+      "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "targets": [{"expr": "sum(rate(engine_voter_state_timeouts_total[5m]))", "refId": "A"}],
+      "title": "Timeouts/s",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]},
+          "unit": "bytes"
+        }
+      },
+      "gridPos": {"h": 3, "w": 3, "x": 18, "y": 1},
+      "id": 7,
+      "options": {"colorMode": "value", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "targets": [{"expr": "avg(runtime_process_rss)", "refId": "A"}],
+      "title": "Avg Memory",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null}, {"color": "yellow", "value": 5}, {"color": "red", "value": 20}
+          ]},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 3, "w": 3, "x": 21, "y": 1},
+      "id": 8,
+      "options": {"colorMode": "value", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "targets": [{"expr": "max(finalized_height) - min(finalized_height)", "refId": "A"}],
+      "title": "Height Drift",
+      "type": "stat"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 4},
+      "id": 101,
+      "title": "Consensus Health",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 5, "spanNulls": false, "showPoints": "never", "axisBorderShow": true},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 5},
+      "id": 10,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"expr": "finalized_height", "legendFormat": "Node {{validator_index}}", "refId": "A"}],
+      "title": "Finalized Height",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 5, "spanNulls": false, "showPoints": "never"},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 5},
+      "id": 11,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"expr": "rate(finalized_height{job=\"kora-validators\"}[1m])", "legendFormat": "Node {{validator_index}}", "refId": "A"}],
+      "title": "Finalization Rate (blocks/s)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Difference between max and min finalized height across validators. Sustained drift > 0 indicates a lagging node.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"fixedColor": "orange", "mode": "fixed"},
+          "custom": {"lineWidth": 2, "fillOpacity": 20, "spanNulls": false, "showPoints": "never", "thresholdsStyle": {"mode": "area"}},
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null}, {"color": "yellow", "value": 5}, {"color": "red", "value": 20}
+          ]},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 5},
+      "id": 12,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+      "targets": [
+        {"expr": "max(finalized_height) - min(finalized_height)", "legendFormat": "Height Drift", "refId": "A"},
+        {"expr": "max(engine_voter_state_current_view) - min(engine_voter_state_current_view)", "legendFormat": "View Drift", "refId": "B"}
+      ],
+      "title": "Node Divergence (lower is better)",
+      "type": "timeseries"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 12},
+      "id": 102,
+      "title": "Latency",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 5, "spanNulls": false, "showPoints": "never"},
+          "unit": "s"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 13},
+      "id": 20,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "rate(engine_voter_notarization_latency_sum[1m]) / rate(engine_voter_notarization_latency_count[1m])", "legendFormat": "Node {{validator_index}}", "refId": "A"}
+      ],
+      "title": "Notarization Latency",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 5, "spanNulls": false, "showPoints": "never"},
+          "unit": "s"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 13},
+      "id": 21,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "rate(engine_voter_finalization_latency_sum[1m]) / rate(engine_voter_finalization_latency_count[1m])", "legendFormat": "Node {{validator_index}}", "refId": "A"}
+      ],
+      "title": "Finalization Latency",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 5, "spanNulls": false, "showPoints": "never"},
+          "unit": "s"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 13},
+      "id": 22,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "rate(marshaled_build_duration_sum[1m]) / rate(marshaled_build_duration_count[1m])", "legendFormat": "Node {{validator_index}}", "refId": "A"}
+      ],
+      "title": "Block Build Duration",
+      "type": "timeseries"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 20},
+      "id": 103,
+      "title": "Faults & Anomalies",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Timeouts by reason. MissingProposal = leader didn't propose. LeaderNullify = leader nullified. LeaderTimeout = leader was too slow.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 15, "spanNulls": false, "showPoints": "never", "stacking": {"mode": "normal"}},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 21},
+      "id": 30,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "sum by (reason) (rate(engine_voter_state_timeouts_total[5m]))", "legendFormat": "{{reason}}", "refId": "A"}
+      ],
+      "title": "Timeouts by Reason",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Which leader is causing the most nullifications? High counts for one leader suggest that node is struggling.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 15, "spanNulls": false, "showPoints": "never", "stacking": {"mode": "normal"}},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 21},
+      "id": 31,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "sum by (instance) (rate(engine_voter_state_nullifications_total[5m]))", "legendFormat": "Reporter: {{instance}}", "refId": "A"}
+      ],
+      "title": "Nullification Rate by Reporter",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Ratio of nullified views to total views. Higher = more wasted consensus rounds.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"fixedColor": "red", "mode": "fixed"},
+          "custom": {"lineWidth": 2, "fillOpacity": 10, "spanNulls": false, "showPoints": "never", "thresholdsStyle": {"mode": "area"}},
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null}, {"color": "yellow", "value": 0.1}, {"color": "red", "value": 0.3}
+          ]},
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 21},
+      "id": 32,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+      "targets": [
+        {"expr": "1 - (rate(finalized_height[5m]) / rate(engine_voter_state_current_view[5m]))", "legendFormat": "Node {{validator_index}}", "refId": "A"}
+      ],
+      "title": "Skip Rate (wasted views)",
+      "type": "timeseries"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 28},
+      "id": 104,
+      "title": "Network",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 5, "spanNulls": false, "showPoints": "never"},
+          "unit": "Bps"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 29},
+      "id": 40,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "rate(runtime_outbound_bandwidth_total[1m])", "legendFormat": "Node {{validator_index}} out", "refId": "A"},
+        {"expr": "rate(runtime_inbound_bandwidth_total[1m])", "legendFormat": "Node {{validator_index}} in", "refId": "B"}
+      ],
+      "title": "Network Bandwidth",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 5, "spanNulls": false, "showPoints": "never"},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 29},
+      "id": 41,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "sum by (instance) (rate(network_spawner_messages_sent_total[1m]))", "legendFormat": "Node {{validator_index}} sent", "refId": "A"},
+        {"expr": "sum by (instance) (rate(network_spawner_messages_received_total[1m]))", "legendFormat": "Node {{validator_index}} recv", "refId": "B"}
+      ],
+      "title": "Message Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 5, "spanNulls": false, "showPoints": "never", "stacking": {"mode": "normal"}},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 29},
+      "id": 42,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "sum by (message) (rate(engine_voter_outbound_messages_total[1m]))", "legendFormat": "{{message}}", "refId": "A"}
+      ],
+      "title": "Consensus Message Types",
+      "type": "timeseries"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 36},
+      "id": 105,
+      "title": "Resources",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 5, "spanNulls": false, "showPoints": "never"},
+          "unit": "bytes"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 37},
+      "id": 50,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "runtime_process_rss", "legendFormat": "Node {{validator_index}} RSS", "refId": "A"}
+      ],
+      "title": "Memory (RSS)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 5, "spanNulls": false, "showPoints": "never"},
+          "unit": "Bps"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 37},
+      "id": 51,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "rate(runtime_storage_write_bytes_total[1m])", "legendFormat": "Node {{validator_index}} write", "refId": "A"},
+        {"expr": "rate(runtime_storage_read_bytes_total[1m])", "legendFormat": "Node {{validator_index}} read", "refId": "B"}
+      ],
+      "title": "Disk I/O",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 5, "spanNulls": false, "showPoints": "never"},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 37},
+      "id": 52,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "runtime_tasks_running", "legendFormat": "Node {{validator_index}} running", "refId": "A"},
+        {"expr": "rate(runtime_tasks_spawned_total[1m])", "legendFormat": "Node {{validator_index}} spawned/s", "refId": "B"}
+      ],
+      "title": "Tasks",
+      "type": "timeseries"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 44},
+      "id": 106,
+      "title": "Broadcast & Resolver",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 5, "spanNulls": false, "showPoints": "never"},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 45},
+      "id": 60,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "rate(broadcast_get_total{status=\"Success\"}[1m])", "legendFormat": "Node {{validator_index}} success", "refId": "A"},
+        {"expr": "rate(broadcast_get_total{status=\"Failure\"}[1m])", "legendFormat": "Node {{validator_index}} failure", "refId": "B"}
+      ],
+      "title": "Broadcast Gets",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 5, "spanNulls": false, "showPoints": "never"},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 45},
+      "id": 61,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "rate(broadcast_receive_total[1m])", "legendFormat": "{{status}}", "refId": "A"}
+      ],
+      "title": "Broadcast Receives",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 5, "spanNulls": false, "showPoints": "never"},
+          "unit": "s"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 45},
+      "id": 62,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "rate(engine_batcher_verify_latency_sum[1m]) / rate(engine_batcher_verify_latency_count[1m])", "legendFormat": "Node {{validator_index}}", "refId": "A"}
+      ],
+      "title": "Signature Verify Latency",
+      "type": "timeseries"
     }
   ],
   "refresh": "5s",
@@ -103,5 +542,5 @@
   "timezone": "browser",
   "title": "Kora Devnet Overview",
   "uid": "kora-overview",
-  "version": 1
+  "version": 3
 }

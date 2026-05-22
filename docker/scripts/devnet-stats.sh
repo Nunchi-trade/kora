@@ -1,5 +1,5 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -eo pipefail
 
 # Colors
 RED='\033[0;31m'
@@ -19,6 +19,18 @@ FOLLOWER_SERVICE="secondary-node0"
 FOLLOWER_P2P_PORT=30500
 declare -a PREV_FINALIZED=()
 declare -a PREV_SAMPLE_MS=()
+
+# Portable millisecond timestamp (macOS date lacks %N)
+millis() {
+    if perl -MTime::HiRes=time -e 'printf "%d\n", time()*1000' 2>/dev/null; then
+        return
+    elif python3 -c 'import time; print(int(time.time()*1000))' 2>/dev/null; then
+        return
+    else
+        # Fallback: second-precision (loses sub-second accuracy for blocks/s)
+        echo "$(date +%s)000"
+    fi
+}
 
 cleanup() {
     tput cnorm
@@ -105,7 +117,7 @@ render() {
     local all_status
     all_status=$(fetch_all_statuses)
     local sample_ms
-    sample_ms=$(date +%s%3N)
+    sample_ms=$(millis)
     
     local i=0
     while IFS= read -r status; do
