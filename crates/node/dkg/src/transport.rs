@@ -247,7 +247,13 @@ impl<E: Clock> DkgTransport<E> {
     ///
     /// Returns the sender's public key and the message bytes.
     pub async fn recv(&mut self) -> Option<(ed25519::PublicKey, Bytes)> {
-        self.receiver.recv().await.ok().map(|(sender, message)| (sender, Bytes::from(message)))
+        match self.receiver.recv().await {
+            Ok((sender, message)) => Some((sender, Bytes::from(message))),
+            Err(e) => {
+                tracing::warn!(%e, "DKG transport receive error");
+                None
+            }
+        }
     }
 }
 
