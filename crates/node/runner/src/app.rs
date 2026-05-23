@@ -27,7 +27,7 @@ use kora_overlay::OverlayState;
 use kora_qmdb_ledger::QmdbState;
 use kora_rpc::NodeState;
 use rand::Rng;
-use tracing::{debug, trace, warn};
+use tracing::{debug, error, trace, warn};
 
 fn unix_timestamp_secs<Env: Clock>(env: &Env) -> u64 {
     env.current().duration_since(UNIX_EPOCH).map(|duration| duration.as_secs()).unwrap_or(0)
@@ -130,7 +130,8 @@ where
                     parent_height = parent.height,
                     ?parent_digest,
                     "build_block: parent snapshot not found — \
-                     node has not yet processed this parent block"
+                     node is likely still catching up and has not yet \
+                     processed this parent block"
                 );
                 return None;
             }
@@ -182,12 +183,15 @@ where
         let outcome = match self.executor.execute(&parent_snapshot.state, &context, &txs_bytes) {
             Ok(outcome) => outcome,
             Err(err) => {
-                warn!(
+                error!(
                     parent = ?parent_digest,
                     height,
                     txs = txs.len(),
-                    error = ?err,
-                    "build_block: execution failed"
+                    gas_limit = self.gas_limit,
+                    error = %err,
+                    error_debug = ?err,
+                    "build_block: block execution failed — \
+                     this may indicate a bad transaction, OOM, or state corruption"
                 );
                 return None;
             }
@@ -200,11 +204,13 @@ where
             {
                 Ok(root) => root,
                 Err(err) => {
-                    warn!(
+                    error!(
                         parent = ?parent_digest,
                         height,
                         error = %err,
-                        "build_block: compute root failed"
+                        error_debug = ?err,
+                        "build_block: QMDB state root computation failed — \
+                         this may indicate a storage I/O error or inconsistent state"
                     );
                     return None;
                 }

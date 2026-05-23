@@ -474,26 +474,37 @@ fn spawn_consensus_monitor(
 /// Spawn a watchdog that awaits a critical task handle and aborts the process
 /// if the task ever terminates.  Under normal operation the handle never
 /// resolves; if it does, consensus is irrecoverably broken.
+///
+/// Before aborting, the watchdog sleeps briefly to allow the tracing subscriber
+/// to flush buffered log output.  This makes post-mortem diagnosis possible
+/// even when the process is restarted by a supervisor immediately.
 fn spawn_task_watchdog(context: &cw_tokio::Context, name: &'static str, handle: RuntimeHandle<()>) {
-    context.with_label(name).shared(true).spawn(move |_| async move {
-        match handle.await {
+    context.with_label(name).shared(true).spawn(move |ctx| async move {
+        let reason = match handle.await {
             Ok(()) => {
                 error!(task = name, "critical task exited cleanly — this should never happen for a long-lived consensus actor");
+                "exited cleanly (unexpected)"
             }
             Err(commonware_runtime::Error::Exited) => {
                 error!(task = name, "critical task panicked (runtime caught panic and returned Error::Exited)");
+                "panicked (Error::Exited)"
             }
             Err(commonware_runtime::Error::Closed) => {
                 warn!(task = name, "critical task terminated because the runtime context was shut down");
+                "runtime context closed"
             }
             Err(ref e) => {
                 error!(task = name, error = %e, error_debug = ?e, "critical task failed with unexpected error");
+                "unexpected error"
             }
-        }
-        error!(
+        };
+        info!(
             task = name,
-            "consensus infrastructure is dead, aborting process for supervisor restart"
+            reason,
+            "consensus infrastructure is dead — aborting process for supervisor restart"
         );
+        // Brief delay so the tracing subscriber can flush the log messages above.
+        ctx.sleep(Duration::from_millis(100)).await;
         std::process::abort();
     });
 }
