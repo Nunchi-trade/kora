@@ -6,7 +6,7 @@
 
 mod gc_log;
 
-use std::{fmt, marker::PhantomData, sync::Arc};
+use std::{fmt, marker::PhantomData, sync::Arc, time::Duration};
 
 use alloy_consensus::{
     Transaction as _, TxEnvelope,
@@ -27,19 +27,97 @@ use commonware_runtime::{Spawner as _, tokio};
 use commonware_utils::acknowledgement::Acknowledgement as _;
 pub use gc_log::SelfdestructGcLog;
 use kora_consensus::BlockExecution;
-use kora_domain::{Block, ConsensusDigest, MempoolEvent, PublicKey};
+use kora_domain::{Block, ConsensusDigest, MempoolEvent, PublicKey, StateRoot};
 use kora_executor::{BlockContext, BlockExecutor, ExecutionOutcome};
 use kora_indexer::{BlockIndex, IndexedBlock, IndexedLog, IndexedReceipt, IndexedTransaction};
-use kora_ledger::LedgerService;
+use kora_ledger::{LedgerError, LedgerService};
 use kora_overlay::OverlayState;
 use kora_qmdb_ledger::QmdbState;
 use kora_rpc::{MempoolEventSender, NodeState};
-use tracing::{error, trace, warn};
+use thiserror::Error;
+use tracing::{error, info, trace, warn};
 
 /// Provides block execution context for finalized block verification.
 pub trait BlockContextProvider: Clone + Send + Sync + 'static {
     /// Build a block execution context for the provided block.
     fn context(&self, block: &Block) -> BlockContext;
+}
+
+/// Maximum number of attempts for transient finalization failures.
+const MAX_FINALIZATION_ATTEMPTS: u32 = 3;
+
+/// Base delay between retry attempts (doubles each attempt: 100ms, 200ms, 400ms).
+const FINALIZATION_RETRY_BASE: Duration = Duration::from_millis(100);
+
+/// Errors that can occur during block finalization.
+///
+/// Each variant corresponds to a specific failure mode so callers can
+/// distinguish transient errors (worth retrying) from permanent ones
+/// (indicating state divergence or eviction).
+#[derive(Debug, Error)]
+enum FinalizationError {
+    /// Block execution failed during finalization replay.
+    #[error("execution failed: {0}")]
+    ExecutionFailed(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    /// QMDB root computation failed.
+    #[error("root computation failed: {0}")]
+    RootComputationFailed(#[source] LedgerError),
+
+    /// Computed state root does not match the block's declared root.
+    /// This is a deterministic mismatch and is NOT retryable.
+    #[error("state root mismatch: expected {expected:?}, computed {computed:?}")]
+    StateRootMismatch { expected: StateRoot, computed: StateRoot },
+
+    /// The parent snapshot needed for re-execution was not found and
+    /// may still be in-flight (catch-up race). Retryable with a short delay.
+    #[error("missing parent snapshot (transient): digest={digest:?} parent={parent_digest:?}")]
+    MissingParentSnapshot { digest: ConsensusDigest, parent_digest: ConsensusDigest },
+
+    /// The parent snapshot was persisted and then evicted from memory.
+    /// The snapshot data is gone; retrying will not help.
+    #[error("parent snapshot evicted: digest={digest:?} parent={parent_digest:?}")]
+    ParentSnapshotEvicted { digest: ConsensusDigest, parent_digest: ConsensusDigest },
+
+    /// The spawned persistence task panicked or was cancelled.
+    #[error("persist task failed: {0}")]
+    PersistTaskFailed(String),
+
+    /// QMDB persistence returned an error.
+    #[error("persist failed: {0}")]
+    PersistFailed(#[source] LedgerError),
+}
+
+impl FinalizationError {
+    /// Returns `true` if this error is potentially transient and the operation
+    /// should be retried.
+    const fn is_retryable(&self) -> bool {
+        match self {
+            // Deterministic: local state has diverged, retry produces the same mismatch.
+            Self::StateRootMismatch { .. } => false,
+            // Evicted: the snapshot data is gone permanently, retry is futile.
+            Self::ParentSnapshotEvicted { .. } => false,
+            // All other failures may be transient (I/O, OOM, race condition).
+            Self::ExecutionFailed(_)
+            | Self::RootComputationFailed(_)
+            | Self::MissingParentSnapshot { .. }
+            | Self::PersistTaskFailed(_)
+            | Self::PersistFailed(_) => true,
+        }
+    }
+
+    /// Returns a static label suitable for Prometheus metric labels.
+    const fn metric_label(&self) -> &'static str {
+        match self {
+            Self::ExecutionFailed(_) => "execution_failed",
+            Self::RootComputationFailed(_) => "root_computation_failed",
+            Self::StateRootMismatch { .. } => "state_root_mismatch",
+            Self::MissingParentSnapshot { .. } => "missing_parent_snapshot",
+            Self::ParentSnapshotEvicted { .. } => "parent_snapshot_evicted",
+            Self::PersistTaskFailed(_) => "persist_task_failed",
+            Self::PersistFailed(_) => "persist_failed",
+        }
+    }
 }
 
 /// Helper function for SeedReporter::report that owns all its inputs.
@@ -125,7 +203,7 @@ async fn handle_finalized_update<E, P>(
     match update {
         Update::Tip(..) => {}
         Update::Block(block, ack) => {
-            let result = finalize_block(
+            let result = finalize_with_retry(
                 &state,
                 &context,
                 &executor,
@@ -160,12 +238,96 @@ async fn handle_finalized_update<E, P>(
     }
 }
 
+/// Retry wrapper around [`finalize_block`] that retries transient failures
+/// with exponential backoff.
+///
+/// Non-retryable errors (state root mismatch, evicted parent snapshot) are
+/// returned immediately. Transient errors are retried up to
+/// [`MAX_FINALIZATION_ATTEMPTS`] times with delays of 100ms, 200ms, 400ms, etc.
+async fn finalize_with_retry<E, P>(
+    state: &LedgerService,
+    context: &tokio::Context,
+    executor: &E,
+    provider: &P,
+    block_index: Option<&Arc<BlockIndex>>,
+    block: &Block,
+) -> Result<(Option<ExecutionOutcome>, Option<BlockContext>), FinalizationError>
+where
+    E: BlockExecutor<OverlayState<QmdbState>, Tx = Bytes>,
+    P: BlockContextProvider,
+{
+    let digest = block.commitment();
+    let mut last_err = None;
+
+    for attempt in 0..MAX_FINALIZATION_ATTEMPTS {
+        match finalize_block(state, context, executor, provider, block_index, block).await {
+            Ok(result) => {
+                if attempt > 0 {
+                    info!(?digest, attempt, "finalization succeeded after retry");
+                }
+                return Ok(result);
+            }
+            Err(e) if e.is_retryable() && attempt < MAX_FINALIZATION_ATTEMPTS - 1 => {
+                let delay = FINALIZATION_RETRY_BASE * 2u32.pow(attempt);
+                warn!(
+                    ?digest,
+                    attempt = attempt + 1,
+                    max_attempts = MAX_FINALIZATION_ATTEMPTS,
+                    delay_ms = delay.as_millis() as u64,
+                    error = %e,
+                    error_kind = e.metric_label(),
+                    "finalization failed with transient error, retrying"
+                );
+                ::tokio::time::sleep(delay).await;
+                last_err = Some(e);
+            }
+            Err(e) => {
+                // Either non-retryable or final attempt exhausted.
+                error!(
+                    ?digest,
+                    attempt = attempt + 1,
+                    max_attempts = MAX_FINALIZATION_ATTEMPTS,
+                    error = %e,
+                    error_kind = e.metric_label(),
+                    retryable = e.is_retryable(),
+                    block_height = block.height,
+                    parent = ?block.parent(),
+                    state_root = ?block.state_root,
+                    tx_count = block.txs.len(),
+                    "CRITICAL: finalization failed permanently -- \
+                     consensus-agreed block will NOT be persisted to QMDB, \
+                     node state may diverge from the network"
+                );
+                return Err(e);
+            }
+        }
+    }
+
+    // All retryable attempts exhausted (should only reach here if
+    // MAX_FINALIZATION_ATTEMPTS > 0 and the last attempt was retryable).
+    let e = last_err.expect("at least one attempt was made");
+    error!(
+        ?digest,
+        attempts = MAX_FINALIZATION_ATTEMPTS,
+        error = %e,
+        error_kind = e.metric_label(),
+        block_height = block.height,
+        parent = ?block.parent(),
+        state_root = ?block.state_root,
+        tx_count = block.txs.len(),
+        "CRITICAL: finalization retries exhausted -- \
+         consensus-agreed block will NOT be persisted to QMDB, \
+         node state may diverge from the network"
+    );
+    Err(e)
+}
+
 /// Inner helper that performs the fallible finalization work for a single block.
 ///
 /// Returns `Ok((execution_outcome, execution_context))` on success, where the
 /// inner `Option`s may be `None` when a cached snapshot was reused without
-/// re-execution.  Returns `Err(())` when a fatal error is encountered (already
-/// logged inside this function).
+/// re-execution. Returns a typed [`FinalizationError`] on failure so the
+/// caller can decide whether to retry.
 async fn finalize_block<E, P>(
     state: &LedgerService,
     context: &tokio::Context,
@@ -173,7 +335,7 @@ async fn finalize_block<E, P>(
     provider: &P,
     block_index: Option<&Arc<BlockIndex>>,
     block: &Block,
-) -> Result<(Option<ExecutionOutcome>, Option<BlockContext>), ()>
+) -> Result<(Option<ExecutionOutcome>, Option<BlockContext>), FinalizationError>
 where
     E: BlockExecutor<OverlayState<QmdbState>, Tx = Bytes>,
     P: BlockContextProvider,
@@ -192,39 +354,21 @@ where
         let parent_digest = block.parent();
         if let Some(parent_snapshot) = state.parent_snapshot(parent_digest).await {
             let block_context = provider.context(block);
-            let execution = match BlockExecution::execute(
-                &parent_snapshot,
-                executor,
-                &block_context,
-                &block.txs,
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(err) => {
-                    error!(?digest, error = ?err, "failed to execute finalized block");
-                    return Err(());
-                }
-            };
+            let execution =
+                BlockExecution::execute(&parent_snapshot, executor, &block_context, &block.txs)
+                    .await
+                    .map_err(|err| FinalizationError::ExecutionFailed(Box::new(err)))?;
 
-            let state_root = match state
+            let state_root = state
                 .compute_root_from_store(parent_digest, execution.outcome.changes.clone())
                 .await
-            {
-                Ok(root) => root,
-                Err(err) => {
-                    error!(?digest, error = ?err, "failed to compute qmdb root");
-                    return Err(());
-                }
-            };
+                .map_err(FinalizationError::RootComputationFailed)?;
+
             if state_root != block.state_root {
-                warn!(
-                    ?digest,
-                    expected = ?block.state_root,
-                    computed = ?state_root,
-                    "state root mismatch for finalized block"
-                );
-                return Err(());
+                return Err(FinalizationError::StateRootMismatch {
+                    expected: block.state_root,
+                    computed: state_root,
+                });
             }
 
             if !snapshot_exists {
@@ -252,8 +396,14 @@ where
                 "missing parent snapshot for cached finalized block; skipping RPC indexing replay"
             );
         } else {
-            error!(?digest, ?parent_digest, "missing parent snapshot for finalized block");
-            return Err(());
+            // Distinguish: was the parent persisted-then-evicted, or never present?
+            return if state.is_snapshot_persisted(&parent_digest).await {
+                // Persisted then evicted -- snapshot data is gone, retry is futile.
+                Err(FinalizationError::ParentSnapshotEvicted { digest, parent_digest })
+            } else {
+                // Never seen -- may still be arriving (catch-up race), retryable.
+                Err(FinalizationError::MissingParentSnapshot { digest, parent_digest })
+            };
         }
     } else {
         trace!(?digest, "using cached snapshot for finalized block");
@@ -263,16 +413,11 @@ where
         .clone()
         .shared(true)
         .spawn(move |_| async move { persist_state.persist_snapshot(digest).await });
-    let persist_result = match persist_handle.await {
-        Ok(result) => result,
-        Err(err) => {
-            error!(?digest, error = ?err, "persist task failed");
-            return Err(());
-        }
-    };
+    let persist_result = persist_handle
+        .await
+        .map_err(|err| FinalizationError::PersistTaskFailed(format!("{err}")))?;
     if let Err(err) = persist_result {
-        error!(?digest, error = ?err, "failed to persist finalized block");
-        return Err(());
+        return Err(FinalizationError::PersistFailed(err));
     }
 
     Ok((execution_outcome, execution_context))
@@ -382,13 +527,16 @@ mod finalize_error_tests {
         }
     }
 
-    /// Regression test: when `finalize_block` returns `Err(())` (e.g. executor
-    /// failure), `handle_finalized_update` must still prune the mempool and
-    /// acknowledge the update so the node does not stall.
+    /// Regression test: when finalization fails (e.g. executor failure),
+    /// `handle_finalized_update` must still prune the mempool and acknowledge
+    /// the update so the node does not stall.
     ///
     /// This covers the bug where early-returns on error paths skipped pruning
     /// and acknowledgement, leading to stale tx re-proposals and marshal
     /// delivery stalls.
+    ///
+    /// Note: with retry logic, execution failures are retried up to 3 times
+    /// before the error is considered permanent.
     #[test]
     fn prune_and_ack_still_run_when_finalization_fails() {
         let runner = tokio::Runner::default();
@@ -413,7 +561,7 @@ mod finalize_error_tests {
             // -- build a block that references genesis as parent --
             // The block's own snapshot does NOT exist in the store, so
             // `finalize_block` will attempt execution (and our FailingExecutor
-            // will cause it to return Err(())).
+            // will cause it to return Err(FinalizationError::ExecutionFailed)).
             let block = Block {
                 parent: genesis.id(),
                 height: 1,
@@ -553,6 +701,7 @@ mod finalize_success_tests {
                 StubProvider,
                 None,
                 None,
+                None,
                 Update::Block(block.clone(), ack),
             )
             .await;
@@ -614,6 +763,7 @@ mod finalize_success_tests {
                 EmptySuccessExecutor,
                 StubProvider,
                 Some(index.clone()),
+                None,
                 None,
                 Update::Block(block, ack),
             )

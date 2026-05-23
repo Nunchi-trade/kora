@@ -33,6 +33,12 @@ alloy-consensus.workspace = true
 alloy-eips.workspace = true
 alloy-primitives.workspace = true
 
+# Error handling
+thiserror.workspace = true
+
+# Async
+tokio.workspace = true
+
 # Tracing
 tracing.workspace = true
 

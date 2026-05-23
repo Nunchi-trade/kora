@@ -455,6 +455,13 @@ impl LedgerView {
         let tx_ids: Vec<TxId> = txs.iter().map(Tx::id).collect();
         inner.mempool.prune(&tx_ids);
     }
+
+    /// Returns `true` if the snapshot for `digest` has been persisted to QMDB
+    /// (even if the in-memory snapshot data has since been evicted).
+    pub async fn is_snapshot_persisted(&self, digest: &ConsensusDigest) -> bool {
+        let inner = self.inner.lock().await;
+        inner.snapshots.is_persisted(digest)
+    }
 }
 
 /// Domain service that exposes high-level ledger commands.
@@ -598,6 +605,12 @@ impl LedgerService {
     /// Remove transactions from the mempool.
     pub async fn prune_mempool(&self, txs: &[Tx]) {
         self.view.prune_mempool(txs).await;
+    }
+
+    /// Returns `true` if the snapshot for `digest` has been persisted to QMDB
+    /// (even if the in-memory snapshot data has since been evicted).
+    pub async fn is_snapshot_persisted(&self, digest: &ConsensusDigest) -> bool {
+        self.view.is_snapshot_persisted(digest).await
     }
 }
 
