@@ -34,6 +34,9 @@ futures.workspace = true
 # Error handling
 thiserror.workspace = true
 
+# Logging
+tracing.workspace = true
+
 [dev-dependencies]
 # Local crates
 kora-config = { path = "../config" }

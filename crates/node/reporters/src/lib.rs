@@ -226,14 +226,27 @@ async fn handle_finalized_update<E, P>(
                 }
             }
 
+            // Marshal waits for the application to acknowledge processing before advancing the
+            // delivery floor. Acknowledge first so consensus delivery is not blocked by
+            // potentially expensive mempool pruning (which involves QMDB lookups).
+            ack.acknowledge();
+
             // Always prune the mempool regardless of whether finalization succeeded.
             // The block is consensus-finalized, so its transactions must never be
             // re-proposed even if local execution or persistence failed.
             state.prune_mempool(&block.txs).await;
+
+            // After pruning included transactions, also evict any remaining
+            // transactions whose nonces are now stale relative to finalized
+            // state.  This catches transactions from senders whose nonces
+            // advanced in the finalized block but whose specific transactions
+            // were not the ones included (e.g. the same nonce was fulfilled
+            // by a different transaction).
+            if result.is_ok() {
+                state.prune_stale_nonces().await;
+            }
+
             publish_mempool_inclusions(mempool_broadcast.as_ref(), &block);
-            // Marshal waits for the application to acknowledge processing before advancing the
-            // delivery floor. Without this, the node can stall on finalized block delivery.
-            ack.acknowledge();
         }
     }
 }
