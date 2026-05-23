@@ -3464,6 +3464,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kora-metrics"
+version = "0.1.0"
+dependencies = [
+ "prometheus-client",
+]
+
+[[package]]
 name = "kora-overlay"
 version = "0.1.0"
 dependencies = [
@@ -3517,6 +3524,7 @@ dependencies = [
  "kora-executor",
  "kora-indexer",
  "kora-ledger",
+ "kora-metrics",
  "kora-overlay",
  "kora-qmdb-ledger",
  "kora-rpc",
@@ -3571,6 +3579,7 @@ dependencies = [
  "commonware-storage",
  "commonware-utils",
  "futures",
+ "governor",
  "hex",
  "kora-config",
  "kora-consensus",
@@ -3580,6 +3589,7 @@ dependencies = [
  "kora-indexer",
  "kora-ledger",
  "kora-marshal",
+ "kora-metrics",
  "kora-overlay",
  "kora-qmdb-ledger",
  "kora-reporters",
@@ -3589,6 +3599,7 @@ dependencies = [
  "kora-transport",
  "kora-txpool",
  "parking_lot",
+ "prometheus-client",
  "rand 0.8.6",
  "tempfile",
  "tokio",
@@ -3684,6 +3695,7 @@ dependencies = [
  "alloy-rlp",
  "k256",
  "kora-domain",
+ "kora-metrics",
  "kora-traits",
  "parking_lot",
  "rand 0.8.6",

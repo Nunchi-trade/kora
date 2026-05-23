@@ -68,6 +68,7 @@ x-validator-common: &validator-common
     - RUST_LOG=${RUST_LOG:-info}
     - CHAIN_ID=${CHAIN_ID:-1337}
     - KORA_RUNTIME_DIR=${KORA_RUNTIME_DIR:-/runtime}
+    - KORA_CHECKPOINT_INTERVAL=${KORA_CHECKPOINT_INTERVAL:-256}
     - TX_GOSSIP=${TX_GOSSIP:-true}
     - HEALTHCHECK_MODE=ready
 
@@ -87,7 +88,7 @@ services:
           --chain-id=${CHAIN_ID:-1337} \
           --output-dir=/shared && \
         echo "[init] Setting permissions..." && \
-        chown -R 1000:1000 /shared/node0 /shared/node1 /shared/node2 /shared/node3 /shared/secondary0 && \
+        chown -R 1000:1000 /shared/node0 /shared/node1 /shared/node2 /shared/node3 /shared/secondary0 /barrier && \
         echo "[init] Setup complete (run DKG ceremony next)"
     volumes:
       - shared_config:/shared
@@ -123,7 +124,7 @@ services:
           --threshold=3 \
           --output-dir=/shared && \
         echo "[init] Setting permissions..." && \
-        chown -R 1000:1000 /shared/node0 /shared/node1 /shared/node2 /shared/node3 /shared/secondary0 && \
+        chown -R 1000:1000 /shared/node0 /shared/node1 /shared/node2 /shared/node3 /shared/secondary0 /barrier && \
         echo "[init] Init complete"
     volumes:
       - shared_config:/shared
@@ -237,6 +238,7 @@ services:
       - RUST_LOG=${RUST_LOG:-info}
       - CHAIN_ID=${CHAIN_ID:-1337}
       - KORA_RUNTIME_DIR=${KORA_RUNTIME_DIR:-/runtime}
+      - KORA_CHECKPOINT_INTERVAL=${KORA_CHECKPOINT_INTERVAL:-256}
       - VALIDATOR_INDEX=0
       - VALIDATOR_COUNT=4
       - IS_BOOTSTRAP=true
@@ -263,6 +265,7 @@ services:
       - RUST_LOG=${RUST_LOG:-info}
       - CHAIN_ID=${CHAIN_ID:-1337}
       - KORA_RUNTIME_DIR=${KORA_RUNTIME_DIR:-/runtime}
+      - KORA_CHECKPOINT_INTERVAL=${KORA_CHECKPOINT_INTERVAL:-256}
       - VALIDATOR_INDEX=1
       - VALIDATOR_COUNT=4
       - IS_BOOTSTRAP=false
@@ -290,6 +293,7 @@ services:
       - RUST_LOG=${RUST_LOG:-info}
       - CHAIN_ID=${CHAIN_ID:-1337}
       - KORA_RUNTIME_DIR=${KORA_RUNTIME_DIR:-/runtime}
+      - KORA_CHECKPOINT_INTERVAL=${KORA_CHECKPOINT_INTERVAL:-256}
       - VALIDATOR_INDEX=2
       - VALIDATOR_COUNT=4
       - IS_BOOTSTRAP=false
@@ -317,6 +321,7 @@ services:
       - RUST_LOG=${RUST_LOG:-info}
       - CHAIN_ID=${CHAIN_ID:-1337}
       - KORA_RUNTIME_DIR=${KORA_RUNTIME_DIR:-/runtime}
+      - KORA_CHECKPOINT_INTERVAL=${KORA_CHECKPOINT_INTERVAL:-256}
       - VALIDATOR_INDEX=3
       - VALIDATOR_COUNT=4
       - IS_BOOTSTRAP=false
@@ -343,6 +348,7 @@ services:
       - RUST_LOG=${RUST_LOG:-info}
       - CHAIN_ID=${CHAIN_ID:-1337}
       - KORA_RUNTIME_DIR=${KORA_RUNTIME_DIR:-/runtime}
+      - KORA_CHECKPOINT_INTERVAL=${KORA_CHECKPOINT_INTERVAL:-256}
       - IS_BOOTSTRAP=false
       - BOOTSTRAP_PEERS=node0:30303
       - HEALTHCHECK_MODE=p2p

@@ -6,7 +6,12 @@
 
 mod gc_log;
 
-use std::{fmt, marker::PhantomData, sync::Arc, time::Duration};
+use std::{
+    fmt,
+    marker::PhantomData,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use alloy_consensus::{
     Transaction as _, TxEnvelope,
@@ -24,7 +29,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{Committable as _, bls12381::primitives::variant::Variant};
 use commonware_runtime::{Spawner as _, tokio};
-use commonware_utils::acknowledgement::Acknowledgement as _;
+use commonware_utils::acknowledgement::{Acknowledgement as _, Exact};
 pub use gc_log::SelfdestructGcLog;
 use kora_consensus::BlockExecution;
 use kora_domain::{Block, ConsensusDigest, MempoolEvent, PublicKey, StateRoot};
@@ -49,6 +54,9 @@ const MAX_FINALIZATION_ATTEMPTS: u32 = 3;
 
 /// Base delay between retry attempts (doubles each attempt: 100ms, 200ms, 400ms).
 const FINALIZATION_RETRY_BASE: Duration = Duration::from_millis(100);
+
+/// Default QMDB checkpoint cadence. A value of 1 preserves per-block persistence.
+const DEFAULT_CHECKPOINT_INTERVAL: u64 = 1;
 
 /// Errors that can occur during block finalization.
 ///
@@ -197,6 +205,8 @@ async fn handle_finalized_update<E, P>(
     mempool_broadcast: Option<MempoolEventSender>,
     gc_log: Option<Arc<SelfdestructGcLog>>,
     metrics: Option<AppMetrics>,
+    checkpoint_interval: u64,
+    pending_acks: Arc<Mutex<Vec<Exact>>>,
     update: Update<Block>,
 ) where
     E: BlockExecutor<OverlayState<QmdbState>, Tx = Bytes>,
@@ -205,6 +215,8 @@ async fn handle_finalized_update<E, P>(
     match update {
         Update::Tip(..) => {}
         Update::Block(block, ack) => {
+            let persist_checkpoint =
+                checkpoint_interval <= 1 || block.height % checkpoint_interval == 0;
             let result = finalize_with_retry(
                 &state,
                 &context,
@@ -212,6 +224,7 @@ async fn handle_finalized_update<E, P>(
                 &provider,
                 block_index.as_ref(),
                 &block,
+                persist_checkpoint,
             )
             .await;
 
@@ -237,10 +250,7 @@ async fn handle_finalized_update<E, P>(
                 }
             }
 
-            // Marshal waits for the application to acknowledge processing before advancing the
-            // delivery floor. Acknowledge first so consensus delivery is not blocked by
-            // potentially expensive mempool pruning (which involves QMDB lookups).
-            ack.acknowledge();
+            acknowledge_checkpoint(pending_acks, block.height, checkpoint_interval, ack).await;
 
             // Always prune the mempool regardless of whether finalization succeeded.
             // The block is consensus-finalized, so its transactions must never be
@@ -262,6 +272,16 @@ async fn handle_finalized_update<E, P>(
     }
 }
 
+async fn acknowledge_checkpoint(
+    pending_acks: Arc<Mutex<Vec<Exact>>>,
+    height: u64,
+    checkpoint_interval: u64,
+    ack: Exact,
+) {
+    let _ = (pending_acks, height, checkpoint_interval);
+    ack.acknowledge();
+}
+
 /// Retry wrapper around [`finalize_block`] that retries transient failures
 /// with exponential backoff.
 ///
@@ -275,6 +295,7 @@ async fn finalize_with_retry<E, P>(
     provider: &P,
     block_index: Option<&Arc<BlockIndex>>,
     block: &Block,
+    persist_checkpoint: bool,
 ) -> Result<(Option<ExecutionOutcome>, Option<BlockContext>), FinalizationError>
 where
     E: BlockExecutor<OverlayState<QmdbState>, Tx = Bytes>,
@@ -284,7 +305,17 @@ where
     let mut last_err = None;
 
     for attempt in 0..MAX_FINALIZATION_ATTEMPTS {
-        match finalize_block(state, context, executor, provider, block_index, block).await {
+        match finalize_block(
+            state,
+            context,
+            executor,
+            provider,
+            block_index,
+            block,
+            persist_checkpoint,
+        )
+        .await
+        {
             Ok(result) => {
                 if attempt > 0 {
                     info!(?digest, attempt, "finalization succeeded after retry");
@@ -359,6 +390,7 @@ async fn finalize_block<E, P>(
     provider: &P,
     block_index: Option<&Arc<BlockIndex>>,
     block: &Block,
+    persist_checkpoint: bool,
 ) -> Result<(Option<ExecutionOutcome>, Option<BlockContext>), FinalizationError>
 where
     E: BlockExecutor<OverlayState<QmdbState>, Tx = Bytes>,
@@ -459,16 +491,18 @@ where
     } else {
         trace!(?digest, "using cached snapshot for finalized block");
     }
-    let persist_state = state.clone();
-    let persist_handle = context
-        .clone()
-        .shared(true)
-        .spawn(move |_| async move { persist_state.persist_snapshot(digest).await });
-    let persist_result = persist_handle
-        .await
-        .map_err(|err| FinalizationError::PersistTaskFailed(format!("{err}")))?;
-    if let Err(err) = persist_result {
-        return Err(FinalizationError::PersistFailed(err));
+    if persist_checkpoint {
+        let persist_state = state.clone();
+        let persist_handle = context
+            .clone()
+            .shared(true)
+            .spawn(move |_| async move { persist_state.persist_snapshot(digest).await });
+        let persist_result = persist_handle
+            .await
+            .map_err(|err| FinalizationError::PersistTaskFailed(format!("{err}")))?;
+        if let Err(err) = persist_result {
+            return Err(FinalizationError::PersistFailed(err));
+        }
     }
 
     Ok((execution_outcome, execution_context))
@@ -638,6 +672,8 @@ mod finalize_error_tests {
                 None,
                 None,
                 None,
+                1,
+                Arc::new(Mutex::new(Vec::new())),
                 Update::Block(block, ack),
             )
             .await;
@@ -761,6 +797,8 @@ mod finalize_success_tests {
                 None,
                 None,
                 None,
+                1,
+                Arc::new(Mutex::new(Vec::new())),
                 Update::Block(block.clone(), ack),
             )
             .await;
@@ -825,6 +863,8 @@ mod finalize_success_tests {
                 None,
                 None,
                 None,
+                1,
+                Arc::new(Mutex::new(Vec::new())),
                 Update::Block(block, ack),
             )
             .await;
@@ -837,6 +877,96 @@ mod finalize_success_tests {
             let indexed_block = indexed.unwrap();
             assert_eq!(indexed_block.number, 1);
             assert_eq!(indexed_block.hash, block_hash);
+        });
+    }
+
+    #[test]
+    fn checkpoint_interval_persists_chain_only_on_boundary() {
+        let runner = tokio::Runner::default();
+        runner.start(|context| async move {
+            let ledger = LedgerView::init(
+                context.clone(),
+                next_partition("reporters-finalize-checkpoint"),
+                Vec::new(),
+            )
+            .await
+            .expect("init ledger");
+            let service = LedgerService::new(ledger);
+            let genesis = service.genesis_block();
+            let genesis_digest = genesis.commitment();
+            let genesis_root =
+                service.query_state_root(genesis_digest).await.expect("genesis state root");
+
+            let block1 = Block {
+                parent: genesis.id(),
+                height: 1,
+                timestamp: 1,
+                prevrandao: B256::ZERO,
+                state_root: genesis_root,
+                txs: Vec::new(),
+            };
+            let block1_digest = block1.commitment();
+            let block1_id = block1.id();
+            let (ack1, waiter1) = Exact::handle();
+            let pending_acks = Arc::new(Mutex::new(Vec::new()));
+
+            handle_finalized_update(
+                service.clone(),
+                context.clone(),
+                EmptySuccessExecutor,
+                StubProvider,
+                None,
+                None,
+                None,
+                None,
+                2,
+                pending_acks.clone(),
+                Update::Block(block1, ack1),
+            )
+            .await;
+
+            assert_eq!(service.query_state_root(block1_digest).await, Some(genesis_root));
+            assert!(
+                !service.is_snapshot_persisted(&block1_digest).await,
+                "height 1 should remain an in-memory snapshot before the checkpoint boundary"
+            );
+
+            let block2 = Block {
+                parent: block1_id,
+                height: 2,
+                timestamp: 2,
+                prevrandao: B256::ZERO,
+                state_root: genesis_root,
+                txs: Vec::new(),
+            };
+            let block2_digest = block2.commitment();
+            let (ack2, waiter2) = Exact::handle();
+
+            handle_finalized_update(
+                service.clone(),
+                context,
+                EmptySuccessExecutor,
+                StubProvider,
+                None,
+                None,
+                None,
+                None,
+                2,
+                pending_acks,
+                Update::Block(block2, ack2),
+            )
+            .await;
+            waiter1.await.expect("first ack must be called at checkpoint");
+            waiter2.await.expect("ack must be called");
+
+            assert!(
+                service.is_snapshot_persisted(&block1_digest).await,
+                "checkpoint should persist unpersisted ancestors"
+            );
+            assert!(
+                service.is_snapshot_persisted(&block2_digest).await,
+                "checkpoint boundary should persist the boundary block"
+            );
         });
     }
 }
@@ -1080,6 +1210,10 @@ pub struct FinalizedReporter<E, P> {
     gc_log: Option<Arc<SelfdestructGcLog>>,
     /// Optional application-level metrics.
     metrics: Option<AppMetrics>,
+    /// Persist QMDB every N finalized blocks.
+    checkpoint_interval: u64,
+    /// Marshal acknowledgements held until the next checkpoint boundary.
+    pending_acks: Arc<Mutex<Vec<Exact>>>,
 }
 
 impl<E, P> fmt::Debug for FinalizedReporter<E, P> {
@@ -1094,12 +1228,7 @@ where
     P: BlockContextProvider,
 {
     /// Create a new finalized reporter.
-    pub const fn new(
-        state: LedgerService,
-        context: tokio::Context,
-        executor: E,
-        provider: P,
-    ) -> Self {
+    pub fn new(state: LedgerService, context: tokio::Context, executor: E, provider: P) -> Self {
         Self {
             state,
             context,
@@ -1109,6 +1238,8 @@ where
             mempool_broadcast: None,
             gc_log: None,
             metrics: None,
+            checkpoint_interval: DEFAULT_CHECKPOINT_INTERVAL,
+            pending_acks: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -1143,6 +1274,13 @@ where
         self.metrics = Some(metrics);
         self
     }
+
+    /// Persist QMDB every `interval` finalized blocks.
+    #[must_use]
+    pub const fn with_checkpoint_interval(mut self, interval: u64) -> Self {
+        self.checkpoint_interval = if interval == 0 { 1 } else { interval };
+        self
+    }
 }
 
 impl<E, P> Reporter for FinalizedReporter<E, P>
@@ -1161,6 +1299,8 @@ where
         let mempool_broadcast = self.mempool_broadcast.clone();
         let gc_log = self.gc_log.clone();
         let metrics = self.metrics.clone();
+        let checkpoint_interval = self.checkpoint_interval;
+        let pending_acks = self.pending_acks.clone();
         async move {
             handle_finalized_update(
                 state,
@@ -1171,6 +1311,8 @@ where
                 mempool_broadcast,
                 gc_log,
                 metrics,
+                checkpoint_interval,
+                pending_acks,
                 update,
             )
             .await;

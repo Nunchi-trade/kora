@@ -107,6 +107,8 @@ struct LedgerState {
     mempool: LedgerMempool,
     /// Execution snapshots indexed by digest so we can replay ancestors.
     snapshots: InMemorySnapshotStore<OverlayState<QmdbState>>,
+    /// Digest of the latest executed snapshot known to the ledger.
+    head: ConsensusDigest,
     /// Cached seeds for each digest used to compute prevrandao.
     seeds: InMemorySeedTracker,
     /// Underlying QMDB ledger service for persistence.
@@ -249,6 +251,7 @@ impl LedgerView {
             inner: Arc::new(Mutex::new(LedgerState {
                 mempool: LedgerMempool::new(PoolConfig::default()),
                 snapshots,
+                head: genesis_digest,
                 seeds: InMemorySeedTracker::new(genesis_digest),
                 qmdb,
             })),
@@ -281,6 +284,16 @@ impl LedgerView {
     pub async fn txpool(&self) -> TransactionPool {
         let inner = self.inner.lock().await;
         inner.mempool.txpool()
+    }
+
+    /// Return an overlay for the latest executed state known to the ledger.
+    pub async fn latest_state(&self) -> OverlayState<QmdbState> {
+        let inner = self.inner.lock().await;
+        inner
+            .snapshots
+            .get(&inner.head)
+            .map(|snapshot| snapshot.state)
+            .unwrap_or_else(|| OverlayState::new(inner.qmdb.state(), QmdbChangeSet::default()))
     }
 
     /// Query a balance at the given digest.
@@ -332,20 +345,22 @@ impl LedgerView {
         qmdb_changes: QmdbChangeSet,
         txs: &[Tx],
     ) {
-        let inner = self.inner.lock().await;
+        let mut inner = self.inner.lock().await;
         let ids = tx_ids(txs);
         inner.snapshots.insert(digest, Snapshot::new(Some(parent), state, root, qmdb_changes, ids));
+        inner.head = digest;
     }
 
     /// Cache a snapshot that has already been constructed.
     pub async fn cache_snapshot(&self, digest: ConsensusDigest, snapshot: LedgerSnapshot) {
-        let inner = self.inner.lock().await;
+        let mut inner = self.inner.lock().await;
         inner.snapshots.insert(digest, snapshot);
+        inner.head = digest;
     }
 
     /// Restore a finalized block as an already-persisted snapshot over the current QMDB state.
     pub async fn restore_persisted_snapshot(&self, block: &Block) {
-        let inner = self.inner.lock().await;
+        let mut inner = self.inner.lock().await;
         let digest = block.commitment();
         let state = OverlayState::new(inner.qmdb.state(), QmdbChangeSet::default());
         let snapshot = Snapshot::new(
@@ -357,6 +372,7 @@ impl LedgerView {
         );
         inner.snapshots.insert(digest, snapshot);
         inner.snapshots.mark_persisted(&[digest]);
+        inner.head = digest;
     }
 
     /// Fetch the components needed to build a proposal.
@@ -546,6 +562,11 @@ impl LedgerService {
     /// Return a handle to the transaction pool.
     pub async fn txpool(&self) -> TransactionPool {
         self.view.txpool().await
+    }
+
+    /// Return an overlay for the latest executed state known to the ledger.
+    pub async fn latest_state(&self) -> OverlayState<QmdbState> {
+        self.view.latest_state().await
     }
 
     /// Query a balance at the given digest.

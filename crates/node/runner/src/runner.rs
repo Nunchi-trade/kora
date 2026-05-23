@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     ffi::OsString,
     path::{Path, PathBuf},
     sync::Arc,
@@ -10,7 +10,7 @@ use alloy_consensus::Header;
 use alloy_primitives::{Address, B256, keccak256};
 use anyhow::Context as _;
 use commonware_consensus::{
-    Reporters,
+    Block as _, Reporters,
     marshal::{
         core::Mailbox,
         standard::{Inline, Standard},
@@ -29,6 +29,7 @@ use commonware_runtime::{
 use commonware_storage::archive::{Archive, Identifier as ArchiveId};
 use commonware_utils::{NZU64, NZUsize, acknowledgement::Exact, ordered::Set};
 use futures::StreamExt;
+use kora_consensus::BlockExecution;
 use kora_domain::{Block, BlockCfg, BootstrapConfig, ConsensusDigest, LedgerEvent, Tx, TxCfg};
 use kora_executor::{BlockContext, RevmExecutor};
 use kora_indexer::{BlockIndex, IndexedBlock};
@@ -42,7 +43,9 @@ use kora_transport::NetworkTransport;
 use kora_txpool::{PoolConfig, TransactionPool, TransactionValidator};
 use tracing::{debug, error, info, trace, warn};
 
-use crate::{RevmApplication, RunnerError, scheme::ThresholdScheme};
+use crate::{
+    RevmApplication, RunnerError, no_sync_storage::NoSyncStorage, scheme::ThresholdScheme,
+};
 
 /// Adapter that bridges `kora_metrics::MetricsRegister` to the commonware
 /// runtime's `Metrics` trait.
@@ -63,6 +66,8 @@ const EPOCH_LENGTH: u64 = u64::MAX;
 const PARTITION_PREFIX: &str = "kora";
 const TXPOOL_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 const RUNTIME_DIR_ENV: &str = "KORA_RUNTIME_DIR";
+const CHECKPOINT_INTERVAL_ENV: &str = "KORA_CHECKPOINT_INTERVAL";
+const DEFAULT_CHECKPOINT_INTERVAL: u64 = 256;
 
 /// Maximum number of transaction hashes retained in the gossip seen-set.
 /// When the set exceeds this size it is cleared to avoid unbounded memory
@@ -135,6 +140,14 @@ fn runtime_storage_directory_from(data_dir: &Path, override_dir: Option<OsString
     }
 }
 
+fn checkpoint_interval() -> u64 {
+    std::env::var(CHECKPOINT_INTERVAL_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_CHECKPOINT_INTERVAL)
+}
+
 const fn block_codec_cfg(config: &kora_config::ConsensusBlockCodecConfig) -> BlockCfg {
     BlockCfg {
         max_txs: config.max_txs.get(),
@@ -197,7 +210,8 @@ async fn recover_finalized_state<FB, FC>(
     finalizations_by_height: &FC,
     provider: &RevmContextProvider,
     data_dir: &Path,
-) -> anyhow::Result<Option<u64>>
+    chain_id: u64,
+) -> anyhow::Result<Option<(u64, bool)>>
 where
     FB: Archive<Key = ConsensusDigest, Value = Block>,
     FC: Archive<Key = ConsensusDigest, Value = CertArchive>,
@@ -220,7 +234,7 @@ where
     }
 
     let mut recovered = 0u64;
-    let mut head = None;
+    let mut recovered_blocks = BTreeMap::new();
     for (start, end) in block_ranges {
         for height in start..=end {
             let Some(block) = finalized_blocks
@@ -232,28 +246,150 @@ where
             };
 
             index_recovered_block(block_index, &block, provider);
-            head = Some(block);
+            recovered_blocks.insert(height, block);
             recovered += 1;
         }
     }
 
-    let head_height = if let Some(ref head) = head {
-        // Validate the commit marker against the archive head to detect
-        // potential QMDB inconsistencies from a previous crash.
-        validate_commit_marker(data_dir, head);
-
-        ledger.restore_persisted_snapshot(head).await;
+    let head_height = if let Some((_, archive_head)) = recovered_blocks.last_key_value() {
+        let (restored_height, replayed_tail) = restore_checkpoint_and_replay_tail(
+            ledger,
+            &recovered_blocks,
+            provider,
+            data_dir,
+            chain_id,
+        )
+        .await?;
         info!(
-            height = head.height,
+            archive_head_height = archive_head.height,
+            restored_height,
             blocks = recovered,
             "recovered finalized ledger head from archive"
         );
-        Some(head.height)
+        Some((restored_height, replayed_tail))
     } else {
         None
     };
 
     Ok(head_height)
+}
+
+async fn restore_checkpoint_and_replay_tail(
+    ledger: &LedgerService,
+    recovered_blocks: &BTreeMap<u64, Block>,
+    provider: &RevmContextProvider,
+    data_dir: &Path,
+    chain_id: u64,
+) -> anyhow::Result<(u64, bool)> {
+    let Some((_, head)) = recovered_blocks.last_key_value() else {
+        return Ok((0, false));
+    };
+    let marker_digest = crate::commit_marker::read_commit_marker(data_dir);
+    let checkpoint_height = marker_digest.and_then(|marker| {
+        recovered_blocks
+            .iter()
+            .find_map(|(height, block)| (block.commitment() == marker).then_some(*height))
+    });
+
+    match checkpoint_height {
+        Some(height) => {
+            let checkpoint = &recovered_blocks[&height];
+            ledger.restore_persisted_snapshot(checkpoint).await;
+            info!(
+                checkpoint_height = checkpoint.height,
+                archive_head_height = head.height,
+                replay_blocks = recovered_blocks.len().saturating_sub(
+                    recovered_blocks
+                        .keys()
+                        .position(|candidate| *candidate == height)
+                        .map_or(0, |index| index + 1)
+                ),
+                "restored QMDB checkpoint and replaying archive tail"
+            );
+
+            let executor = RevmExecutor::new(chain_id);
+            let mut restored_height = checkpoint.height;
+            let mut restored_digest = checkpoint.commitment();
+            let mut replayed_tail = false;
+            for expected_height in checkpoint.height.saturating_add(1)..=head.height {
+                let Some(block) = recovered_blocks.get(&expected_height) else {
+                    warn!(
+                        expected_height,
+                        archive_head_height = head.height,
+                        restored_height,
+                        "stopping finalized archive replay at durable gap"
+                    );
+                    break;
+                };
+                if block.parent() != restored_digest {
+                    warn!(
+                        expected_height,
+                        restored_height,
+                        expected_parent = ?restored_digest,
+                        actual_parent = ?block.parent(),
+                        "stopping finalized archive replay at non-contiguous parent"
+                    );
+                    break;
+                }
+                replay_finalized_block(ledger, provider, &executor, block).await?;
+                restored_height = block.height;
+                restored_digest = block.commitment();
+                replayed_tail = true;
+            }
+            Ok((restored_height, replayed_tail))
+        }
+        None => {
+            validate_commit_marker(data_dir, head);
+            ledger.restore_persisted_snapshot(head).await;
+            Ok((head.height, false))
+        }
+    }
+}
+
+async fn replay_finalized_block(
+    ledger: &LedgerService,
+    provider: &RevmContextProvider,
+    executor: &RevmExecutor,
+    block: &Block,
+) -> anyhow::Result<()> {
+    let digest = block.commitment();
+    if ledger.query_state_root(digest).await.is_some() {
+        return Ok(());
+    }
+
+    let parent_digest = block.parent();
+    let parent_snapshot = ledger.parent_snapshot(parent_digest).await.with_context(|| {
+        format!("missing parent snapshot while replaying height {}", block.height)
+    })?;
+    let block_context = provider.context(block);
+    let execution = BlockExecution::execute(&parent_snapshot, executor, &block_context, &block.txs)
+        .await
+        .with_context(|| format!("failed to replay finalized block at height {}", block.height))?;
+    let state_root = ledger
+        .compute_root_from_store(parent_digest, execution.outcome.changes.clone())
+        .await
+        .with_context(|| format!("failed to compute replay root at height {}", block.height))?;
+    anyhow::ensure!(
+        state_root == block.state_root,
+        "replayed root mismatch at height {}: expected {:?}, computed {:?}",
+        block.height,
+        block.state_root,
+        state_root
+    );
+
+    let merged_changes = parent_snapshot.state.merge_changes(execution.outcome.changes.clone());
+    let next_state = kora_overlay::OverlayState::new(parent_snapshot.state.base(), merged_changes);
+    ledger
+        .insert_snapshot(
+            digest,
+            parent_digest,
+            next_state,
+            state_root,
+            execution.outcome.changes,
+            &block.txs,
+        )
+        .await;
+    Ok(())
 }
 
 /// Pre-populate the in-memory snapshot cache by restoring recent finalized
@@ -649,20 +785,25 @@ impl NodeRunner for ProductionRunner {
         let strategy = context
             .create_strategy(NZUsize!(2))
             .map_err(|e| anyhow::anyhow!("failed to create signature strategy: {e}"))?;
+        let checkpoint_interval = checkpoint_interval();
+        info!(checkpoint_interval, "configured finalized archive and QMDB checkpoint interval");
 
         <ThresholdScheme as commonware_cryptography::certificate::Scheme>::certificate_codec_config_unbounded();
-        let finalizations_by_height = ArchiveInitializer::init::<_, ConsensusDigest, CertArchive>(
-            context.with_label("finalizations_by_height"),
-            format!("{partition_prefix}-finalizations-by-height"),
-            (),
-        )
-        .await
-        .context("init finalizations archive")?;
+        let finalizations_by_height =
+            ArchiveInitializer::init_checkpointed::<_, ConsensusDigest, CertArchive>(
+                context.with_label("finalizations_by_height"),
+                format!("{partition_prefix}-finalizations-by-height"),
+                (),
+                checkpoint_interval,
+            )
+            .await
+            .context("init finalizations archive")?;
 
-        let finalized_blocks = ArchiveInitializer::init::<_, ConsensusDigest, Block>(
+        let finalized_blocks = ArchiveInitializer::init_checkpointed::<_, ConsensusDigest, Block>(
             context.with_label("finalized_blocks"),
             format!("{partition_prefix}-finalized-blocks"),
             block_cfg,
+            checkpoint_interval,
         )
         .await
         .context("init blocks archive")?;
@@ -793,6 +934,7 @@ impl NodeRunner for ProductionRunner {
             &finalizations_by_height,
             &context_provider,
             &config.data_dir,
+            self.chain_id,
         )
         .await
         .context("recover finalized state")?;
@@ -802,7 +944,9 @@ impl NodeRunner for ProductionRunner {
         // snapshot. Without this, only the HEAD snapshot exists after
         // recovery, and verify_block would fail for any block whose parent
         // is not HEAD.
-        if let Some(head_height) = recovered_head_height {
+        if let Some((head_height, replayed_tail)) = recovered_head_height
+            && !replayed_tail
+        {
             prepopulate_snapshot_cache(
                 &ledger,
                 &finalized_blocks,
@@ -821,20 +965,19 @@ impl NodeRunner for ProductionRunner {
             let indexed_provider =
                 kora_rpc::IndexedStateProvider::new(block_index.clone(), qmdb_state, rpc_executor);
             let tx_ledger = ledger.clone();
-            let tx_state = state.qmdb_state().await;
             let chain_id = self.chain_id;
             let tx_pool = txpool.clone();
             let gossip_tx = gossip_outbound_tx.clone();
             let gossip_seen_rpc = gossip_seen.clone();
             let tx_submit: kora_rpc::TxSubmitCallback = Arc::new(move |data| {
                 let ledger = tx_ledger.clone();
-                let state = tx_state.clone();
                 let pool = tx_pool.clone();
                 let gossip = gossip_tx.clone();
                 let seen = gossip_seen_rpc.clone();
                 Box::pin(async move {
                     let tx = Tx::new(data.clone());
                     let tx_id = tx.id();
+                    let state = ledger.latest_state().await;
                     let validator =
                         TransactionValidator::new(chain_id, state, PoolConfig::default())
                             .with_pool(pool);
@@ -931,7 +1074,8 @@ impl NodeRunner for ProductionRunner {
             context_provider,
         )
         .with_block_index(block_index)
-        .with_metrics(app_metrics.clone());
+        .with_metrics(app_metrics.clone())
+        .with_checkpoint_interval(checkpoint_interval);
         if let Some(sender) = mempool_broadcast {
             finalized_reporter = finalized_reporter.with_mempool_broadcast(sender);
         }
@@ -971,9 +1115,10 @@ impl NodeRunner for ProductionRunner {
         );
         let broadcast_handle = broadcast_engine.start(transport.marshal.blocks);
 
+        let scratch_context = NoSyncStorage::new(context.clone(), checkpoint_interval);
         let (actor, marshal_mailbox, _last_processed_height) =
             kora_marshal::ActorInitializer::init_with_strategy::<_, Block, _, _, _, Exact, _>(
-                context.clone(),
+                scratch_context.clone(),
                 finalizations_by_height,
                 finalized_blocks,
                 scheme_provider,
@@ -993,14 +1138,18 @@ impl NodeRunner for ProductionRunner {
             gas_limit,
         );
         app = app.with_metrics(app_metrics);
-        if let Some(height) = recovered_head_height {
+        if let Some((height, _)) = recovered_head_height {
             app = app.with_recovered_height(height);
         }
         if let Some((state, _)) = &self.rpc_config {
             app = app.with_node_state(state.clone());
         }
-        let marshaled =
-            Inline::new(context.with_label("marshaled"), app, marshal_mailbox.clone(), epocher);
+        let marshaled = Inline::new(
+            scratch_context.with_label("marshaled"),
+            app,
+            marshal_mailbox.clone(),
+            epocher,
+        );
 
         let seed_reporter = SeedReporter::<MinSig>::new(ledger.clone());
         let node_state_reporter = self
@@ -1018,7 +1167,7 @@ impl NodeRunner for ProductionRunner {
         }
 
         let engine = simplex::Engine::new(
-            context.with_label("engine"),
+            scratch_context.with_label("engine"),
             simplex::Config {
                 scheme: self.scheme.clone(),
                 elector: Random,

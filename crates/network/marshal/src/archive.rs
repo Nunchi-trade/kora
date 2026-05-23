@@ -3,9 +3,242 @@
 use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 
 use commonware_codec::Codec;
+use commonware_consensus::{
+    Block,
+    marshal::store::{Blocks, Certificates},
+    simplex::types::Finalization,
+    types::Height,
+};
+use commonware_cryptography::{Digest, Digestible, certificate::Scheme};
 use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner, Storage, buffer::paged::CacheRef};
-use commonware_storage::archive::immutable::{Archive, Config};
+use commonware_storage::archive::{
+    Archive as ArchiveTrait, Error as ArchiveError, Identifier,
+    immutable::{Archive, Config},
+};
 use commonware_utils::{NZU16, NZU64, NZUsize, sequence::Array};
+
+/// Immutable archive wrapper that only durably syncs on checkpoint boundaries.
+///
+/// `put` still updates the in-memory archive immediately, so marshal can serve
+/// and query freshly finalized blocks. `sync` is forwarded to disk only when the
+/// highest dirty height is divisible by `checkpoint_interval`.
+#[derive(Debug)]
+pub struct CheckpointedArchive<A> {
+    inner: A,
+    checkpoint_interval: u64,
+    highest_dirty: Option<u64>,
+}
+
+impl<A> CheckpointedArchive<A> {
+    /// Create a checkpointed archive around an existing archive.
+    pub const fn new(inner: A, checkpoint_interval: u64) -> Self {
+        Self { inner, checkpoint_interval, highest_dirty: None }
+    }
+
+    fn mark_dirty(&mut self, height: u64) {
+        self.highest_dirty =
+            Some(self.highest_dirty.map_or(height, |existing| existing.max(height)));
+    }
+
+    fn should_sync(&self) -> bool
+    where
+        A: ArchiveTrait,
+    {
+        match self.highest_dirty {
+            Some(height) if self.checkpoint_interval <= 1 => self.is_contiguous_through(height),
+            Some(height) => {
+                height % self.checkpoint_interval == 0 && self.is_contiguous_through(height)
+            }
+            None => false,
+        }
+    }
+
+    fn is_contiguous_through(&self, target: u64) -> bool
+    where
+        A: ArchiveTrait,
+    {
+        let mut expected_start = None;
+
+        for (start, end) in self.inner.ranges() {
+            let Some(expected) = expected_start else {
+                if start > target {
+                    return false;
+                }
+                if end >= target {
+                    return true;
+                }
+                expected_start = end.checked_add(1);
+                continue;
+            };
+
+            if start > expected {
+                return false;
+            }
+            if end >= target {
+                return true;
+            }
+            expected_start = end.checked_add(1);
+        }
+
+        false
+    }
+}
+
+impl<A> ArchiveTrait for CheckpointedArchive<A>
+where
+    A: ArchiveTrait + Sync,
+{
+    type Key = A::Key;
+    type Value = A::Value;
+
+    async fn put(
+        &mut self,
+        index: u64,
+        key: Self::Key,
+        value: Self::Value,
+    ) -> Result<(), ArchiveError> {
+        self.inner.put(index, key, value).await?;
+        self.mark_dirty(index);
+        Ok(())
+    }
+
+    async fn get<'a>(
+        &'a self,
+        identifier: Identifier<'a, Self::Key>,
+    ) -> Result<Option<Self::Value>, ArchiveError> {
+        self.inner.get(identifier).await
+    }
+
+    async fn has<'a>(
+        &'a self,
+        identifier: Identifier<'a, Self::Key>,
+    ) -> Result<bool, ArchiveError> {
+        self.inner.has(identifier).await
+    }
+
+    fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
+        self.inner.next_gap(index)
+    }
+
+    fn missing_items(&self, index: u64, max: usize) -> Vec<u64> {
+        self.inner.missing_items(index, max)
+    }
+
+    fn ranges(&self) -> impl Iterator<Item = (u64, u64)> {
+        self.inner.ranges()
+    }
+
+    fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> {
+        self.inner.ranges_from(from)
+    }
+
+    fn first_index(&self) -> Option<u64> {
+        self.inner.first_index()
+    }
+
+    fn last_index(&self) -> Option<u64> {
+        self.inner.last_index()
+    }
+
+    async fn sync(&mut self) -> Result<(), ArchiveError> {
+        if self.should_sync() {
+            self.inner.sync().await?;
+            self.highest_dirty = None;
+        }
+        Ok(())
+    }
+
+    async fn destroy(self) -> Result<(), ArchiveError> {
+        self.inner.destroy().await
+    }
+}
+
+impl<A, B, C, S> Certificates for CheckpointedArchive<A>
+where
+    A: ArchiveTrait<Key = B, Value = Finalization<S, C>> + Send + Sync + 'static,
+    B: Digest,
+    C: Digest,
+    S: Scheme,
+{
+    type BlockDigest = B;
+    type Commitment = C;
+    type Scheme = S;
+    type Error = ArchiveError;
+
+    async fn put(
+        &mut self,
+        height: Height,
+        digest: Self::BlockDigest,
+        finalization: Finalization<Self::Scheme, Self::Commitment>,
+    ) -> Result<(), Self::Error> {
+        ArchiveTrait::put(self, height.get(), digest, finalization).await
+    }
+
+    async fn sync(&mut self) -> Result<(), Self::Error> {
+        ArchiveTrait::sync(self).await
+    }
+
+    async fn get(
+        &self,
+        id: Identifier<'_, Self::BlockDigest>,
+    ) -> Result<Option<Finalization<Self::Scheme, Self::Commitment>>, Self::Error> {
+        ArchiveTrait::get(self, id).await
+    }
+
+    async fn prune(&mut self, _: Height) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn last_index(&self) -> Option<Height> {
+        ArchiveTrait::last_index(self).map(Height::new)
+    }
+
+    fn ranges_from(&self, from: Height) -> impl Iterator<Item = (Height, Height)> {
+        ArchiveTrait::ranges_from(self, from.get())
+            .map(|(start, end)| (Height::new(start), Height::new(end)))
+    }
+}
+
+impl<A, B> Blocks for CheckpointedArchive<A>
+where
+    A: ArchiveTrait<Key = B::Digest, Value = B> + Send + Sync + 'static,
+    B: Block,
+{
+    type Block = B;
+    type Error = ArchiveError;
+
+    async fn put(&mut self, block: Self::Block) -> Result<(), Self::Error> {
+        ArchiveTrait::put(self, block.height().get(), block.digest(), block).await
+    }
+
+    async fn sync(&mut self) -> Result<(), Self::Error> {
+        ArchiveTrait::sync(self).await
+    }
+
+    async fn get(
+        &self,
+        id: Identifier<'_, <Self::Block as Digestible>::Digest>,
+    ) -> Result<Option<Self::Block>, Self::Error> {
+        ArchiveTrait::get(self, id).await
+    }
+
+    async fn prune(&mut self, _: Height) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn missing_items(&self, start: Height, max: usize) -> Vec<Height> {
+        ArchiveTrait::missing_items(self, start.get(), max).into_iter().map(Height::new).collect()
+    }
+
+    fn next_gap(&self, value: Height) -> (Option<Height>, Option<Height>) {
+        let (current, next) = ArchiveTrait::next_gap(self, value.get());
+        (current.map(Height::new), next.map(Height::new))
+    }
+
+    fn last_index(&self) -> Option<Height> {
+        ArchiveTrait::last_index(self).map(Height::new)
+    }
+}
 
 /// Initializes immutable archive storage with sensible defaults.
 #[derive(Debug, Clone, Copy)]
@@ -96,6 +329,22 @@ impl ArchiveInitializer {
         Archive::init(ctx, config).await
     }
 
+    /// Initializes an immutable archive wrapped with checkpointed sync behavior.
+    pub async fn init_checkpointed<E, K, V>(
+        ctx: E,
+        partition_prefix: impl Into<String>,
+        codec_config: V::Cfg,
+        checkpoint_interval: u64,
+    ) -> Result<CheckpointedArchive<Archive<E, K, V>>, commonware_storage::archive::Error>
+    where
+        E: BufferPooler + Spawner + Storage + Metrics + Clock + Clone,
+        K: Array,
+        V: Codec + Send + Sync,
+    {
+        let archive = Self::init(ctx, partition_prefix, codec_config).await?;
+        Ok(CheckpointedArchive::new(archive, checkpoint_interval))
+    }
+
     /// Initializes a finalizations archive with the default prefix.
     ///
     /// Uses [`DEFAULT_FINALIZATIONS_PREFIX`](Self::DEFAULT_FINALIZATIONS_PREFIX) as the partition prefix.
@@ -129,7 +378,72 @@ impl ArchiveInitializer {
 
 #[cfg(test)]
 mod tests {
+    use commonware_utils::sequence::Unit;
+
     use super::*;
+
+    #[derive(Debug)]
+    struct FakeArchive {
+        ranges: Vec<(u64, u64)>,
+    }
+
+    impl ArchiveTrait for FakeArchive {
+        type Key = Unit;
+        type Value = u64;
+
+        async fn put(
+            &mut self,
+            index: u64,
+            _: Self::Key,
+            _: Self::Value,
+        ) -> Result<(), ArchiveError> {
+            self.ranges.push((index, index));
+            Ok(())
+        }
+
+        async fn get<'a>(
+            &'a self,
+            _: Identifier<'a, Self::Key>,
+        ) -> Result<Option<Self::Value>, ArchiveError> {
+            Ok(None)
+        }
+
+        async fn has<'a>(&'a self, _: Identifier<'a, Self::Key>) -> Result<bool, ArchiveError> {
+            Ok(false)
+        }
+
+        fn next_gap(&self, _: u64) -> (Option<u64>, Option<u64>) {
+            (None, None)
+        }
+
+        fn missing_items(&self, _: u64, _: usize) -> Vec<u64> {
+            Vec::new()
+        }
+
+        fn ranges(&self) -> impl Iterator<Item = (u64, u64)> {
+            self.ranges.clone().into_iter()
+        }
+
+        fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> {
+            self.ranges.clone().into_iter().filter(move |(_, end)| *end >= from)
+        }
+
+        fn first_index(&self) -> Option<u64> {
+            self.ranges.first().map(|(start, _)| *start)
+        }
+
+        fn last_index(&self) -> Option<u64> {
+            self.ranges.last().map(|(_, end)| *end)
+        }
+
+        async fn sync(&mut self) -> Result<(), ArchiveError> {
+            Ok(())
+        }
+
+        async fn destroy(self) -> Result<(), ArchiveError> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn test_defaults() {
@@ -145,5 +459,39 @@ mod tests {
         assert_eq!(ArchiveInitializer::DEFAULT_PAGE_CACHE_SIZE.get(), 8_192);
         assert_eq!(ArchiveInitializer::DEFAULT_FINALIZATIONS_PREFIX, "finalizations");
         assert_eq!(ArchiveInitializer::DEFAULT_BLOCKS_PREFIX, "blocks");
+    }
+
+    #[test]
+    fn checkpointed_archive_syncs_only_on_boundary() {
+        let inner = FakeArchive { ranges: vec![(1, 64)] };
+        let mut archive = CheckpointedArchive::new(inner, 64);
+
+        assert!(!archive.should_sync());
+
+        archive.mark_dirty(63);
+        assert!(!archive.should_sync());
+
+        archive.mark_dirty(64);
+        assert!(archive.should_sync());
+    }
+
+    #[test]
+    fn checkpointed_archive_interval_one_preserves_default_sync_behavior() {
+        let inner = FakeArchive { ranges: vec![(1, 7)] };
+        let mut archive = CheckpointedArchive::new(inner, 1);
+
+        assert!(!archive.should_sync());
+
+        archive.mark_dirty(7);
+        assert!(archive.should_sync());
+    }
+
+    #[test]
+    fn checkpointed_archive_does_not_sync_sparse_boundary() {
+        let inner = FakeArchive { ranges: vec![(1, 32), (34, 64)] };
+        let mut archive = CheckpointedArchive::new(inner, 64);
+
+        archive.mark_dirty(64);
+        assert!(!archive.should_sync());
     }
 }
