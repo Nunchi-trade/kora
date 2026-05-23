@@ -116,26 +116,46 @@ case "$MODE" in
         log "DKG key fingerprints: share.key=${SHARE_KEY_HASH} output.json=${OUTPUT_HASH}"
 
         cp "${SHARED_DIR}/genesis.json" "${DATA_DIR}/" 2>/dev/null || true
+
+        # Detect whether this is a first startup or a restart by checking
+        # for the commit marker on the persistent /data volume. If it exists,
+        # the node has finalized at least one block previously and does not
+        # need the bootstrap peer or the startup barrier to proceed.
+        # DO NOT use archive or QMDB paths -- those live on tmpfs (/runtime)
+        # and are wiped on every container restart.
+        if [[ -f "${DATA_DIR}/last_committed_digest" ]]; then
+            log "Restart detected (last_committed_digest exists), skipping barrier and bootstrap wait"
+        else
+            # First startup -- wait for all validators to be ready before
+            # starting consensus. This prevents height drift caused by
+            # staggered startup: if the bootstrap node enters consensus
+            # minutes before the others, it advances heights alone and
+            # later leaders return None from propose() because they lack
+            # the parent snapshot.
+            wait_for_barrier "$VALIDATOR_COUNT"
+
+            if [[ "$IS_BOOTSTRAP" != "true" && -n "$BOOTSTRAP_PEERS" ]]; then
+                BOOTSTRAP_HOST=$(echo "$BOOTSTRAP_PEERS" | cut -d: -f1)
+                BOOTSTRAP_PORT=$(echo "$BOOTSTRAP_PEERS" | cut -d: -f2)
+
+                log "First startup: waiting for bootstrap peer ${BOOTSTRAP_HOST}:${BOOTSTRAP_PORT}..."
+                timeout=120
+                while ! nc -z "$BOOTSTRAP_HOST" "$BOOTSTRAP_PORT" 2>/dev/null; do
+                    timeout=$((timeout - 1))
+                    [[ $timeout -le 0 ]] && error "Timeout waiting for bootstrap peer"
+                    sleep 1
+                done
+                log "Bootstrap peer reachable"
+            fi
+        fi
+
         touch "${DATA_DIR}/.ready"
 
-        # Wait for all validators to be ready before starting consensus.
-        # This prevents height drift caused by staggered startup: if the
-        # bootstrap node enters consensus minutes before the others, it
-        # advances heights alone and later leaders return None from
-        # propose() because they lack the parent snapshot.
-        wait_for_barrier "$VALIDATOR_COUNT"
-
-        if [[ "$IS_BOOTSTRAP" != "true" && -n "$BOOTSTRAP_PEERS" ]]; then
-            BOOTSTRAP_HOST=$(echo "$BOOTSTRAP_PEERS" | cut -d: -f1)
-            BOOTSTRAP_PORT=$(echo "$BOOTSTRAP_PEERS" | cut -d: -f2)
-
-            log "Waiting for bootstrap peer ${BOOTSTRAP_HOST}:${BOOTSTRAP_PORT}..."
-            timeout=120
-            while ! nc -z "$BOOTSTRAP_HOST" "$BOOTSTRAP_PORT" 2>/dev/null; do
-                timeout=$((timeout - 1))
-                [[ $timeout -le 0 ]] && error "Timeout waiting for bootstrap peer"
-                sleep 1
-            done
+        TX_GOSSIP=${TX_GOSSIP:-false}
+        GOSSIP_FLAG=""
+        if [[ "$TX_GOSSIP" == "true" ]]; then
+            GOSSIP_FLAG="--tx-gossip"
+            log "Transaction gossip enabled"
         fi
 
         TX_GOSSIP=${TX_GOSSIP:-false}
@@ -159,20 +179,28 @@ case "$MODE" in
         [[ -f "${SHARED_DIR}/peers.json" ]] || error "peers.json not found"
         [[ -f "${DATA_DIR}/validator.key" ]] || error "validator.key not found"
 
-        touch "${DATA_DIR}/.ready"
-
         if [[ "$IS_BOOTSTRAP" != "true" && -n "$BOOTSTRAP_PEERS" ]]; then
             BOOTSTRAP_HOST=$(echo "$BOOTSTRAP_PEERS" | cut -d: -f1)
             BOOTSTRAP_PORT=$(echo "$BOOTSTRAP_PEERS" | cut -d: -f2)
 
-            log "Waiting for bootstrap peer ${BOOTSTRAP_HOST}:${BOOTSTRAP_PORT}..."
-            timeout=120
-            while ! nc -z "$BOOTSTRAP_HOST" "$BOOTSTRAP_PORT" 2>/dev/null; do
-                timeout=$((timeout - 1))
-                [[ $timeout -le 0 ]] && error "Timeout waiting for bootstrap peer"
-                sleep 1
-            done
+            # Only wait for bootstrap on first startup. On restarts, the
+            # P2P layer handles reconnection internally.
+            if [[ ! -f "${DATA_DIR}/.bootstrap_done" ]]; then
+                log "First startup: waiting for bootstrap peer ${BOOTSTRAP_HOST}:${BOOTSTRAP_PORT}..."
+                timeout=120
+                while ! nc -z "$BOOTSTRAP_HOST" "$BOOTSTRAP_PORT" 2>/dev/null; do
+                    timeout=$((timeout - 1))
+                    [[ $timeout -le 0 ]] && error "Timeout waiting for bootstrap peer"
+                    sleep 1
+                done
+                log "Bootstrap peer reachable"
+                touch "${DATA_DIR}/.bootstrap_done"
+            else
+                log "Restart detected (.bootstrap_done exists), skipping bootstrap peer wait"
+            fi
         fi
+
+        touch "${DATA_DIR}/.ready"
 
         exec /usr/local/bin/kora secondary \
             --data-dir "$DATA_DIR" \
