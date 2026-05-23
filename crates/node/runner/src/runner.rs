@@ -960,6 +960,12 @@ impl NodeRunner for ProductionRunner {
             let peer_count = self.scheme.participants().len().saturating_sub(1) as u64;
             node_state.set_peer_count(peer_count);
 
+            // Restore finalized height from archive so the proposal lag guard
+            // in RevmApplication does not reject proposals after a restart.
+            if let Some(last) = finalized_blocks.last_index() {
+                node_state.set_finalized_height(last);
+            }
+
             let qmdb_state = state.qmdb_state().await;
             let rpc_executor = Arc::new(RevmExecutor::new(self.chain_id));
             let indexed_provider =
@@ -1076,6 +1082,9 @@ impl NodeRunner for ProductionRunner {
         .with_block_index(block_index)
         .with_metrics(app_metrics.clone())
         .with_checkpoint_interval(checkpoint_interval);
+        if let Some((state, _)) = &self.rpc_config {
+            finalized_reporter = finalized_reporter.with_node_state(state.clone());
+        }
         if let Some(sender) = mempool_broadcast {
             finalized_reporter = finalized_reporter.with_mempool_broadcast(sender);
         }

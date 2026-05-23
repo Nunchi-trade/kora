@@ -29,6 +29,7 @@ struct NodeStateInner {
     started_at: Instant,
     current_view: AtomicU64,
     finalized_count: AtomicU64,
+    finalized_height: AtomicU64,
     proposed_count: AtomicU64,
     nullified_count: AtomicU64,
     peer_count: AtomicU64,
@@ -68,6 +69,7 @@ impl NodeState {
                 started_at: Instant::now(),
                 current_view: AtomicU64::new(0),
                 finalized_count: AtomicU64::new(0),
+                finalized_height: AtomicU64::new(0),
                 proposed_count: AtomicU64::new(0),
                 nullified_count: AtomicU64::new(0),
                 peer_count: AtomicU64::new(0),
@@ -87,6 +89,18 @@ impl NodeState {
     /// Increment finalized block count.
     pub fn inc_finalized(&self) {
         self.inner.finalized_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Update the latest finalized block height.
+    ///
+    /// Uses `fetch_max` so that out-of-order updates never regress the value.
+    pub fn set_finalized_height(&self, height: u64) {
+        self.inner.finalized_height.fetch_max(height, Ordering::Relaxed);
+    }
+
+    /// Return the latest finalized block height.
+    pub fn finalized_height(&self) -> u64 {
+        self.inner.finalized_height.load(Ordering::Relaxed)
     }
 
     /// Increment proposed block count.
@@ -279,5 +293,21 @@ mod tests {
         let state = NodeState::new(1, 0);
         state.set_peer_count(5);
         assert_eq!(state.status().peer_count, 5);
+    }
+
+    #[test]
+    fn node_state_finalized_height() {
+        let state = NodeState::new(1, 0);
+        assert_eq!(state.finalized_height(), 0);
+
+        state.set_finalized_height(42);
+        assert_eq!(state.finalized_height(), 42);
+
+        // fetch_max ensures height never regresses
+        state.set_finalized_height(10);
+        assert_eq!(state.finalized_height(), 42);
+
+        state.set_finalized_height(100);
+        assert_eq!(state.finalized_height(), 100);
     }
 }

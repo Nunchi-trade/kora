@@ -28,7 +28,11 @@ pub const DEFAULT_SIMPLEX_REPLAY_BUFFER_BYTES: usize = 16 * 1024 * 1024;
 pub const DEFAULT_SIMPLEX_WRITE_BUFFER_BYTES: usize = 16 * 1024 * 1024;
 
 /// Default Simplex leader timeout in seconds.
-pub const DEFAULT_SIMPLEX_LEADER_TIMEOUT_SECS: u64 = 5;
+///
+/// Healthy views complete in ~7ms, so even 1 second provides ample margin.
+/// A lower timeout limits the throughput penalty when a dead leader's turn
+/// is reached in the round-robin schedule.
+pub const DEFAULT_SIMPLEX_LEADER_TIMEOUT_SECS: u64 = 1;
 
 /// Default Simplex certification timeout in seconds.
 pub const DEFAULT_SIMPLEX_CERTIFICATION_TIMEOUT_SECS: u64 = 10;

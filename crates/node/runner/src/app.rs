@@ -39,6 +39,12 @@ const SNAPSHOT_POLL_ATTEMPTS: u32 = 5;
 /// Duration to sleep between successive parent-snapshot poll attempts.
 const SNAPSHOT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
+/// Maximum number of unfinalized blocks a leader may be ahead of the last
+/// finalized height before it voluntarily skips its proposal turn.  This
+/// prevents a single fast leader from racing too far ahead of finalization,
+/// which can cascade into snapshot-miss failures for other validators.
+const MAX_PROPOSAL_LAG: u64 = 8;
+
 fn unix_timestamp_secs<Env: Clock>(env: &Env) -> u64 {
     env.current().duration_since(UNIX_EPOCH).map(|duration| duration.as_secs()).unwrap_or(0)
 }
@@ -491,6 +497,25 @@ where
             let start = Instant::now();
             let parent = ancestry.next().await?;
             let ancestry_elapsed = start.elapsed();
+
+            // Proposal lag guard: if the tip is too far ahead of the last
+            // finalized height, skip this proposal to let finalization catch
+            // up.  This prevents a fast leader from building an unbounded
+            // chain of unfinalized snapshots that other validators cannot
+            // verify in time.
+            if let Some(ref state) = node_state {
+                let finalized = state.finalized_height();
+                if parent.height > finalized + MAX_PROPOSAL_LAG {
+                    warn!(
+                        parent_height = parent.height,
+                        finalized_height = finalized,
+                        max_lag = MAX_PROPOSAL_LAG,
+                        "skipping proposal: parent too far ahead of finalized height"
+                    );
+                    return None;
+                }
+            }
+
             let now_secs = unix_timestamp_secs(&env);
             let timestamp = match Block::next_timestamp(now_secs, parent.timestamp) {
                 Some(ts) => ts,

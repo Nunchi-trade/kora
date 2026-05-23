@@ -207,6 +207,7 @@ async fn handle_finalized_update<E, P>(
     metrics: Option<AppMetrics>,
     checkpoint_interval: u64,
     pending_acks: Arc<Mutex<Vec<Exact>>>,
+    node_state: Option<NodeState>,
     update: Update<Block>,
 ) where
     E: BlockExecutor<OverlayState<QmdbState>, Tx = Bytes>,
@@ -215,6 +216,9 @@ async fn handle_finalized_update<E, P>(
     match update {
         Update::Tip(..) => {}
         Update::Block(block, ack) => {
+            if let Some(ref ns) = node_state {
+                ns.set_finalized_height(block.height);
+            }
             let persist_checkpoint =
                 checkpoint_interval <= 1 || block.height % checkpoint_interval == 0;
             let result = finalize_with_retry(
@@ -672,8 +676,10 @@ mod finalize_error_tests {
                 None,
                 None,
                 None,
+                None,
                 1,
                 Arc::new(Mutex::new(Vec::new())),
+                None,
                 Update::Block(block, ack),
             )
             .await;
@@ -799,6 +805,7 @@ mod finalize_success_tests {
                 None,
                 1,
                 Arc::new(Mutex::new(Vec::new())),
+                None,
                 Update::Block(block.clone(), ack),
             )
             .await;
@@ -865,6 +872,7 @@ mod finalize_success_tests {
                 None,
                 1,
                 Arc::new(Mutex::new(Vec::new())),
+                None,
                 Update::Block(block, ack),
             )
             .await;
@@ -1214,6 +1222,8 @@ pub struct FinalizedReporter<E, P> {
     checkpoint_interval: u64,
     /// Marshal acknowledgements held until the next checkpoint boundary.
     pending_acks: Arc<Mutex<Vec<Exact>>>,
+    /// Optional node state for tracking the latest finalized height.
+    node_state: Option<NodeState>,
 }
 
 impl<E, P> fmt::Debug for FinalizedReporter<E, P> {
@@ -1240,6 +1250,7 @@ where
             metrics: None,
             checkpoint_interval: DEFAULT_CHECKPOINT_INTERVAL,
             pending_acks: Arc::new(Mutex::new(Vec::new())),
+            node_state: None,
         }
     }
 
@@ -1281,6 +1292,13 @@ where
         self.checkpoint_interval = if interval == 0 { 1 } else { interval };
         self
     }
+
+    /// Attach the RPC node state so the reporter can update finalized height.
+    #[must_use]
+    pub fn with_node_state(mut self, node_state: NodeState) -> Self {
+        self.node_state = Some(node_state);
+        self
+    }
 }
 
 impl<E, P> Reporter for FinalizedReporter<E, P>
@@ -1301,6 +1319,7 @@ where
         let metrics = self.metrics.clone();
         let checkpoint_interval = self.checkpoint_interval;
         let pending_acks = self.pending_acks.clone();
+        let node_state = self.node_state.clone();
         async move {
             handle_finalized_update(
                 state,
@@ -1313,6 +1332,7 @@ where
                 metrics,
                 checkpoint_interval,
                 pending_acks,
+                node_state,
                 update,
             )
             .await;

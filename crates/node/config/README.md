@@ -27,7 +27,7 @@ max_tx_bytes = 8388608
 [consensus.simplex]
 replay_buffer_bytes = 16777216
 write_buffer_bytes = 16777216
-leader_timeout_secs = 5
+leader_timeout_secs = 1
 certification_timeout_secs = 10
 timeout_retry_secs = 2
 fetch_timeout_secs = 5

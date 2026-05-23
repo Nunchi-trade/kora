@@ -133,23 +133,23 @@ groups:
     rules:
       # Block build time approaching leader timeout
       - alert: SlowBlockBuild
-        expr: kora:build_duration:p95 > 1
+        expr: kora:build_duration:p95 > 0.5
         for: 2m
         labels:
           severity: warning
         annotations:
           summary: "Block build p95 is {{ $value | humanizeDuration }}"
-          description: "Block build time p95 exceeding 1s (leader timeout is 2s). ECDSA recovery or mempool size may be the cause."
+          description: "Block build time p95 exceeding 500ms (leader timeout is 1s). ECDSA recovery or mempool size may be the cause."
 
       # Block build time critical — will cause nullifications
       - alert: CriticalBlockBuild
-        expr: kora:build_duration:p99 > 1.8
+        expr: kora:build_duration:p99 > 0.8
         for: 1m
         labels:
           severity: critical
         annotations:
           summary: "Block build p99 at {{ $value | humanizeDuration }} — imminent nullifications"
-          description: "Block build is approaching 2s leader timeout. Proposals will fail. Reduce BLOCK_CODEC_MAX_TXS or fix mempool."
+          description: "Block build is approaching 1s leader timeout. Proposals will fail. Reduce BLOCK_CODEC_MAX_TXS or fix mempool."
 
       # Finalization latency degrading
       - alert: HighFinalizationLatency

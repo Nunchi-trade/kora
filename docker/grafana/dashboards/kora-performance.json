@@ -73,7 +73,7 @@
     },
     {
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "description": "Average block build duration. Must stay well under LEADER_TIMEOUT (2s).",
+      "description": "Average block build duration. Must stay well under LEADER_TIMEOUT (1s default).",
       "fieldConfig": {
         "defaults": {
           "thresholds": {"mode": "absolute", "steps": [
