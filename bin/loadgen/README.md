@@ -41,6 +41,7 @@ cargo run --release --bin loadgen -- --total-txs 10000 --dry-run
 | `--chain-id` | `1337` | Chain ID for transactions |
 | `--dry-run` | `false` | Sign transactions without sending |
 | `--verbose` | `false` | Print each transaction hash |
+| `--timeout-secs` | `0` | Overall timeout in seconds (0 = no timeout) |
 
 ## Notes
 
@@ -57,10 +58,23 @@ Sender addresses are deterministically generated from seed bytes:
 
 The loadgen outputs the sender addresses at startup so you can verify which genesis allocations or manual transfers are needed for custom account ranges.
 
+## Resilience
+
+The loadgen handles nonce desynchronization with the chain automatically:
+
+- **Nonce gap** (loadgen ahead of chain): waits, re-queries the on-chain nonce, and resumes from the correct nonce
+- **Nonce too low** (transaction already included): treats as success and resyncs the local counter
+- **Already in pool** (duplicate nonce in mempool): treats as success and moves on
+- **Transient errors** (timeouts, connection refused): retries with exponential backoff up to 10 attempts
+- **Transport-only fallback**: only falls back to other RPC endpoints on connection errors, not semantic rejections
+
+Progress is reported every 5 seconds with success/failed/TPS counters. After all transactions are submitted, an inclusion verification step compares expected nonces against on-chain state to detect silently dropped transactions.
+
 ## Performance
 
 The loadgen uses:
-- `FuturesUnordered` for concurrent request handling
+- Per-account sequential sends with cross-account parallelism
 - Connection pooling via `reqwest`
-- Atomic nonce tracking for parallel account access
-- Arc-wrapped accounts for thread-safe sharing
+- Semaphore-bounded concurrency for in-flight HTTP requests
+- Atomic nonce tracking for thread-safe access
+- Arc-wrapped accounts for zero-copy sharing across tasks

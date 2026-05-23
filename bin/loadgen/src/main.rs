@@ -33,6 +33,12 @@ const MAX_RETRY_ATTEMPTS: u64 = 10;
 /// Base delay between retries; grows exponentially (base * 2^attempt).
 const RETRY_BASE_DELAY: Duration = Duration::from_millis(100);
 
+/// Delay before retrying after a nonce gap (chain is behind).
+const NONCE_GAP_DELAY: Duration = Duration::from_secs(1);
+
+/// Interval between periodic progress reports.
+const PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
+
 /// HTTP request timeout for RPC calls.
 const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -78,6 +84,11 @@ struct Args {
     /// Print each transaction hash.
     #[arg(long)]
     verbose: bool,
+
+    /// Overall timeout in seconds. The load test aborts if it exceeds this duration.
+    /// Defaults to 0 (no timeout).
+    #[arg(long, default_value = "0")]
+    timeout_secs: u64,
 }
 
 /// Account with signing key and nonce tracker.
@@ -85,6 +96,9 @@ struct Account {
     key: SigningKey,
     address: Address,
     nonce: AtomicU64,
+    /// The on-chain nonce when this run started. Used to compute per-run
+    /// confirmed counts during post-run verification.
+    starting_nonce: AtomicU64,
 }
 
 impl Account {
@@ -93,7 +107,7 @@ impl Account {
         secret[31] = seed;
         let key = SigningKey::from_bytes((&secret).into()).expect("valid key");
         let address = address_from_key(&key);
-        Self { key, nonce: AtomicU64::new(0), address }
+        Self { key, nonce: AtomicU64::new(0), starting_nonce: AtomicU64::new(0), address }
     }
 
     fn next_nonce(&self) -> u64 {
@@ -102,6 +116,14 @@ impl Account {
 
     fn set_nonce(&self, nonce: u64) {
         self.nonce.store(nonce, Ordering::Relaxed);
+    }
+
+    fn set_starting_nonce(&self, nonce: u64) {
+        self.starting_nonce.store(nonce, Ordering::Relaxed);
+    }
+
+    fn get_starting_nonce(&self) -> u64 {
+        self.starting_nonce.load(Ordering::Relaxed)
     }
 }
 
@@ -168,6 +190,19 @@ fn parse_json_rpc_quantity(quantity: &str) -> Result<u64> {
         .wrap_err_with(|| format!("invalid JSON-RPC quantity: {quantity}"))
 }
 
+/// Returns `true` if the error message indicates a transport-level failure
+/// (connection refused, timeout, etc.) rather than a semantic rejection
+/// (nonce error, pool error, etc.).
+fn is_transport_error(err: &str) -> bool {
+    err.contains("error sending request")
+        || err.contains("Connection refused")
+        || err.contains("connection refused")
+        || err.contains("timed out")
+        || err.contains("connection closed")
+        || err.contains("broken pipe")
+        || err.contains("reset by peer")
+}
+
 /// HTTP client for RPC calls.
 ///
 /// Multiple `RpcClient`s share a single underlying `reqwest::Client` connection
@@ -225,8 +260,23 @@ impl RpcClient {
     }
 }
 
+/// Query `eth_getTransactionCount` from any available RPC client, trying each
+/// in order until one succeeds.
+async fn get_nonce_from_any(clients: &[RpcClient], address: Address) -> Result<u64> {
+    let mut last_err = None;
+    for client in clients {
+        match client.get_transaction_count(address).await {
+            Ok(nonce) => return Ok(nonce),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| eyre::eyre!("no RPC clients configured")))
+}
+
 /// Send a transaction to a specific client (by index). Falls back to trying
-/// all clients if the target rejects the transaction.
+/// other clients only on transport-level errors (timeouts, connection refused).
+/// Semantic rejections (nonce errors, pool errors) are returned immediately
+/// since they would fail identically on every validator.
 async fn send_raw_transaction_to(
     clients: &[RpcClient],
     raw_tx: Bytes,
@@ -236,10 +286,18 @@ async fn send_raw_transaction_to(
 
     // Try the target client first
     match clients[idx].send_raw_transaction(&raw_tx).await {
-        Ok(hash) => return Ok(hash),
+        Ok(hash) => Ok(hash),
         Err(e) => {
-            // If target rejects, try remaining clients as fallback
-            let mut errors = vec![e.to_string()];
+            let err_str = e.to_string();
+
+            // Semantic rejections (nonce errors, pool errors) will fail on all
+            // validators identically. Only fall back for transport errors.
+            if !is_transport_error(&err_str) {
+                return Err(e);
+            }
+
+            // Transport error: try other clients
+            let mut errors = vec![err_str];
             for (i, client) in clients.iter().enumerate() {
                 if i == idx {
                     continue;
@@ -249,7 +307,7 @@ async fn send_raw_transaction_to(
                     Err(e) => errors.push(e.to_string()),
                 }
             }
-            eyre::bail!("all RPC endpoints rejected transaction: {}", errors.join("; "))
+            eyre::bail!("all RPC endpoints failed: {}", errors.join("; "))
         }
     }
 }
@@ -275,6 +333,7 @@ async fn main() -> Result<()> {
         concurrency = args.concurrency,
         chain_id = args.chain_id,
         dry_run = args.dry_run,
+        timeout_secs = args.timeout_secs,
         "Starting load generator"
     );
 
@@ -299,17 +358,30 @@ async fn main() -> Result<()> {
         rpc_urls.into_iter().map(|url| RpcClient::new(url, http_client.clone())).collect(),
     );
 
+    // Initialize nonces from chain state, with fallback across all RPC endpoints
     if !args.dry_run {
         for account in &accounts {
-            let nonce = clients[0].get_transaction_count(account.address).await?;
+            let nonce =
+                get_nonce_from_any(&clients, account.address).await.wrap_err_with(|| {
+                    format!("failed to query nonce for {} from any RPC endpoint", account.address)
+                })?;
+            account.set_starting_nonce(nonce);
             account.set_nonce(nonce);
         }
     }
 
     let success_count = Arc::new(AtomicU64::new(0));
     let failure_count = Arc::new(AtomicU64::new(0));
+    let nonce_resync_count = Arc::new(AtomicU64::new(0));
 
     let start = Instant::now();
+
+    // Derive optional deadline from --timeout-secs
+    let deadline = if args.timeout_secs > 0 {
+        Some(start + Duration::from_secs(args.timeout_secs))
+    } else {
+        None
+    };
 
     if args.dry_run {
         for i in 0..args.total_txs {
@@ -336,11 +408,44 @@ async fn main() -> Result<()> {
         let txs_per_account = args.total_txs / num_accounts as u64;
         let remainder = args.total_txs % num_accounts as u64;
 
-        // Global concurrency limiter — bounds total in-flight HTTP requests
+        // Global concurrency limiter -- bounds total in-flight HTTP requests
         if args.concurrency == 0 {
             eyre::bail!("--concurrency must be >= 1");
         }
         let semaphore = Arc::new(Semaphore::new(args.concurrency));
+
+        // Spawn periodic progress reporter
+        let progress_success = success_count.clone();
+        let progress_failure = failure_count.clone();
+        let progress_resyncs = nonce_resync_count.clone();
+        let progress_total = args.total_txs;
+        let progress_start = start;
+        let progress_handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(PROGRESS_INTERVAL);
+            interval.tick().await; // skip first immediate tick
+            loop {
+                interval.tick().await;
+                let s = progress_success.load(Ordering::Relaxed);
+                let f = progress_failure.load(Ordering::Relaxed);
+                let r = progress_resyncs.load(Ordering::Relaxed);
+                let completed = s + f;
+                let elapsed = progress_start.elapsed().as_secs_f64();
+                let tps = if elapsed > 0.0 { s as f64 / elapsed } else { 0.0 };
+                info!(
+                    success = s,
+                    failed = f,
+                    total = progress_total,
+                    nonce_resyncs = r,
+                    elapsed_secs = format!("{:.1}", elapsed),
+                    tps = format!("{:.1}", tps),
+                    pct = format!("{:.1}%", completed as f64 / progress_total as f64 * 100.0),
+                    "progress"
+                );
+                if completed >= progress_total {
+                    break;
+                }
+            }
+        });
 
         let mut handles = Vec::with_capacity(num_accounts);
 
@@ -349,6 +454,7 @@ async fn main() -> Result<()> {
             let clients = clients.clone();
             let success = success_count.clone();
             let failure = failure_count.clone();
+            let resyncs = nonce_resync_count.clone();
             let semaphore = semaphore.clone();
             let verbose = args.verbose;
             let chain_id = args.chain_id;
@@ -360,7 +466,25 @@ async fn main() -> Result<()> {
             let count = txs_per_account + if (idx as u64) < remainder { 1 } else { 0 };
 
             let handle = tokio::spawn(async move {
-                for _ in 0..count {
+                // Use a while loop that tracks transactions completed (sent or
+                // permanently failed), not nonces attempted. A nonce resync does
+                // not consume a "send slot" -- the outer loop re-acquires a fresh
+                // nonce and re-signs a new transaction.
+                let mut sent = 0u64;
+                while sent < count {
+                    // Check deadline before each transaction
+                    if let Some(dl) = deadline {
+                        if Instant::now() >= dl {
+                            warn!(
+                                account = %account.address,
+                                completed = sent,
+                                target = count,
+                                "timeout reached, stopping account"
+                            );
+                            break;
+                        }
+                    }
+
                     let nonce = account.next_nonce();
                     let tx = sign_eip1559_transfer(
                         &account.key,
@@ -371,11 +495,12 @@ async fn main() -> Result<()> {
                         TRANSFER_GAS_LIMIT,
                     );
 
-                    // Retry with exponential backoff if pool rejects (nonce gap / pool full).
-                    // The semaphore permit is acquired per-attempt and dropped after the HTTP
-                    // call completes, so backoff sleeps do not consume concurrency slots.
+                    // Retry with exponential backoff on transient errors. Nonce
+                    // errors trigger resync instead of blind retries. The semaphore
+                    // permit is acquired per-attempt and dropped after the HTTP call
+                    // completes, so backoff sleeps do not consume concurrency slots.
                     let mut attempts = 0u32;
-                    let mut succeeded = false;
+                    let mut needs_resync = false;
                     loop {
                         let _permit = semaphore.acquire().await.expect("semaphore closed");
                         let result =
@@ -388,29 +513,102 @@ async fn main() -> Result<()> {
                                 if verbose {
                                     info!(nonce, hash = %hash, account = %account.address, "tx sent");
                                 }
-                                succeeded = true;
+                                sent += 1;
                                 break;
                             }
                             Err(e) => {
+                                let err_msg = e.to_string();
                                 attempts += 1;
-                                if u64::from(attempts) >= MAX_RETRY_ATTEMPTS {
-                                    warn!(nonce, error = %e, account = %account.address, "tx failed after retries");
+
+                                if err_msg.contains("nonce too low") {
+                                    // Transaction was already included on-chain
+                                    // (e.g. via broadcast copy). Re-query chain
+                                    // nonce and advance local counter.
+                                    match get_nonce_from_any(&clients, account.address).await {
+                                        Ok(chain_nonce) => {
+                                            account.set_nonce(chain_nonce);
+                                            resyncs.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                        Err(resync_err) => {
+                                            warn!(
+                                                account = %account.address,
+                                                error = %resync_err,
+                                                "nonce resync failed after nonce-too-low, \
+                                                 keeping local nonce"
+                                            );
+                                        }
+                                    }
+                                    // The nonce was consumed on-chain; count as success.
+                                    success.fetch_add(1, Ordering::Relaxed);
+                                    sent += 1;
                                     break;
+                                } else if err_msg.contains("already in pool") {
+                                    // Transaction with this nonce is already pending
+                                    // in the pool. The nonce is covered.
+                                    success.fetch_add(1, Ordering::Relaxed);
+                                    sent += 1;
+                                    break;
+                                } else if err_msg.contains("nonce gap") {
+                                    // We are ahead of the chain. Wait, resync nonce,
+                                    // and restart the outer loop with a fresh nonce
+                                    // and re-signed transaction.
+                                    warn!(
+                                        nonce,
+                                        error = %e,
+                                        account = %account.address,
+                                        "nonce gap detected, resyncing"
+                                    );
+                                    tokio::time::sleep(NONCE_GAP_DELAY).await;
+                                    match get_nonce_from_any(&clients, account.address).await {
+                                        Ok(chain_nonce) => {
+                                            account.set_nonce(chain_nonce);
+                                            resyncs.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                        Err(resync_err) => {
+                                            warn!(
+                                                account = %account.address,
+                                                error = %resync_err,
+                                                "nonce resync failed during gap recovery, \
+                                                 will retry on next iteration"
+                                            );
+                                            // Brief backoff before the outer loop retries
+                                            tokio::time::sleep(NONCE_GAP_DELAY).await;
+                                        }
+                                    }
+                                    // Do NOT increment `sent` -- this nonce was never
+                                    // consumed. Break inner loop and let the outer
+                                    // while-loop re-acquire a correct nonce.
+                                    needs_resync = true;
+                                    break;
+                                } else {
+                                    // Transient error -- exponential backoff
+                                    if u64::from(attempts) >= MAX_RETRY_ATTEMPTS {
+                                        warn!(
+                                            nonce,
+                                            error = %e,
+                                            account = %account.address,
+                                            "tx failed after retries"
+                                        );
+                                        failure.fetch_add(1, Ordering::Relaxed);
+                                        sent += 1;
+                                        break;
+                                    }
+                                    // Exponential backoff: 100ms, 200ms, 400ms, ...
+                                    let delay =
+                                        RETRY_BASE_DELAY * 2u32.saturating_pow(attempts - 1);
+                                    tokio::time::sleep(delay).await;
                                 }
-                                // Exponential backoff: 100ms, 200ms, 400ms, ...
-                                let delay = RETRY_BASE_DELAY * 2u32.saturating_pow(attempts - 1);
-                                tokio::time::sleep(delay).await;
                             }
                         }
                     }
 
-                    if !succeeded {
-                        // Restore the nonce so the next iteration retries with the same value,
-                        // avoiding a permanent nonce gap from an unconsumed sequence number.
-                        account.set_nonce(nonce);
-                        failure.fetch_add(1, Ordering::Relaxed);
+                    // After a nonce resync, the pre-signed tx is stale. The outer
+                    // while-loop will re-acquire a fresh nonce on the next iteration.
+                    // No nonce rewind is needed -- nonce management is handled
+                    // exclusively inside the error handlers above.
+                    if needs_resync {
+                        continue;
                     }
-                    // Nonce N completes before nonce N+1 is assigned for this account
                 }
             });
 
@@ -421,11 +619,15 @@ async fn main() -> Result<()> {
         for handle in handles {
             handle.await?;
         }
+
+        // Stop the progress reporter
+        progress_handle.abort();
     }
 
     let elapsed = start.elapsed();
     let success = success_count.load(Ordering::Relaxed);
     let failure = failure_count.load(Ordering::Relaxed);
+    let resyncs = nonce_resync_count.load(Ordering::Relaxed);
     let tps =
         if elapsed.as_secs_f64() > 0.0 { success as f64 / elapsed.as_secs_f64() } else { 0.0 };
 
@@ -433,10 +635,50 @@ async fn main() -> Result<()> {
         sent = success + failure,
         success,
         failed = failure,
+        nonce_resyncs = resyncs,
         elapsed_secs = format!("{:.2}", elapsed.as_secs_f64()),
         tps = format!("{:.2}", tps),
         "Load generation complete"
     );
+
+    // Post-run inclusion verification: compare expected nonces against on-chain
+    // state to detect silently dropped transactions.
+    if !args.dry_run {
+        info!("Verifying on-chain inclusion...");
+        let mut total_confirmed = 0u64;
+        let mut total_pending = 0u64;
+
+        for account in &accounts {
+            let expected_nonce = account.nonce.load(Ordering::Relaxed);
+            let starting_nonce = account.get_starting_nonce();
+            match get_nonce_from_any(&clients, account.address).await {
+                Ok(chain_nonce) => {
+                    let gap = expected_nonce.saturating_sub(chain_nonce);
+                    let confirmed_this_run = chain_nonce.saturating_sub(starting_nonce);
+                    if gap > 0 {
+                        warn!(
+                            account = %account.address,
+                            expected = expected_nonce,
+                            confirmed = chain_nonce,
+                            pending = gap,
+                            "account has unconfirmed transactions"
+                        );
+                    }
+                    total_confirmed += confirmed_this_run;
+                    total_pending += gap;
+                }
+                Err(e) => {
+                    warn!(
+                        account = %account.address,
+                        error = %e,
+                        "failed to verify on-chain nonce"
+                    );
+                }
+            }
+        }
+
+        info!(total_confirmed, total_pending, "Inclusion verification complete");
+    }
 
     if failure > 0 {
         error!(failed = failure, "Some transactions failed");
@@ -528,5 +770,23 @@ mod tests {
         assert_eq!(account.next_nonce(), 2);
         account.set_nonce(42);
         assert_eq!(account.next_nonce(), 42);
+    }
+
+    #[test]
+    fn is_transport_error_classifies_correctly() {
+        // Transport errors should return true
+        assert!(is_transport_error("error sending request for url"));
+        assert!(is_transport_error("Connection refused (os error 111)"));
+        assert!(is_transport_error("connection refused"));
+        assert!(is_transport_error("request timed out"));
+        assert!(is_transport_error("connection closed before message completed"));
+        assert!(is_transport_error("broken pipe"));
+        assert!(is_transport_error("reset by peer"));
+
+        // Semantic errors should return false
+        assert!(!is_transport_error("RPC error: nonce too low"));
+        assert!(!is_transport_error("RPC error: nonce gap: got 339, expected 57"));
+        assert!(!is_transport_error("nonce 42 already in pool for sender 0x1234"));
+        assert!(!is_transport_error("transaction rejected by mempool"));
     }
 }
