@@ -6,7 +6,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Instant, UNIX_EPOCH},
+    time::{Duration, Instant, UNIX_EPOCH},
 };
 
 use alloy_consensus::Header;
@@ -28,6 +28,15 @@ use kora_qmdb_ledger::QmdbState;
 use kora_rpc::NodeState;
 use rand::Rng;
 use tracing::{debug, error, trace, warn};
+
+/// Maximum number of attempts to poll for a parent snapshot before giving up.
+///
+/// Each attempt sleeps for [`SNAPSHOT_POLL_INTERVAL`], so the total wait is at
+/// most `SNAPSHOT_POLL_ATTEMPTS * SNAPSHOT_POLL_INTERVAL` (50 ms by default).
+const SNAPSHOT_POLL_ATTEMPTS: u32 = 5;
+
+/// Duration to sleep between successive parent-snapshot poll attempts.
+const SNAPSHOT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 fn unix_timestamp_secs<Env: Clock>(env: &Env) -> u64 {
     env.current().duration_since(UNIX_EPOCH).map(|duration| duration.as_secs()).unwrap_or(0)
@@ -123,17 +132,49 @@ where
 
         let start = Instant::now();
         let parent_digest = parent.commitment();
-        let parent_snapshot = match self.ledger.parent_snapshot(parent_digest).await {
-            Some(snap) => snap,
-            None => {
-                warn!(
-                    parent_height = parent.height,
-                    ?parent_digest,
-                    "build_block: parent snapshot not found — \
-                     node is likely still catching up and has not yet \
-                     processed this parent block"
-                );
-                return None;
+
+        // Wait briefly for the parent snapshot to become available.
+        //
+        // Consensus can advance views faster than the execution layer
+        // produces snapshots.  Rather than immediately returning `None`
+        // (which nullifies the view), we poll for up to
+        // `SNAPSHOT_POLL_ATTEMPTS * SNAPSHOT_POLL_INTERVAL` (50 ms).
+        // In the common case the snapshot arrives within the first few
+        // milliseconds, converting what would have been a nullified view
+        // into a successful proposal.
+        let parent_snapshot = {
+            let mut snap = self.ledger.parent_snapshot(parent_digest).await;
+            let mut poll_count = 0u32;
+            let poll_start = Instant::now();
+            while snap.is_none() && poll_count < SNAPSHOT_POLL_ATTEMPTS {
+                tokio::time::sleep(SNAPSHOT_POLL_INTERVAL).await;
+                poll_count += 1;
+                snap = self.ledger.parent_snapshot(parent_digest).await;
+            }
+            match snap {
+                Some(s) => {
+                    if poll_count > 0 {
+                        debug!(
+                            parent_height = parent.height,
+                            ?parent_digest,
+                            poll_count,
+                            wait_ms = poll_start.elapsed().as_millis(),
+                            "build_block: parent snapshot arrived after polling"
+                        );
+                    }
+                    s
+                }
+                None => {
+                    warn!(
+                        parent_height = parent.height,
+                        ?parent_digest,
+                        poll_count,
+                        wait_ms = poll_start.elapsed().as_millis(),
+                        "build_block: parent snapshot not found after polling — \
+                         node has not yet processed this parent block"
+                    );
+                    return None;
+                }
             }
         };
         let snapshot_elapsed = start.elapsed();
