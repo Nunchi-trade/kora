@@ -1,7 +1,9 @@
 //! HTTP and JSON-RPC server implementation.
 
 use std::{
+    future::Future,
     net::SocketAddr,
+    pin::Pin,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -18,7 +20,7 @@ use jsonrpsee::{
     core::server::MethodResponse,
     server::{
         Server, ServerHandle,
-        middleware::rpc::{ResponseFuture, RpcServiceBuilder, RpcServiceT},
+        middleware::rpc::{RpcServiceBuilder, RpcServiceT},
     },
     types::{ErrorObjectOwned, Id, Request as RpcRequest},
 };
@@ -191,18 +193,59 @@ struct RateLimitedRpcService<S> {
     rate_limiter: Option<SharedRateLimiter>,
 }
 
+/// Subscription method names that require WebSocket transport.
+const SUBSCRIPTION_METHODS: &[&str] =
+    &["eth_subscribe", "eth_unsubscribe", "kora_subscribe", "kora_unsubscribe"];
+
+/// Check whether `method` is a subscription method that requires WebSocket.
+fn is_subscription_method(method: &str) -> bool {
+    SUBSCRIPTION_METHODS.contains(&method)
+}
+
+/// Build a [`MethodResponse`] with error code `-32004` (method not supported)
+/// when a subscription method is called over HTTP.
+fn subscription_not_available_response(id: Id<'static>) -> MethodResponse {
+    MethodResponse::error(
+        id,
+        ErrorObjectOwned::owned(
+            codes::METHOD_NOT_SUPPORTED,
+            "Subscriptions are not available over HTTP. Use WebSocket instead.",
+            None::<()>,
+        ),
+    )
+}
+
 impl<'a, S> RpcServiceT<'a> for RateLimitedRpcService<S>
 where
     S: RpcServiceT<'a> + Clone + Send + Sync + 'static,
+    S::Future: Send,
 {
-    type Future = ResponseFuture<S::Future>;
+    type Future = Pin<Box<dyn Future<Output = MethodResponse> + Send + 'a>>;
 
     fn call(&self, request: RpcRequest<'a>) -> Self::Future {
-        if rate_limit_allows(&self.rate_limiter) {
-            ResponseFuture::future(self.service.call(request))
-        } else {
-            ResponseFuture::ready(rate_limited_rpc_response(request.id().into_owned()))
+        if !rate_limit_allows(&self.rate_limiter) {
+            return Box::pin(std::future::ready(rate_limited_rpc_response(
+                request.id().into_owned(),
+            )));
         }
+
+        let is_sub = is_subscription_method(request.method_name());
+        let id = request.id().into_owned();
+        let fut = self.service.call(request);
+
+        Box::pin(async move {
+            let response = fut.await;
+
+            // When jsonrpsee receives a subscription call over HTTP it returns
+            // ErrorCode::InternalError (-32603) because subscriptions require a
+            // persistent connection.  Replace that with -32004 and a message
+            // that tells the caller to use WebSocket instead.
+            if is_sub && response.as_error_code() == Some(codes::INTERNAL_ERROR) {
+                return subscription_not_available_response(id);
+            }
+
+            response
+        })
     }
 }
 
@@ -911,6 +954,70 @@ mod tests {
         let second = service.call(rpc_request(2)).await;
         assert_eq!(second.as_error_code(), Some(crate::error::codes::LIMIT_EXCEEDED));
         assert!(second.as_result().contains("rate limit exceeded"));
+    }
+
+    /// A mock service that returns InternalError (-32603) for subscription
+    /// methods, mimicking jsonrpsee's behaviour when subscriptions are called
+    /// over HTTP.
+    #[derive(Debug, Clone)]
+    struct InternalErrorOnSubscriptionService;
+
+    impl<'a> RpcServiceT<'a> for InternalErrorOnSubscriptionService {
+        type Future = std::future::Ready<MethodResponse>;
+
+        fn call(&self, request: RpcRequest<'a>) -> Self::Future {
+            let id = request.id().into_owned();
+            if is_subscription_method(request.method_name()) {
+                std::future::ready(MethodResponse::error(
+                    id,
+                    ErrorObjectOwned::owned(codes::INTERNAL_ERROR, "Internal error", None::<()>),
+                ))
+            } else {
+                std::future::ready(MethodResponse::response(
+                    id,
+                    ResponsePayload::success("ok"),
+                    usize::MAX,
+                ))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn subscription_over_http_returns_method_not_supported() {
+        let service = RateLimitedRpcService {
+            service: InternalErrorOnSubscriptionService,
+            rate_limiter: None,
+        };
+
+        // eth_subscribe should be rewritten from -32603 to -32004.
+        let sub_req = RpcRequest::new(Cow::Borrowed("eth_subscribe"), None, Id::Number(1));
+        let response = service.call(sub_req).await;
+        assert_eq!(response.as_error_code(), Some(codes::METHOD_NOT_SUPPORTED));
+        assert!(response.as_result().contains("Subscriptions are not available over HTTP"));
+    }
+
+    #[tokio::test]
+    async fn subscription_over_ws_passes_through() {
+        // When the inner service returns success (WebSocket case), the
+        // middleware must not interfere.
+        let service = RateLimitedRpcService { service: AlwaysOkRpcService, rate_limiter: None };
+
+        let sub_req = RpcRequest::new(Cow::Borrowed("eth_subscribe"), None, Id::Number(1));
+        let response = service.call(sub_req).await;
+        assert!(response.is_success());
+    }
+
+    #[tokio::test]
+    async fn non_subscription_internal_error_not_rewritten() {
+        // An InternalError on a regular method must NOT be rewritten.
+        let service = RateLimitedRpcService {
+            service: InternalErrorOnSubscriptionService,
+            rate_limiter: None,
+        };
+
+        let req = rpc_request(1);
+        let response = service.call(req).await;
+        assert!(response.is_success());
     }
 
     #[tokio::test]
