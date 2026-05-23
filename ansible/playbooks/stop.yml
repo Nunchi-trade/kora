@@ -1,0 +1,30 @@
+---
+# Stop all devnet containers without wiping data or volumes
+#
+# Usage:
+#   ansible-playbook playbooks/stop.yml -i inventory/hosts.yml
+#
+- name: Stop devnet
+  hosts: devnet
+  become: true
+
+  tasks:
+    - name: Stop all containers
+      ansible.builtin.command:
+        cmd: >
+          docker compose -f {{ compose_file }}
+          --profile observability --profile interactive-dkg
+          stop
+      changed_when: true
+      failed_when: false
+
+    - name: Show container status
+      ansible.builtin.command:
+        cmd: docker ps --format "table {{'{{'}}.Names{{'}}'}}\t{{'{{'}}.Status{{'}}'}}"
+      register: docker_status
+
+    - name: Print status
+      ansible.builtin.debug:
+        msg: |
+          Devnet stopped (data volumes preserved).
+          {{ docker_status.stdout }}

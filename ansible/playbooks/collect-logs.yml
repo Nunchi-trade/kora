@@ -1,0 +1,71 @@
+---
+# Collect and archive validator logs for debugging
+#
+# Usage:
+#   ansible-playbook playbooks/collect-logs.yml -i inventory/hosts.yml
+#   ansible-playbook playbooks/collect-logs.yml -i inventory/hosts.yml -e since="10m"
+#   ansible-playbook playbooks/collect-logs.yml -i inventory/hosts.yml -e level="ERROR"
+#
+- name: Collect validator logs
+  hosts: devnet
+  become: true
+  vars:
+    log_since: "{{ since | default('30m') }}"
+    log_level: "{{ level | default('WARN') }}"
+    output_dir: "/tmp/kora-logs-{{ ansible_date_time.iso8601_basic_short }}"
+
+  tasks:
+    - name: Create output directory
+      ansible.builtin.file:
+        path: "{{ output_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Export full logs per validator
+      ansible.builtin.shell: |
+        docker logs {{ compose_project_name }}-validator-node{{ item }}-1 \
+          --since {{ log_since }} > {{ output_dir }}/validator-node{{ item }}.log 2>&1
+      loop: "{{ range(num_validators | int) | list }}"
+
+    - name: Export secondary logs
+      ansible.builtin.shell: |
+        docker logs {{ compose_project_name }}-secondary-node0-1 \
+          --since {{ log_since }} > {{ output_dir }}/secondary-node0.log 2>&1
+
+    - name: Extract warnings/errors summary
+      ansible.builtin.shell: |
+        echo "=== {{ log_level }}+ Messages (last {{ log_since }}) ===" > {{ output_dir }}/summary.txt
+        echo "" >> {{ output_dir }}/summary.txt
+        for n in $(seq 0 {{ (num_validators | int) - 1 }}); do
+          echo "--- validator-node$n ---" >> {{ output_dir }}/summary.txt
+          grep -oP '(?:{{ log_level }}|ERROR)\s+\S+.*' {{ output_dir }}/validator-node${n}.log \
+            | sort | uniq -c | sort -rn | head -20 >> {{ output_dir }}/summary.txt
+          echo "" >> {{ output_dir }}/summary.txt
+        done
+
+    - name: Create tar archive
+      ansible.builtin.command:
+        cmd: "tar czf {{ output_dir }}.tar.gz -C /tmp {{ output_dir | basename }}"
+
+    - name: Fetch archive to local machine
+      ansible.builtin.fetch:
+        src: "{{ output_dir }}.tar.gz"
+        dest: "{{ playbook_dir }}/../tmp/logs/"
+        flat: true
+
+    - name: Show summary
+      ansible.builtin.command:
+        cmd: "cat {{ output_dir }}/summary.txt"
+      register: summary
+
+    - name: Display summary
+      ansible.builtin.debug:
+        msg: "{{ summary.stdout }}"
+
+    - name: Cleanup remote
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ output_dir }}"
+        - "{{ output_dir }}.tar.gz"

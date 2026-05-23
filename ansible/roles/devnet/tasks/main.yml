@@ -84,6 +84,13 @@
     done
   changed_when: true
 
+- name: Clear startup barrier
+  ansible.builtin.shell: |
+    volume="{{ compose_project_name }}_startup_barrier"
+    docker volume inspect "$volume" >/dev/null 2>&1 || exit 0
+    docker run --rm -v "${volume}:/barrier" alpine sh -c 'rm -f /barrier/*.ready'
+  changed_when: true
+
 - name: Start validators and secondary
   ansible.builtin.command:
     cmd: >

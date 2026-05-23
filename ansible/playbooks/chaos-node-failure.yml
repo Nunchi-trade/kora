@@ -1,0 +1,125 @@
+---
+# Chaos test: stop a validator, measure impact, restart, verify recovery
+#
+# Usage:
+#   ansible-playbook playbooks/chaos-node-failure.yml -i inventory/hosts.yml \
+#     -e target_node=2 -e stop_duration=45 -e recovery_wait=60
+#
+# Variables:
+#   target_node:    validator index to stop (0-3, default: 2)
+#   stop_duration:  seconds to keep the node stopped (default: 45)
+#   recovery_wait:  seconds to wait after restart before checking (default: 60)
+#
+- name: "Chaos: Single Node Failure Test"
+  hosts: devnet
+  become: true
+  vars:
+    target_node: "{{ target_node | default(2) }}"
+    stop_duration: "{{ stop_duration | default(45) }}"
+    recovery_wait: "{{ recovery_wait | default(60) }}"
+    compose_dir: "{{ remote_project_dir }}/docker/compose"
+
+  tasks:
+    - name: "Phase 0: Capture baseline block rate"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ prometheus_port }}/api/v1/query"
+        method: POST
+        body_format: form-urlencoded
+        body: "query=avg(rate(finalized_height[30s]))"
+        return_content: true
+      register: baseline_query
+
+    - name: Show baseline
+      ansible.builtin.debug:
+        msg: "Baseline blocks/sec: {{ (baseline_query.json.data.result[0].value[1] | float) | round(1) }}"
+      when: baseline_query.json.data.result | length > 0
+
+    - name: "Phase 1: Stop validator-node{{ target_node }}"
+      ansible.builtin.command:
+        cmd: "docker compose -f devnet.yaml stop validator-node{{ target_node }}"
+        chdir: "{{ compose_dir }}"
+
+    - name: "Wait {{ stop_duration }}s during outage"
+      ansible.builtin.pause:
+        seconds: "{{ stop_duration | int }}"
+
+    - name: "Phase 2: Measure block rate during outage"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ prometheus_port }}/api/v1/query"
+        method: POST
+        body_format: form-urlencoded
+        body: "query=avg(rate(finalized_height[30s]))"
+        return_content: true
+      register: outage_query
+
+    - name: Show outage impact
+      ansible.builtin.debug:
+        msg: "Outage blocks/sec: {{ (outage_query.json.data.result[0].value[1] | float) | round(1) }}"
+      when: outage_query.json.data.result | length > 0
+
+    - name: "Phase 3: Restart validator-node{{ target_node }}"
+      ansible.builtin.command:
+        cmd: "docker compose -f devnet.yaml start validator-node{{ target_node }}"
+        chdir: "{{ compose_dir }}"
+
+    - name: "Wait {{ recovery_wait }}s for recovery"
+      ansible.builtin.pause:
+        seconds: "{{ recovery_wait | int }}"
+
+    - name: "Phase 4: Measure post-recovery block rate"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ prometheus_port }}/api/v1/query"
+        method: POST
+        body_format: form-urlencoded
+        body: "query=avg(rate(finalized_height[30s]))"
+        return_content: true
+      register: recovery_query
+
+    - name: "Phase 4: Check heights across all validators"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ prometheus_port }}/api/v1/query"
+        method: POST
+        body_format: form-urlencoded
+        body: "query=finalized_height"
+        return_content: true
+      register: heights_query
+
+    - name: "Phase 4: Check resolver blocked peers"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ prometheus_port }}/api/v1/query"
+        method: POST
+        body_format: form-urlencoded
+        body: "query=engine_resolver_resolver_peers_blocked"
+        return_content: true
+      register: blocked_query
+
+    - name: "Phase 4: Check restarted node logs"
+      ansible.builtin.command:
+        cmd: "docker logs {{ compose_project_name }}-validator-node{{ target_node }}-1 --tail 15"
+      register: node_logs
+
+    - name: "=== TEST RESULTS ==="
+      ansible.builtin.debug:
+        msg: |
+          === Node Failure Test Results ===
+          Target: validator-node{{ target_node }}
+          Stop duration: {{ stop_duration }}s
+          Recovery wait: {{ recovery_wait }}s
+
+          Block rate:
+            Baseline: {{ (baseline_query.json.data.result[0].value[1] | float) | round(1) }} blocks/sec
+            During outage: {{ (outage_query.json.data.result[0].value[1] | float) | round(1) }} blocks/sec
+            After recovery: {{ (recovery_query.json.data.result[0].value[1] | float) | round(1) }} blocks/sec
+
+          Heights:
+          {% for r in heights_query.json.data.result %}
+            {{ r.metric.instance }}: {{ r.value[1] }}
+          {% endfor %}
+
+          Resolver blocked peers:
+          {% for r in blocked_query.json.data.result %}
+            {{ r.metric.instance }}: {{ r.value[1] }}
+          {% endfor %}
+
+          Node{{ target_node }} logs (last 15 lines):
+          {{ node_logs.stderr | default(node_logs.stdout, true) }}

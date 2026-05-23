@@ -1,0 +1,78 @@
+---
+# Quick Prometheus metric queries for debugging
+#
+# Usage:
+#   # Default: run all queries
+#   ansible-playbook playbooks/query-metrics.yml -i inventory/hosts.yml
+#
+#   # Specific query:
+#   ansible-playbook playbooks/query-metrics.yml -i inventory/hosts.yml \
+#     -e promql="rate(finalized_height[1m])"
+#
+- name: Query Prometheus metrics
+  hosts: devnet
+  become: true
+  vars:
+    prom: "http://localhost:{{ prometheus_port }}"
+    # Default queries to run (override with -e promql="...")
+    default_queries:
+      - name: "Block rate (blocks/sec)"
+        query: "rate(finalized_height[1m])"
+      - name: "Skip rate"
+        query: "1 - rate(finalized_height[1m]) / rate(current_view[1m])"
+      - name: "Nullifications/sec"
+        query: "rate(simplex_voter_nullifications_total[1m])"
+      - name: "Resolver blocked peers"
+        query: "engine_resolver_resolver_peers_blocked"
+      - name: "Memory (MB)"
+        query: "process_resident_memory_bytes / 1048576"
+      - name: "P2P dropped msgs/sec"
+        query: "sum by (instance) (rate(network_router_messages_dropped_total[1m]))"
+      - name: "Height drift (max - min)"
+        query: "max(finalized_height) - min(finalized_height)"
+
+  tasks:
+    # Single custom query mode
+    - name: "Run custom query: {{ promql }}"
+      when: promql is defined
+      block:
+        - name: Execute custom query
+          ansible.builtin.uri:
+            url: "{{ prom }}/api/v1/query"
+            method: POST
+            body_format: form-urlencoded
+            body: "query={{ promql }}"
+            return_content: true
+          register: custom_result
+
+        - name: Show custom result
+          ansible.builtin.debug:
+            msg: |
+              Query: {{ promql }}
+              {% for r in custom_result.json.data.result %}
+              {{ r.metric | default({}) }}: {{ r.value[1] }}
+              {% endfor %}
+
+    # Default multi-query mode
+    - name: Run default diagnostic queries
+      when: promql is not defined
+      block:
+        - name: Execute queries
+          ansible.builtin.uri:
+            url: "{{ prom }}/api/v1/query"
+            method: POST
+            body_format: form-urlencoded
+            body: "query={{ item.query }}"
+            return_content: true
+          loop: "{{ default_queries }}"
+          register: query_results
+
+        - name: "=== METRICS SNAPSHOT ==="
+          ansible.builtin.debug:
+            msg: |
+              {% for result in query_results.results %}
+              ── {{ result.item.name }} ──
+              {% for r in result.json.data.result %}
+                {{ r.metric.instance | default('aggregate') }}: {{ (r.value[1] | float) | round(2) }}
+              {% endfor %}
+              {% endfor %}
