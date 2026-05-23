@@ -19,7 +19,7 @@ mod error;
 pub use error::ConfigError;
 
 mod execution;
-pub use execution::{DEFAULT_BLOCK_TIME, DEFAULT_GAS_LIMIT, ExecutionConfig};
+pub use execution::{DEFAULT_BLOCK_TIME, DEFAULT_GAS_LIMIT, ExecutionConfig, INITIAL_BASE_FEE};
 
 mod network;
 pub use network::{DEFAULT_LISTEN_ADDR, NetworkConfig};

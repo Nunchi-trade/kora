@@ -36,6 +36,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 # Local crates
+kora-config = { path = "../config" }
 kora-executor = { path = "../executor" }
 
 # Commonware

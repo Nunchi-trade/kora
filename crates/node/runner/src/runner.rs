@@ -133,10 +133,10 @@ fn seed_genesis_block_index(index: &BlockIndex, genesis: &Block, gas_limit: u64)
             number: 0,
             parent_hash: genesis.parent.0,
             state_root: genesis.state_root.0,
-            timestamp: 0,
+            timestamp: genesis.timestamp,
             gas_limit,
             gas_used: 0,
-            base_fee_per_gas: Some(0),
+            base_fee_per_gas: Some(kora_config::INITIAL_BASE_FEE),
             transaction_hashes: Vec::new(),
         },
         Vec::new(),
@@ -381,7 +381,7 @@ impl BlockContextProvider for RevmContextProvider {
             timestamp: block.timestamp,
             gas_limit: self.gas_limit,
             beneficiary: Address::ZERO,
-            base_fee_per_gas: Some(0),
+            base_fee_per_gas: Some(kora_config::INITIAL_BASE_FEE),
             ..Default::default()
         };
         let recent_hashes = self.recent_block_hashes(block.height);
@@ -1050,8 +1050,27 @@ mod tests {
         assert_eq!(indexed.timestamp, 0);
         assert_eq!(indexed.gas_limit, gas_limit);
         assert_eq!(indexed.gas_used, 0);
+        assert_eq!(indexed.base_fee_per_gas, Some(kora_config::INITIAL_BASE_FEE));
         assert_eq!(indexed.transaction_hashes, Vec::<B256>::new());
         assert_eq!(index.get_block_by_hash(&genesis.id().0).expect("genesis by hash").number, 0);
+    }
+
+    #[test]
+    fn seed_genesis_block_index_uses_genesis_timestamp() {
+        let index = BlockIndex::new();
+        let genesis = Block {
+            parent: BlockId(B256::ZERO),
+            height: 0,
+            timestamp: 1_700_000_000,
+            prevrandao: B256::ZERO,
+            state_root: StateRoot(B256::ZERO),
+            txs: Vec::new(),
+        };
+
+        seed_genesis_block_index(&index, &genesis, 30_000_000);
+
+        let indexed = index.get_block_by_number(0).expect("genesis indexed");
+        assert_eq!(indexed.timestamp, 1_700_000_000);
     }
 
     #[test]

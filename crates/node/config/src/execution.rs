@@ -8,6 +8,14 @@ pub const DEFAULT_GAS_LIMIT: u64 = 250_000_000;
 /// Default block time in seconds.
 pub const DEFAULT_BLOCK_TIME: u64 = 2;
 
+/// Initial base fee per gas (1 gwei).
+///
+/// EIP-1559 base-fee accounting requires a non-zero seed value; starting
+/// from zero means `calculate_base_fee` can never increase the fee because
+/// `0 * anything = 0`. One gwei is the Ethereum-mainnet genesis value and
+/// a reasonable default for devnets.
+pub const INITIAL_BASE_FEE: u64 = 1_000_000_000;
+
 /// Execution layer configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExecutionConfig {
@@ -79,6 +87,11 @@ mod tests {
             serde_json::from_str(r#"{"block_time": 10}"#).expect("deserialize");
         assert_eq!(config.gas_limit, DEFAULT_GAS_LIMIT);
         assert_eq!(config.block_time, 10);
+    }
+
+    #[test]
+    fn initial_base_fee_is_one_gwei() {
+        assert_eq!(INITIAL_BASE_FEE, 1_000_000_000);
     }
 
     #[test]

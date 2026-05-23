@@ -20,6 +20,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{Clock, Metrics, Runner as _, Spawner, buffer::paged::CacheRef, tokio};
 use commonware_utils::{NZU64, NZUsize, TryCollect as _, ordered::Set};
 use futures::{StreamExt as _, channel::mpsc};
+use kora_config::INITIAL_BASE_FEE;
 use kora_crypto::{ThresholdScheme, threshold_schemes};
 use kora_domain::{
     Block, BlockCfg, ConsensusDigest, FinalizationEvent, LedgerEvent, PublicKey, StateRoot, TxCfg,
@@ -235,7 +236,7 @@ impl BlockContextProvider for TestContextProvider {
             timestamp: block.timestamp,
             gas_limit: self.gas_limit,
             beneficiary: Address::ZERO,
-            base_fee_per_gas: Some(0),
+            base_fee_per_gas: Some(INITIAL_BASE_FEE),
             ..Default::default()
         };
         BlockContext::new(header, B256::ZERO, block.prevrandao)
@@ -694,7 +695,7 @@ impl<S> TestApplication<S> {
             timestamp,
             gas_limit: self.gas_limit,
             beneficiary: Address::ZERO,
-            base_fee_per_gas: Some(0),
+            base_fee_per_gas: Some(INITIAL_BASE_FEE),
             ..Default::default()
         };
         BlockContext::new(header, B256::ZERO, prevrandao)

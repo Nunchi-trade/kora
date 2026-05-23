@@ -108,7 +108,7 @@ where
             timestamp,
             gas_limit: self.gas_limit,
             beneficiary: Address::ZERO,
-            base_fee_per_gas: Some(0),
+            base_fee_per_gas: Some(kora_config::INITIAL_BASE_FEE),
             ..Default::default()
         };
         BlockContext::new(header, B256::ZERO, prevrandao)
