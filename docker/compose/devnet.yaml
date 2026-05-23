@@ -226,8 +226,8 @@ services:
       - HEALTHCHECK_MODE=ready
     ports:
       - "30400:30303"
-      - "8545:8545"
-      - "9000:9002"
+      - "127.0.0.1:8545:8545"
+      - "127.0.0.1:9000:9002"
 
   validator-node1:
     <<: *validator-common
@@ -252,8 +252,8 @@ services:
       - HEALTHCHECK_MODE=ready
     ports:
       - "30401:30303"
-      - "8546:8545"
-      - "9001:9002"
+      - "127.0.0.1:8546:8545"
+      - "127.0.0.1:9001:9002"
 
   validator-node2:
     <<: *validator-common
@@ -278,8 +278,8 @@ services:
       - HEALTHCHECK_MODE=ready
     ports:
       - "30402:30303"
-      - "8547:8545"
-      - "9002:9002"
+      - "127.0.0.1:8547:8545"
+      - "127.0.0.1:9002:9002"
 
   validator-node3:
     <<: *validator-common
@@ -304,8 +304,8 @@ services:
       - HEALTHCHECK_MODE=ready
     ports:
       - "30403:30303"
-      - "8548:8545"
-      - "9003:9002"
+      - "127.0.0.1:8548:8545"
+      - "127.0.0.1:9003:9002"
 
   secondary-node0:
     <<: *validator-common
@@ -342,7 +342,7 @@ services:
       - '--storage.tsdb.path=/prometheus'
       - '--web.enable-lifecycle'
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     networks:
       - kora-net
 
@@ -354,7 +354,7 @@ services:
       - ../config/loki.yml:/etc/loki/local-config.yaml:ro
     command: -config.file=/etc/loki/local-config.yaml
     ports:
-      - "3100:3100"
+      - "127.0.0.1:3100:3100"
     networks:
       - kora-net
 
@@ -386,6 +386,6 @@ services:
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     networks:
       - kora-net
