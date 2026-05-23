@@ -161,14 +161,14 @@ clear_dkg_outputs() {
 
 clear_runtime_state() {
     for volume in \
-        kora-devnet_data_node0 \
-        kora-devnet_data_node1 \
-        kora-devnet_data_node2 \
-        kora-devnet_data_node3 \
-        kora-devnet_data_secondary0; do
+        kora-devnet_runtime_node0 \
+        kora-devnet_runtime_node1 \
+        kora-devnet_runtime_node2 \
+        kora-devnet_runtime_node3 \
+        kora-devnet_runtime_secondary0; do
         docker volume inspect "$volume" >/dev/null 2>&1 || continue
-        docker run --rm -v "${volume}:/data" alpine \
-            rm -rf /data/runtime >/dev/null 2>&1 || true
+        docker run --rm -v "${volume}:/runtime" alpine \
+            sh -c 'rm -rf /runtime/* /runtime/.[!.]* /runtime/..?*' >/dev/null 2>&1 || true
     done
 }
 

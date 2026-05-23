@@ -57,7 +57,6 @@ x-validator-common: &validator-common
         cpus: "2"
         pids: 4096
   tmpfs:
-    - /runtime:size=1g,mode=0700
     - /tmp:size=64m,mode=0700
   healthcheck:
     test: ["CMD", "/scripts/healthcheck.sh"]

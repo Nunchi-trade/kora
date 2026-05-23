@@ -164,7 +164,7 @@ Environment variables (set in `.env` or export):
 |----------|---------|-------------|
 | `CHAIN_ID` | 1337 | Chain identifier |
 | `RUST_LOG` | info | Log level (trace, debug, info, warn, error) |
-| `KORA_RUNTIME_DIR` | /runtime | Commonware runtime storage directory. The Docker devnet mounts this path as 1GiB tmpfs to keep local consensus journal syncs off Docker named volumes. |
+| `KORA_RUNTIME_DIR` | /runtime | Commonware runtime storage directory. The Docker devnet mounts per-node named volumes here so consensus state survives container restarts. |
 | `COMPOSE_PROFILES` | observability | Comma-separated profiles (observability, distributed-dkg) |
 | `VALIDATOR_INDEX` | - | Node index (0-3), set per container |
 | `VALIDATOR_COUNT` | 0 | Total number of validators. When > 0, entrypoint waits for all validators via a shared barrier volume before starting consensus |
