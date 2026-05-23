@@ -228,14 +228,19 @@ impl<S> IndexedStateProvider<S> {
     /// Reject requests for historical or future state that we cannot serve.
     ///
     /// Kora uses QMDB which only maintains the latest state. We accept
-    /// `None`, `latest`, `pending`, and the current head block number;
-    /// everything else returns an explicit error instead of silently
-    /// returning the latest state.
+    /// `None`, `latest`, `pending`, `safe`, `finalized`, and the current
+    /// head block number; everything else returns an explicit error instead
+    /// of silently returning the latest state.
+    ///
+    /// In Simplex BFT all committed blocks are immediately finalized, so
+    /// `safe` and `finalized` are semantically equivalent to `latest`.
     fn reject_historical_block(&self, block: &Option<BlockNumberOrTag>) -> Result<(), RpcError> {
         match block {
             None
             | Some(BlockNumberOrTag::Latest)
-            | Some(BlockNumberOrTag::Tag(BlockTag::Latest | BlockTag::Pending)) => Ok(()),
+            | Some(BlockNumberOrTag::Tag(
+                BlockTag::Latest | BlockTag::Pending | BlockTag::Safe | BlockTag::Finalized,
+            )) => Ok(()),
             Some(BlockNumberOrTag::Number(n)) => {
                 let head = self.index.head_block_number();
                 let requested = n.to::<u64>();
@@ -1073,29 +1078,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn balance_with_safe_tag_returns_error() {
+    async fn balance_with_safe_tag_succeeds() {
         let index = Arc::new(BlockIndex::new());
         index.insert_block(create_test_block(5, B256::repeat_byte(5)), vec![], vec![]);
         let provider = IndexedStateProvider::with_chain_id(index, MockState, 1337);
 
-        let err = provider
+        // In BFT consensus all committed blocks are immediately finalized,
+        // so "safe" is semantically equivalent to "latest".
+        let balance = provider
             .balance(Address::ZERO, Some(BlockNumberOrTag::Tag(BlockTag::Safe)))
             .await
-            .unwrap_err();
-        assert!(matches!(err, RpcError::Unsupported(_)));
+            .unwrap();
+        assert_eq!(balance, U256::from(1000));
     }
 
     #[tokio::test]
-    async fn balance_with_finalized_tag_returns_error() {
+    async fn balance_with_finalized_tag_succeeds() {
         let index = Arc::new(BlockIndex::new());
         index.insert_block(create_test_block(5, B256::repeat_byte(5)), vec![], vec![]);
         let provider = IndexedStateProvider::with_chain_id(index, MockState, 1337);
 
-        let err = provider
+        // In BFT consensus all committed blocks are immediately finalized,
+        // so "finalized" is semantically equivalent to "latest".
+        let balance = provider
             .balance(Address::ZERO, Some(BlockNumberOrTag::Tag(BlockTag::Finalized)))
             .await
-            .unwrap_err();
-        assert!(matches!(err, RpcError::Unsupported(_)));
+            .unwrap();
+        assert_eq!(balance, U256::from(1000));
     }
 
     #[tokio::test]
