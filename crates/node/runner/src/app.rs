@@ -138,7 +138,16 @@ where
         let snapshot_elapsed = start.elapsed();
 
         let (_, mempool, snapshots) = self.ledger.proposal_components().await;
-        let excluded = self.collect_pending_tx_ids(&snapshots, parent_digest);
+        let excluded = match self.collect_pending_tx_ids(&snapshots, parent_digest) {
+            Some(ids) => ids,
+            None => {
+                // The snapshot chain has a gap — we cannot determine which
+                // transactions were already included in recent blocks.
+                // Building with an incomplete excluded set risks duplicate
+                // transactions, so we nullify this round instead.
+                return None;
+            }
+        };
         let mempool_len = mempool.len();
         let excluded_len = excluded.len();
         let txs = mempool.build(self.max_txs, &excluded);
@@ -355,11 +364,17 @@ where
         true
     }
 
+    /// Collect transaction IDs from unpersisted ancestor snapshots.
+    ///
+    /// Returns `None` if the snapshot chain has a gap (a snapshot was evicted
+    /// before we could read it). In that case the caller **must not** build a
+    /// block, because we cannot guarantee the excluded set is complete and
+    /// would risk including duplicate transactions.
     fn collect_pending_tx_ids(
         &self,
         snapshots: &InMemorySnapshotStore<OverlayState<QmdbState>>,
         from: ConsensusDigest,
-    ) -> BTreeSet<kora_consensus::TxId> {
+    ) -> Option<BTreeSet<kora_consensus::TxId>> {
         let mut excluded = BTreeSet::new();
         let mut current = Some(from);
 
@@ -368,13 +383,19 @@ where
                 break;
             }
             let Some(snapshot) = snapshots.get(&digest) else {
-                break;
+                warn!(
+                    ?digest,
+                    collected_so_far = excluded.len(),
+                    "snapshot chain gap during tx exclusion collection — \
+                     refusing to build block to prevent duplicate transactions"
+                );
+                return None;
             };
             excluded.extend(snapshot.tx_ids.iter().copied());
             current = snapshot.parent;
         }
 
-        excluded
+        Some(excluded)
     }
 }
 

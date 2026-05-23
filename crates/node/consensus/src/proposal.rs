@@ -8,6 +8,7 @@ use commonware_cryptography::Committable as _;
 use kora_domain::{Block, StateRoot, Tx};
 use kora_executor::{BlockContext, BlockExecutor};
 use kora_traits::StateDb;
+use tracing::warn;
 
 use crate::{ConsensusError, Digest, Mempool, Snapshot, SnapshotStore, TxId};
 
@@ -182,8 +183,15 @@ where
                 break;
             }
 
-            let snapshot =
-                self.snapshots.get(&digest).ok_or(ConsensusError::SnapshotNotFound(digest))?;
+            let Some(snapshot) = self.snapshots.get(&digest) else {
+                warn!(
+                    ?digest,
+                    collected_so_far = excluded.len(),
+                    "snapshot chain gap during tx exclusion collection — \
+                     aborting proposal to prevent duplicate transactions"
+                );
+                return Err(ConsensusError::SnapshotNotFound(digest));
+            };
             excluded.extend(snapshot.tx_ids.iter().copied());
             current = snapshot.parent;
         }
