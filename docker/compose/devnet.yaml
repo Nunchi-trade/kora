@@ -326,6 +326,8 @@ services:
       - HEALTHCHECK_MODE=p2p
     ports:
       - "30500:30303"
+      - "8549:8545"
+      - "9004:9002"
 
   prometheus:
     image: prom/prometheus:latest

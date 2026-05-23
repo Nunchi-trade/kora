@@ -64,6 +64,14 @@ pub(crate) struct SecondaryArgs {
     /// Path to peers.json file containing primary and secondary peer information.
     #[arg(long)]
     pub peers: PathBuf,
+
+    /// JSON-RPC server bind address (reserved for future read-only RPC).
+    #[arg(long, default_value = "0.0.0.0:8545")]
+    pub rpc_addr: String,
+
+    /// Prometheus metrics server bind address.
+    #[arg(long, default_value = "0.0.0.0:9002")]
+    pub metrics_addr: String,
 }
 
 impl Cli {
@@ -201,7 +209,7 @@ impl Cli {
 
     fn run_secondary(&self, args: &SecondaryArgs) -> eyre::Result<()> {
         use commonware_p2p::{Manager, TrackedPeers};
-        use commonware_runtime::Runner;
+        use commonware_runtime::{Clock as _, Metrics as _, Runner, Spawner};
         use commonware_utils::ordered::Set;
         use kora_transport::NetworkConfigExt;
 
@@ -217,12 +225,25 @@ impl Cli {
             ));
         }
 
+        let validator_count = peers.participants.len();
+        let secondary_count = peers.secondary_participants.len();
+
+        // Parse and validate addresses early so we fail before starting the runtime.
+        let metrics_addr: std::net::SocketAddr = args.metrics_addr.parse().map_err(|err| {
+            eyre::eyre!("invalid --metrics-addr '{}': {}", args.metrics_addr, err)
+        })?;
+        let _rpc_addr: std::net::SocketAddr = args
+            .rpc_addr
+            .parse()
+            .map_err(|err| eyre::eyre!("invalid --rpc-addr '{}': {}", args.rpc_addr, err))?;
+
         tracing::info!(
             chain_id = config.chain_id,
             bootstrap_peers = config.network.bootstrap_peers.len(),
-            secondary_peers = peers.secondary_participants.len(),
+            secondary_peers = secondary_count,
             "Starting secondary peer"
         );
+        tracing::warn!("Secondary node is in follower mode - read-only RPC not yet implemented");
 
         let runtime_dir = runtime_storage_directory(&config.data_dir);
         tracing::info!(runtime_dir = %runtime_dir.display(), "Starting Commonware runtime");
@@ -247,8 +268,57 @@ impl Cli {
                 .await;
 
             tracing::info!("secondary peer joined network");
-            futures::future::pending::<()>().await;
-            #[allow(unreachable_code)]
+
+            // Spawn a metrics server so Prometheus can scrape this node.
+            let metrics_context = context.clone();
+            context.with_label("metrics").shared(true).spawn(move |_| async move {
+                let app = axum::Router::new().route(
+                    "/metrics",
+                    axum::routing::get(move || {
+                        let body = metrics_context.encode();
+                        async move {
+                            (
+                                axum::http::StatusCode::OK,
+                                [(
+                                    axum::http::header::CONTENT_TYPE,
+                                    "application/openmetrics-text; version=1.0.0; charset=utf-8",
+                                )],
+                                body,
+                            )
+                        }
+                    }),
+                );
+
+                let listener = match tokio::net::TcpListener::bind(metrics_addr).await {
+                    Ok(l) => l,
+                    Err(e) => {
+                        tracing::error!(addr = %metrics_addr, error = %e, "Failed to bind metrics server");
+                        return;
+                    }
+                };
+
+                tracing::info!(addr = %metrics_addr, "Starting metrics server");
+                if let Err(e) = axum::serve(listener, app).await {
+                    tracing::error!(error = %e, "Metrics server error");
+                }
+            });
+
+            // Spawn periodic health logging.
+            context.with_label("health").shared(true).spawn(move |ctx| async move {
+                let interval = std::time::Duration::from_secs(30);
+                loop {
+                    ctx.sleep(interval).await;
+                    tracing::info!(
+                        validators = validator_count,
+                        secondary_peers = secondary_count,
+                        "Secondary node health: connected to P2P network"
+                    );
+                }
+            });
+
+            // Block until shutdown signal (SIGTERM / SIGINT / Ctrl-C).
+            tokio::signal::ctrl_c().await.ok();
+            tracing::info!("Received shutdown signal, stopping secondary node...");
             Ok::<(), eyre::Error>(())
         })
     }
