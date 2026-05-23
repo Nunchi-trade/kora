@@ -169,6 +169,11 @@ fn index_recovered_block(
     index.insert_block(indexed_block, Vec::new(), Vec::new());
 }
 
+/// Number of recent blocks to restore during startup to pre-populate the
+/// snapshot cache. This ensures that blocks arriving shortly after restart
+/// can find their parent snapshot without entering catch-up mode.
+const SNAPSHOT_PREPOPULATE_COUNT: u64 = 16;
+
 async fn recover_finalized_state<FB, FC>(
     ledger: &LedgerService,
     block_index: &Arc<kora_indexer::BlockIndex>,
@@ -176,7 +181,7 @@ async fn recover_finalized_state<FB, FC>(
     finalizations_by_height: &FC,
     provider: &RevmContextProvider,
     data_dir: &Path,
-) -> anyhow::Result<()>
+) -> anyhow::Result<Option<u64>>
 where
     FB: Archive<Key = ConsensusDigest, Value = Block>,
     FC: Archive<Key = ConsensusDigest, Value = CertArchive>,
@@ -216,7 +221,7 @@ where
         }
     }
 
-    if let Some(ref head) = head {
+    let head_height = if let Some(ref head) = head {
         // Validate the commit marker against the archive head to detect
         // potential QMDB inconsistencies from a previous crash.
         validate_commit_marker(data_dir, head);
@@ -227,9 +232,74 @@ where
             blocks = recovered,
             "recovered finalized ledger head from archive"
         );
+        Some(head.height)
+    } else {
+        None
+    };
+
+    Ok(head_height)
+}
+
+/// Pre-populate the in-memory snapshot cache by restoring recent finalized
+/// blocks from the archive.
+///
+/// After a restart, only the HEAD snapshot is in the cache. The consensus
+/// engine's ancestry walk (`verify`) stops when it hits a block whose
+/// `state_root` is already known. By restoring snapshots for the last N
+/// blocks, the ancestry walk terminates earlier and fewer blocks need to be
+/// re-verified. Any blocks whose parent snapshot is genuinely missing (due
+/// to gaps larger than the prepopulation window) are handled by the
+/// catch-up trust mechanism in `verify_block`.
+async fn prepopulate_snapshot_cache<FB>(
+    ledger: &LedgerService,
+    finalized_blocks: &FB,
+    head_height: u64,
+    count: u64,
+) where
+    FB: Archive<Key = ConsensusDigest, Value = Block>,
+{
+    if head_height == 0 || count == 0 {
+        return;
     }
 
-    Ok(())
+    // Restore blocks from (head_height - count) to (head_height - 1).
+    // HEAD itself is already restored by `recover_finalized_state`.
+    let start_height = head_height.saturating_sub(count);
+    if start_height == head_height {
+        return;
+    }
+
+    let mut populated = 0u64;
+    for height in start_height..head_height {
+        match finalized_blocks.get(ArchiveId::Index(height)).await {
+            Ok(Some(block)) => {
+                let digest = block.commitment();
+                // Skip if already in the cache.
+                if ledger.query_state_root(digest).await.is_some() {
+                    continue;
+                }
+                ledger.restore_persisted_snapshot(&block).await;
+                populated += 1;
+            }
+            Ok(None) => {
+                debug!(height, "prepopulate: no block at height, stopping");
+                break;
+            }
+            Err(err) => {
+                warn!(height, error = ?err, "prepopulate: failed to load block");
+                break;
+            }
+        }
+    }
+
+    if populated > 0 {
+        info!(
+            populated,
+            range_start = start_height,
+            head_height,
+            "pre-populated snapshot cache with recent finalized blocks"
+        );
+    }
 }
 
 /// Compare the on-disk commit marker against the archive head block.
@@ -678,7 +748,7 @@ impl NodeRunner for ProductionRunner {
         };
 
         let context_provider = RevmContextProvider { gas_limit, block_index: block_index.clone() };
-        recover_finalized_state(
+        let recovered_head_height = recover_finalized_state(
             &ledger,
             &block_index,
             &finalized_blocks,
@@ -688,6 +758,21 @@ impl NodeRunner for ProductionRunner {
         )
         .await
         .context("recover finalized state")?;
+
+        // Pre-populate the snapshot cache with the last N blocks so that
+        // blocks arriving shortly after restart can find their parent
+        // snapshot. Without this, only the HEAD snapshot exists after
+        // recovery, and verify_block would fail for any block whose parent
+        // is not HEAD.
+        if let Some(head_height) = recovered_head_height {
+            prepopulate_snapshot_cache(
+                &ledger,
+                &finalized_blocks,
+                head_height,
+                SNAPSHOT_PREPOPULATE_COUNT,
+            )
+            .await;
+        }
 
         if let Some((node_state, addr)) = &self.rpc_config {
             let peer_count = self.scheme.participants().len().saturating_sub(1) as u64;
@@ -868,6 +953,9 @@ impl NodeRunner for ProductionRunner {
             block_cfg.max_txs,
             gas_limit,
         );
+        if let Some(height) = recovered_head_height {
+            app = app.with_recovered_height(height);
+        }
         if let Some((state, _)) = &self.rpc_config {
             app = app.with_node_state(state.clone());
         }

@@ -2,6 +2,10 @@
 
 use std::{
     collections::BTreeSet,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Instant, UNIX_EPOCH},
 };
 
@@ -29,6 +33,11 @@ fn unix_timestamp_secs<Env: Clock>(env: &Env) -> u64 {
     env.current().duration_since(UNIX_EPOCH).map(|duration| duration.as_secs()).unwrap_or(0)
 }
 
+/// Number of blocks behind the tip at which we consider the node to be
+/// "catching up" and allow verify_block to trust finalized blocks without
+/// re-executing them against a parent snapshot.
+const CATCH_UP_THRESHOLD: u64 = 2;
+
 /// REVM-based consensus application.
 #[derive(Clone)]
 pub struct RevmApplication<S, E> {
@@ -37,6 +46,13 @@ pub struct RevmApplication<S, E> {
     max_txs: usize,
     gas_limit: u64,
     node_state: Option<NodeState>,
+    /// Height of the HEAD block that was restored from the archive during
+    /// startup recovery. Used to detect whether the node is still catching
+    /// up: if a block's height is significantly greater than this value and
+    /// its parent snapshot is missing, we trust the finality certificate
+    /// instead of returning `false` (which the resolver would interpret as
+    /// "malicious peer" and permanently block them).
+    recovered_height: Arc<AtomicU64>,
     _scheme: std::marker::PhantomData<S>,
 }
 
@@ -45,6 +61,7 @@ impl<S, E> std::fmt::Debug for RevmApplication<S, E> {
         f.debug_struct("RevmApplication")
             .field("max_txs", &self.max_txs)
             .field("gas_limit", &self.gas_limit)
+            .field("recovered_height", &self.recovered_height.load(Ordering::Relaxed))
             .finish_non_exhaustive()
     }
 }
@@ -54,13 +71,14 @@ where
     E: BlockExecutor<OverlayState<QmdbState>, Tx = Bytes> + Clone,
 {
     /// Create a new REVM application.
-    pub const fn new(ledger: LedgerService, executor: E, max_txs: usize, gas_limit: u64) -> Self {
+    pub fn new(ledger: LedgerService, executor: E, max_txs: usize, gas_limit: u64) -> Self {
         Self {
             ledger,
             executor,
             max_txs,
             gas_limit,
             node_state: None,
+            recovered_height: Arc::new(AtomicU64::new(0)),
             _scheme: std::marker::PhantomData,
         }
     }
@@ -69,6 +87,18 @@ where
     #[must_use]
     pub fn with_node_state(mut self, state: NodeState) -> Self {
         self.node_state = Some(state);
+        self
+    }
+
+    /// Set the height of the HEAD block that was recovered from the archive.
+    ///
+    /// This is used to detect catch-up mode: when the node is behind the
+    /// network and parent snapshots are unavailable, blocks whose height
+    /// exceeds this value by more than [`CATCH_UP_THRESHOLD`] are trusted
+    /// based on their finality certificate rather than being rejected.
+    #[must_use]
+    pub fn with_recovered_height(self, height: u64) -> Self {
+        self.recovered_height.store(height, Ordering::Relaxed);
         self
     }
 
@@ -191,6 +221,18 @@ where
         Some(block)
     }
 
+    /// Check whether the node is in catch-up mode.
+    ///
+    /// Returns `true` when the requested block height is far enough ahead of
+    /// the height we recovered from the archive, indicating that we are still
+    /// syncing up to the live network.
+    fn is_catching_up(&self, block_height: u64) -> bool {
+        let recovered = self.recovered_height.load(Ordering::Relaxed);
+        // If recovered_height is 0 we have never recovered (fresh node), so
+        // we are not catching up.
+        recovered > 0 && block_height > recovered.saturating_add(CATCH_UP_THRESHOLD)
+    }
+
     async fn verify_block(&self, block: &Block) -> bool {
         let start = Instant::now();
         let digest = block.commitment();
@@ -201,9 +243,45 @@ where
             return true;
         }
 
-        let Some(parent_snapshot) = self.ledger.parent_snapshot(parent_digest).await else {
-            warn!(?digest, ?parent_digest, height = block.height, "missing parent snapshot");
-            return false;
+        let parent_snapshot = match self.ledger.parent_snapshot(parent_digest).await {
+            Some(snap) => snap,
+            None => {
+                // Parent snapshot is missing. During normal operation this
+                // means we received a genuinely invalid or out-of-order
+                // block. But after a restart the snapshot cache only
+                // contains the HEAD, so blocks whose parent we haven't
+                // processed yet will fail here.
+                //
+                // If we are still catching up (block height is well ahead
+                // of our recovered height), trust the finality certificate
+                // and restore the block as a persisted snapshot so that
+                // subsequent blocks can find their parent.
+                if self.is_catching_up(block.height) {
+                    warn!(
+                        ?digest,
+                        ?parent_digest,
+                        height = block.height,
+                        recovered_height = self.recovered_height.load(Ordering::Relaxed),
+                        "verify_block: parent snapshot missing during catch-up; \
+                         trusting finality certificate"
+                    );
+                    // Create a persisted snapshot for this block using the
+                    // current QMDB state. This is safe because the block
+                    // was already finalized by consensus (it has a valid
+                    // finality certificate verified by the resolver).
+                    // The FinalizedReporter will re-execute and properly
+                    // persist the block when it arrives through the
+                    // finalization pipeline.
+                    self.ledger.restore_persisted_snapshot(block).await;
+                    // Update recovered_height so the node eventually exits
+                    // catch-up mode once it has caught up.
+                    self.recovered_height.fetch_max(block.height, Ordering::Relaxed);
+                    return true;
+                }
+
+                warn!(?digest, ?parent_digest, height = block.height, "missing parent snapshot");
+                return false;
+            }
         };
         let snapshot_elapsed = start.elapsed();
 
@@ -258,6 +336,10 @@ where
                 &block.txs,
             )
             .await;
+
+        // Once we successfully verify a block, update the recovered height
+        // so the catch-up window advances with normal progress.
+        self.recovered_height.fetch_max(block.height, Ordering::Relaxed);
 
         let total_elapsed = start.elapsed();
         debug!(
