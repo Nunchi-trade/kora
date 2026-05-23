@@ -10,6 +10,11 @@ volumes:
   data_node2:
   data_node3:
   data_secondary0:
+  runtime_node0:
+  runtime_node1:
+  runtime_node2:
+  runtime_node3:
+  runtime_secondary0:
   shared_config:
   startup_barrier:
   prometheus_data:
@@ -39,8 +44,6 @@ x-validator-common: &validator-common
       limits:
         memory: 4G
         cpus: "2"
-  tmpfs:
-    - /runtime:size=1g,mode=1777
   healthcheck:
     test: ["CMD", "/scripts/healthcheck.sh"]
     interval: 10s
@@ -214,6 +217,7 @@ services:
     volumes:
       - shared_config:/shared:ro
       - data_node0:/data
+      - runtime_node0:/runtime
       - startup_barrier:/barrier
     environment:
       - RUST_LOG=${RUST_LOG:-info}
@@ -239,6 +243,7 @@ services:
     volumes:
       - shared_config:/shared:ro
       - data_node1:/data
+      - runtime_node1:/runtime
       - startup_barrier:/barrier
     environment:
       - RUST_LOG=${RUST_LOG:-info}
@@ -265,6 +270,7 @@ services:
     volumes:
       - shared_config:/shared:ro
       - data_node2:/data
+      - runtime_node2:/runtime
       - startup_barrier:/barrier
     environment:
       - RUST_LOG=${RUST_LOG:-info}
@@ -291,6 +297,7 @@ services:
     volumes:
       - shared_config:/shared:ro
       - data_node3:/data
+      - runtime_node3:/runtime
       - startup_barrier:/barrier
     environment:
       - RUST_LOG=${RUST_LOG:-info}
@@ -317,6 +324,7 @@ services:
     volumes:
       - shared_config:/shared:ro
       - data_secondary0:/data
+      - runtime_secondary0:/runtime
     environment:
       - RUST_LOG=${RUST_LOG:-info}
       - CHAIN_ID=${CHAIN_ID:-1337}

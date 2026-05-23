@@ -10,11 +10,28 @@ DATA_DIR=${DATA_DIR:-/data}
 SHARED_DIR=${SHARED_DIR:-/shared}
 BARRIER_DIR=${BARRIER_DIR:-/barrier}
 
+RUNTIME_DIR=${KORA_RUNTIME_DIR:-/runtime}
+
 MODE="${1:-validator}"
 shift || true
 
 log() { echo "[entrypoint] $*"; }
 error() { echo "[entrypoint] ERROR: $*" >&2; exit 1; }
+
+# Ensure runtime directory exists and is writable by the kora user.
+# Docker named volumes inherit ownership from the image on first mount,
+# but we verify here in case an external volume with different ownership
+# is attached.
+if [[ -d "$RUNTIME_DIR" ]]; then
+    if [[ ! -w "$RUNTIME_DIR" ]]; then
+        log "WARNING: runtime dir ${RUNTIME_DIR} is not writable, attempting chown..."
+        chown -R "$(id -u):$(id -g)" "$RUNTIME_DIR" 2>/dev/null || \
+            error "Cannot write to runtime dir ${RUNTIME_DIR}. Fix volume permissions."
+    fi
+else
+    mkdir -p "$RUNTIME_DIR" 2>/dev/null || error "Cannot create runtime dir ${RUNTIME_DIR}"
+fi
+log "Runtime dir: ${RUNTIME_DIR} (writable)"
 
 # Startup barrier: ensures all validators reach this point before any starts
 # consensus. Each validator writes a marker file to a shared volume, then waits
