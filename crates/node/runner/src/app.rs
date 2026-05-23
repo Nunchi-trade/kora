@@ -23,6 +23,7 @@ use kora_consensus::{BlockExecution, SnapshotStore, components::InMemorySnapshot
 use kora_domain::{Block, ConsensusDigest};
 use kora_executor::{BlockContext, BlockExecutor};
 use kora_ledger::LedgerService;
+use kora_metrics::AppMetrics;
 use kora_overlay::OverlayState;
 use kora_qmdb_ledger::QmdbState;
 use kora_rpc::NodeState;
@@ -55,6 +56,7 @@ pub struct RevmApplication<S, E> {
     max_txs: usize,
     gas_limit: u64,
     node_state: Option<NodeState>,
+    metrics: Option<AppMetrics>,
     /// Height of the HEAD block that was restored from the archive during
     /// startup recovery. Used to detect whether the node is still catching
     /// up: if a block's height is significantly greater than this value and
@@ -70,6 +72,7 @@ impl<S, E> std::fmt::Debug for RevmApplication<S, E> {
         f.debug_struct("RevmApplication")
             .field("max_txs", &self.max_txs)
             .field("gas_limit", &self.gas_limit)
+            .field("metrics", &self.metrics.is_some())
             .field("recovered_height", &self.recovered_height.load(Ordering::Relaxed))
             .finish_non_exhaustive()
     }
@@ -87,6 +90,7 @@ where
             max_txs,
             gas_limit,
             node_state: None,
+            metrics: None,
             recovered_height: Arc::new(AtomicU64::new(0)),
             _scheme: std::marker::PhantomData,
         }
@@ -96,6 +100,13 @@ where
     #[must_use]
     pub fn with_node_state(mut self, state: NodeState) -> Self {
         self.node_state = Some(state);
+        self
+    }
+
+    /// Attach application-level metrics.
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: AppMetrics) -> Self {
+        self.metrics = Some(metrics);
         self
     }
 
@@ -263,6 +274,12 @@ where
         let block_digest = block.commitment();
 
         let total_elapsed = start.elapsed();
+
+        if let Some(ref m) = self.metrics {
+            m.block_build_time.observe(total_elapsed.as_secs_f64());
+            m.block_txs_included.set(block.txs.len() as i64);
+        }
+
         debug!(
             ?block_digest,
             height,

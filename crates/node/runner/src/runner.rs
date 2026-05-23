@@ -34,6 +34,7 @@ use kora_executor::{BlockContext, RevmExecutor};
 use kora_indexer::{BlockIndex, IndexedBlock};
 use kora_ledger::{LedgerService, LedgerView};
 use kora_marshal::{ArchiveInitializer, BroadcastInitializer, PeerInitializer};
+use kora_metrics::AppMetrics;
 use kora_reporters::{BlockContextProvider, FinalizedReporter, NodeStateReporter, SeedReporter};
 use kora_service::{NodeRunContext, NodeRunner};
 use kora_simplex::{DEFAULT_MAILBOX_SIZE as MAILBOX_SIZE, DefaultPool};
@@ -42,6 +43,21 @@ use kora_txpool::{PoolConfig, TransactionPool, TransactionValidator};
 use tracing::{debug, error, info, trace, warn};
 
 use crate::{RevmApplication, RunnerError, scheme::ThresholdScheme};
+
+/// Adapter that bridges `kora_metrics::MetricsRegister` to the commonware
+/// runtime's `Metrics` trait.
+struct RuntimeMetrics<'a>(&'a cw_tokio::Context);
+
+impl kora_metrics::MetricsRegister for RuntimeMetrics<'_> {
+    fn register<N: Into<String>, H: Into<String>>(
+        &self,
+        name: N,
+        help: H,
+        metric: impl prometheus_client::registry::Metric,
+    ) {
+        commonware_runtime::Metrics::register(self.0, name, help, metric);
+    }
+}
 
 const EPOCH_LENGTH: u64 = u64::MAX;
 const PARTITION_PREFIX: &str = "kora";
@@ -673,6 +689,11 @@ impl NodeRunner for ProductionRunner {
         let txpool = ledger.txpool().await;
         spawn_txpool_cleanup(txpool.clone(), context.clone());
 
+        // Initialize application-level Prometheus metrics and register them
+        // with the commonware runtime so they appear on the /metrics endpoint.
+        let app_metrics = AppMetrics::new();
+        app_metrics.register(&RuntimeMetrics(&context));
+        txpool.set_metrics(app_metrics.clone());
         // -- Transaction gossip infrastructure --
         let (gossip_outbound_tx, gossip_seen): (
             Option<tokio::sync::mpsc::Sender<alloy_primitives::Bytes>>,
@@ -909,7 +930,8 @@ impl NodeRunner for ProductionRunner {
             finalized_executor,
             context_provider,
         )
-        .with_block_index(block_index);
+        .with_block_index(block_index)
+        .with_metrics(app_metrics.clone());
         if let Some(sender) = mempool_broadcast {
             finalized_reporter = finalized_reporter.with_mempool_broadcast(sender);
         }
@@ -970,6 +992,7 @@ impl NodeRunner for ProductionRunner {
             block_cfg.max_txs,
             gas_limit,
         );
+        app = app.with_metrics(app_metrics);
         if let Some(height) = recovered_head_height {
             app = app.with_recovered_height(height);
         }

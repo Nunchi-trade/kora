@@ -15,6 +15,7 @@ workspace = true
 kora-consensus = { path = "../consensus" }
 kora-domain = { path = "../domain" }
 kora-executor = { path = "../executor" }
+kora-metrics = { path = "../metrics" }
 kora-indexer = { path = "../../storage/indexer" }
 kora-ledger = { path = "../ledger" }
 kora-overlay = { path = "../../storage/overlay" }

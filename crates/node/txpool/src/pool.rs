@@ -10,6 +10,7 @@ use alloy_consensus::{Transaction, TxEnvelope};
 use alloy_eips::eip2718::{Decodable2718, Encodable2718};
 use alloy_primitives::{Address, B256, Bytes, U256};
 use kora_domain::{MempoolEvent, Tx, TxId};
+use kora_metrics::{AppMetrics, ReasonLabel};
 use parking_lot::RwLock;
 use tokio::sync::broadcast;
 use tracing::{debug, trace, warn};
@@ -132,19 +133,60 @@ pub struct TransactionPool {
     inner: Arc<RwLock<PoolInner>>,
     config: PoolConfig,
     events: Option<broadcast::Sender<MempoolEvent>>,
+    metrics: Arc<RwLock<Option<AppMetrics>>>,
 }
 
 impl TransactionPool {
     /// Creates a new transaction pool with the given configuration.
     #[must_use]
     pub fn new(config: PoolConfig) -> Self {
-        Self { inner: Arc::new(RwLock::new(PoolInner::new())), config, events: None }
+        Self {
+            inner: Arc::new(RwLock::new(PoolInner::new())),
+            config,
+            events: None,
+            metrics: Arc::new(RwLock::new(None)),
+        }
     }
 
     /// Creates a new transaction pool that broadcasts mempool lifecycle events.
     #[must_use]
     pub fn new_with_events(config: PoolConfig, events: broadcast::Sender<MempoolEvent>) -> Self {
-        Self { inner: Arc::new(RwLock::new(PoolInner::new())), config, events: Some(events) }
+        Self {
+            inner: Arc::new(RwLock::new(PoolInner::new())),
+            config,
+            events: Some(events),
+            metrics: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Attach application-level metrics to this pool.
+    ///
+    /// Because the metrics handle is shared across all clones of this pool,
+    /// this method affects every clone that shares the same backing store.
+    pub fn set_metrics(&self, metrics: AppMetrics) {
+        *self.metrics.write() = Some(metrics);
+    }
+
+    /// Update gauge metrics to reflect current pool state.
+    ///
+    /// Must be called while the caller does NOT hold the inner lock (it takes
+    /// a read lock internally).
+    fn sync_metrics(&self) {
+        let metrics_guard = self.metrics.read();
+        if let Some(ref m) = *metrics_guard {
+            let inner = self.inner.read();
+            m.txpool_size.set(inner.by_hash.len() as i64);
+            m.txpool_pending.set(inner.pending_count as i64);
+            m.txpool_queued.set(inner.queued_count as i64);
+        }
+    }
+
+    /// Record a rejected transaction metric.
+    fn record_rejection(&self, reason: &str) {
+        let metrics_guard = self.metrics.read();
+        if let Some(ref m) = *metrics_guard {
+            m.txpool_rejected.get_or_create(&ReasonLabel { reason: reason.to_string() }).inc();
+        }
     }
 
     /// Adds a validated transaction to the pool.
@@ -257,6 +299,8 @@ impl TransactionPool {
                     .send(MempoolEvent::TxEvicted { hash: *hash, reason: "evicted".to_string() });
             }
         }
+
+        self.sync_metrics();
 
         if inserted_evicted {
             return Err(TxPoolError::PoolFull);
@@ -376,6 +420,7 @@ impl TransactionPool {
                 events.send(MempoolEvent::TxEvicted { hash: *hash, reason: reason.to_string() });
         }
 
+        self.sync_metrics();
         Some(tx)
     }
 
@@ -414,6 +459,8 @@ impl TransactionPool {
         }
 
         inner.update_counts();
+        drop(inner);
+        self.sync_metrics();
     }
 
     /// Returns the count of pending (executable) transactions.
@@ -496,6 +543,10 @@ impl TransactionPool {
             }
         }
         inner.update_counts();
+        drop(inner);
+        if removed > 0 {
+            self.sync_metrics();
+        }
         removed
     }
 
@@ -512,12 +563,19 @@ impl TransactionPool {
         inner.by_sender.clear();
         inner.pending_count = 0;
         inner.queued_count = 0;
+        drop(inner);
+        self.sync_metrics();
     }
 }
 
 impl Clone for TransactionPool {
     fn clone(&self) -> Self {
-        Self { inner: self.inner.clone(), config: self.config.clone(), events: self.events.clone() }
+        Self {
+            inner: self.inner.clone(),
+            config: self.config.clone(),
+            events: self.events.clone(),
+            metrics: self.metrics.clone(), // Arc clone: all clones share the same metrics handle
+        }
     }
 }
 
@@ -544,6 +602,28 @@ fn ordered_to_tx(tx: &OrderedTransaction) -> Tx {
 
 fn ordered_tx_id(tx: &OrderedTransaction) -> TxId {
     ordered_to_tx(tx).id()
+}
+
+/// Map a [`TxPoolError`] to a short label suitable for the `reason`
+/// dimension of the `kora_txpool_rejected_total` metric.
+fn rejection_reason(err: &TxPoolError) -> String {
+    match err {
+        TxPoolError::PoolFull => "pool_full".to_string(),
+        TxPoolError::SenderFull(_) => "sender_full".to_string(),
+        TxPoolError::TxTooLarge { .. } => "tx_too_large".to_string(),
+        TxPoolError::GasPriceTooLow { .. } => "gas_price_too_low".to_string(),
+        TxPoolError::NonceTooLow { .. } => "nonce_too_low".to_string(),
+        TxPoolError::NonceGap { .. } => "nonce_gap".to_string(),
+        TxPoolError::InsufficientBalance { .. } => "insufficient_balance".to_string(),
+        TxPoolError::InvalidChainId { .. } => "invalid_chain_id".to_string(),
+        TxPoolError::InvalidSignature => "invalid_signature".to_string(),
+        TxPoolError::DecodeError(_) => "decode_error".to_string(),
+        TxPoolError::IntrinsicGasTooLow { .. } => "intrinsic_gas_too_low".to_string(),
+        TxPoolError::AlreadyExists => "already_exists".to_string(),
+        TxPoolError::NonceAlreadyInPool { .. } => "nonce_already_in_pool".to_string(),
+        TxPoolError::StateError(_) => "state_error".to_string(),
+        TxPoolError::ReplacementUnderpriced => "replacement_underpriced".to_string(),
+    }
 }
 
 fn tx_to_ordered(tx: &Tx) -> Option<OrderedTransaction> {
@@ -573,6 +653,7 @@ impl Mempool for TransactionPool {
     fn insert(&self, tx: Tx) -> bool {
         let Some(ordered) = tx_to_ordered(&tx) else {
             trace!("failed to decode transaction for mempool insert");
+            self.record_rejection("decode_error");
             return false;
         };
 
@@ -580,6 +661,7 @@ impl Mempool for TransactionPool {
             Ok(()) => true,
             Err(e) => {
                 trace!(?e, "failed to insert transaction");
+                self.record_rejection(&rejection_reason(&e));
                 false
             }
         }
@@ -671,6 +753,8 @@ impl Mempool for TransactionPool {
         }
 
         inner.update_counts();
+        drop(inner);
+        self.sync_metrics();
     }
 
     fn len(&self) -> usize {

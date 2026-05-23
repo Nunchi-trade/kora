@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 # Local crates
 kora-domain = { path = "../domain", features = ["evm"] }
+kora-metrics = { path = "../metrics" }
 kora-traits = { path = "../../storage/traits" }
 
 # Alloy
