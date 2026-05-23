@@ -592,7 +592,13 @@ impl ProductionRunner {
 
             let _ledger = self.run(ctx).await?;
 
-            tokio::signal::ctrl_c().await.ok();
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("failed to register SIGTERM handler");
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {},
+                _ = sigterm.recv() => {},
+            }
             info!("Received shutdown signal, stopping...");
             Ok::<(), RunnerError>(())
         })

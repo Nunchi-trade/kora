@@ -37,7 +37,8 @@ x-node-common: &node-common
 x-validator-common: &validator-common
   <<: *node-common
   restart: unless-stopped
-  stop_grace_period: 30s
+  init: true
+  stop_grace_period: 5s
   stop_signal: SIGTERM
   deploy:
     resources:

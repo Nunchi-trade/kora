@@ -317,7 +317,13 @@ impl Cli {
             });
 
             // Block until shutdown signal (SIGTERM / SIGINT / Ctrl-C).
-            tokio::signal::ctrl_c().await.ok();
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("failed to register SIGTERM handler");
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {},
+                _ = sigterm.recv() => {},
+            }
             tracing::info!("Received shutdown signal, stopping secondary node...");
             Ok::<(), eyre::Error>(())
         })
