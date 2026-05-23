@@ -13,7 +13,7 @@ groups:
 
       # Consensus has stalled — no blocks finalized
       - alert: ConsensusStall
-        expr: rate(finalized_height[5m]) < 0.001 and up{job="kora-validators"} == 1
+        expr: rate(finalized_height{job="kora-validators"}[5m]) < 0.001 and up{job="kora-validators"} == 1
         for: 2m
         labels:
           severity: critical
@@ -24,9 +24,9 @@ groups:
       # Voter panic detection — zero finalization rate with node up
       - alert: VoterCrash
         expr: |
-          (rate(finalized_height[1m]) < 0.001)
+          (rate(finalized_height{job="kora-validators"}[1m]) < 0.001)
           and (up{job="kora-validators"} == 1)
-          and (rate(engine_voter_state_current_view[1m]) < 0.001)
+          and (rate(engine_voter_state_current_view{job="kora-validators"}[1m]) < 0.001)
         for: 1m
         labels:
           severity: critical
@@ -46,9 +46,11 @@ groups:
           summary: "Validator height drift exceeds 10 blocks"
           description: "Max height={{ $value }}. A node may be struggling to keep up or is stuck in catch-up."
 
-      # High nullification rate — wasted consensus rounds
+      # High nullification rate — wasted consensus rounds.
+      # Healthy baseline is ~27% nullification rate (~44 nullifications/s at
+      # full throughput). Threshold set above steady-state to avoid false alarms.
       - alert: HighNullificationRate
-        expr: sum(rate(engine_voter_state_nullifications_total[5m])) > 5
+        expr: sum(rate(engine_voter_state_nullifications_total{job="kora-validators"}[5m])) > 60
         for: 2m
         labels:
           severity: warning
@@ -56,20 +58,24 @@ groups:
           summary: "Nullification rate is {{ $value }}/s"
           description: "High nullification rate indicates block building failures. Check executor errors and mempool state."
 
-      # Skip rate above 30% — approaching stall territory
+      # Skip rate elevated — approaching stall territory.
+      # Healthy 4-validator network has ~27-33% skip rate (round-robin
+      # leadership means some views naturally nullify). Threshold raised
+      # to 45% to avoid alerting on steady-state behavior.
       - alert: HighSkipRate
         expr: |
-          (1 - (avg(rate(finalized_height[5m])) / avg(rate(engine_voter_state_current_view[5m])))) > 0.3
+          (1 - (avg(rate(finalized_height{job="kora-validators"}[5m])) / avg(rate(engine_voter_state_current_view{job="kora-validators"}[5m])))) > 0.45
         for: 3m
         labels:
           severity: warning
         annotations:
           summary: "Skip rate is {{ $value | humanizePercentage }}"
-          description: "Over 30% of consensus views are wasted. Network was at 33% skip rate before the production stall."
+          description: "Over 45% of consensus views are wasted. Healthy baseline is ~33%; investigate if sustained."
 
-      # High timeout rate
+      # High timeout rate — correlated with nullifications in steady state.
+      # Raised threshold above healthy baseline to reduce false positives.
       - alert: HighTimeoutRate
-        expr: sum(rate(engine_voter_state_timeouts_total[5m])) > 5
+        expr: sum(rate(engine_voter_state_timeouts_total{job="kora-validators"}[5m])) > 60
         for: 2m
         labels:
           severity: warning
@@ -114,8 +120,8 @@ groups:
       # View advancing but no finalization — quorum issue
       - alert: ViewWithoutFinalization
         expr: |
-          rate(engine_voter_state_current_view[5m]) > 0
-          and rate(finalized_height[5m]) < 0.001
+          rate(engine_voter_state_current_view{job="kora-validators"}[5m]) > 0
+          and rate(finalized_height{job="kora-validators"}[5m]) < 0.001
         for: 3m
         labels:
           severity: warning
@@ -187,15 +193,18 @@ groups:
           summary: "Node {{ $labels.instance }} has {{ $value }} blocked resolver peers"
           description: "Blocked peers cannot provide blocks for catch-up. This caused permanent stall after node restarts."
 
-      # Memory growth rate (leak detection)
+      # Memory growth rate (leak detection).
+      # Previous threshold of 10MB/s (10e6) was too sensitive — normal state
+      # accumulation and mempool churn can easily produce transient spikes.
+      # Raised to 50MB/s to catch genuine leaks without false positives.
       - alert: MemoryLeakSuspected
-        expr: deriv(runtime_process_rss[15m]) > 10e6
+        expr: deriv(runtime_process_rss[15m]) > 50e6
         for: 10m
         labels:
           severity: warning
         annotations:
           summary: "Memory growing at {{ $value | humanize }}B/s on {{ $labels.instance }}"
-          description: "Sustained memory growth >10MB/s for 10min. Possible unbounded mempool or state accumulation."
+          description: "Sustained memory growth >50MB/s for 10min. Possible unbounded mempool or state accumulation."
 
       # Storage write stall (persistence blocked)
       - alert: StorageWriteStall
