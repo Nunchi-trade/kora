@@ -12,7 +12,16 @@ use crate::error::TransportError;
 pub const DEFAULT_MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
 
 /// Default channel backlog size.
-pub const DEFAULT_BACKLOG: usize = 256;
+pub const DEFAULT_BACKLOG: usize = 1024;
+
+/// Default backlog for consensus channels (votes/certs): high frequency, small messages.
+pub const DEFAULT_CONSENSUS_BACKLOG: usize = 2048;
+
+/// Default backlog for block dissemination channel: lower frequency, large messages.
+pub const DEFAULT_BLOCK_BACKLOG: usize = 512;
+
+/// Default backlog for resolver/backfill channels: burst-heavy during catch-up.
+pub const DEFAULT_RESOLVER_BACKLOG: usize = 1024;
 
 /// Default namespace for kora network messages.
 pub const DEFAULT_NAMESPACE: &[u8] = b"_COMMONWARE_KORA_NETWORK";
@@ -26,13 +35,23 @@ pub struct TransportConfig<C: commonware_cryptography::Signer> {
     /// Inner discovery config.
     pub(crate) inner: discovery::Config<C>,
 
-    /// Channel backlog size.
-    pub(crate) backlog: usize,
+    /// Backlog size for consensus channels (votes, certs).
+    pub(crate) consensus_backlog: usize,
+
+    /// Backlog size for block dissemination channel.
+    pub(crate) block_backlog: usize,
+
+    /// Backlog size for resolver and backfill channels.
+    pub(crate) resolver_backlog: usize,
 }
 
 impl<C: commonware_cryptography::Signer> fmt::Debug for TransportConfig<C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TransportConfig").field("backlog", &self.backlog).finish_non_exhaustive()
+        f.debug_struct("TransportConfig")
+            .field("consensus_backlog", &self.consensus_backlog)
+            .field("block_backlog", &self.block_backlog)
+            .field("resolver_backlog", &self.resolver_backlog)
+            .finish_non_exhaustive()
     }
 }
 
@@ -61,7 +80,9 @@ impl<C: commonware_cryptography::Signer> TransportConfig<C> {
                 bootstrappers,
                 max_message_size,
             ),
-            backlog: DEFAULT_BACKLOG,
+            consensus_backlog: DEFAULT_CONSENSUS_BACKLOG,
+            block_backlog: DEFAULT_BLOCK_BACKLOG,
+            resolver_backlog: DEFAULT_RESOLVER_BACKLOG,
         }
     }
 
@@ -85,14 +106,39 @@ impl<C: commonware_cryptography::Signer> TransportConfig<C> {
                 bootstrappers,
                 max_message_size,
             ),
-            backlog: DEFAULT_BACKLOG,
+            consensus_backlog: DEFAULT_CONSENSUS_BACKLOG,
+            block_backlog: DEFAULT_BLOCK_BACKLOG,
+            resolver_backlog: DEFAULT_RESOLVER_BACKLOG,
         }
     }
 
-    /// Set the channel backlog size.
+    /// Set the backlog size for all channels uniformly.
     #[must_use]
     pub const fn with_backlog(mut self, backlog: usize) -> Self {
-        self.backlog = backlog;
+        self.consensus_backlog = backlog;
+        self.block_backlog = backlog;
+        self.resolver_backlog = backlog;
+        self
+    }
+
+    /// Set the backlog size for consensus channels (votes, certs).
+    #[must_use]
+    pub const fn with_consensus_backlog(mut self, backlog: usize) -> Self {
+        self.consensus_backlog = backlog;
+        self
+    }
+
+    /// Set the backlog size for the block dissemination channel.
+    #[must_use]
+    pub const fn with_block_backlog(mut self, backlog: usize) -> Self {
+        self.block_backlog = backlog;
+        self
+    }
+
+    /// Set the backlog size for resolver and backfill channels.
+    #[must_use]
+    pub const fn with_resolver_backlog(mut self, backlog: usize) -> Self {
+        self.resolver_backlog = backlog;
         self
     }
 
@@ -236,7 +282,10 @@ mod tests {
     #[test]
     fn constants_values() {
         assert_eq!(DEFAULT_MAX_MESSAGE_SIZE, 1024 * 1024);
-        assert_eq!(DEFAULT_BACKLOG, 256);
+        assert_eq!(DEFAULT_BACKLOG, 1024);
+        assert_eq!(DEFAULT_CONSENSUS_BACKLOG, 2048);
+        assert_eq!(DEFAULT_BLOCK_BACKLOG, 512);
+        assert_eq!(DEFAULT_RESOLVER_BACKLOG, 1024);
         assert_eq!(DEFAULT_NAMESPACE, b"_COMMONWARE_KORA_NETWORK");
     }
 }

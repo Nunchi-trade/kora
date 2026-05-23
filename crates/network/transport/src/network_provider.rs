@@ -68,16 +68,18 @@ where
         self,
         context: E,
     ) -> Result<(TransportBundle<C::PublicKey, E>, Self::Control), Self::Error> {
-        let backlog = self.config.backlog;
+        let consensus_backlog = self.config.consensus_backlog;
+        let block_backlog = self.config.block_backlog;
+        let resolver_backlog = self.config.resolver_backlog;
 
         let (mut network, oracle) =
             discovery::Network::new(context.with_label("network"), self.config.inner);
 
-        let votes = network.register(CHANNEL_VOTES, self.quota, backlog);
-        let certs = network.register(CHANNEL_CERTS, self.quota, backlog);
-        let resolver = network.register(CHANNEL_RESOLVER, self.quota, backlog);
-        let blocks = network.register(CHANNEL_BLOCKS, self.quota, backlog);
-        let backfill = network.register(CHANNEL_BACKFILL, self.quota, backlog);
+        let votes = network.register(CHANNEL_VOTES, self.quota, consensus_backlog);
+        let certs = network.register(CHANNEL_CERTS, self.quota, consensus_backlog);
+        let resolver = network.register(CHANNEL_RESOLVER, self.quota, resolver_backlog);
+        let blocks = network.register(CHANNEL_BLOCKS, self.quota, block_backlog);
+        let backfill = network.register(CHANNEL_BACKFILL, self.quota, resolver_backlog);
 
         let handle = network.start();
 

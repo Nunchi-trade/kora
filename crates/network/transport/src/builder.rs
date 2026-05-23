@@ -71,20 +71,22 @@ impl<C: Signer> TransportConfig<C> {
     where
         E: Spawner + BufferPooler + Clock + CryptoRngCore + RNetwork + Resolver + Metrics,
     {
-        let backlog = self.backlog;
+        let consensus_backlog = self.consensus_backlog;
+        let block_backlog = self.block_backlog;
+        let resolver_backlog = self.resolver_backlog;
 
         // Create network and oracle
         let (mut network, oracle) =
             discovery::Network::new(context.with_label("network"), self.inner);
 
-        // Register simplex channels
-        let votes = network.register(CHANNEL_VOTES, quota, backlog);
-        let certs = network.register(CHANNEL_CERTS, quota, backlog);
-        let resolver = network.register(CHANNEL_RESOLVER, quota, backlog);
+        // Register simplex channels (consensus: high frequency, small messages)
+        let votes = network.register(CHANNEL_VOTES, quota, consensus_backlog);
+        let certs = network.register(CHANNEL_CERTS, quota, consensus_backlog);
+        let resolver = network.register(CHANNEL_RESOLVER, quota, resolver_backlog);
 
-        // Register marshal channels
-        let blocks = network.register(CHANNEL_BLOCKS, quota, backlog);
-        let backfill = network.register(CHANNEL_BACKFILL, quota, backlog);
+        // Register marshal channels (blocks: large messages, backfill: burst-heavy)
+        let blocks = network.register(CHANNEL_BLOCKS, quota, block_backlog);
+        let backfill = network.register(CHANNEL_BACKFILL, quota, resolver_backlog);
 
         // Start the network
         let handle = network.start();
