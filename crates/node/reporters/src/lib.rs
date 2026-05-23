@@ -376,7 +376,34 @@ where
             trace!(?digest, "missing snapshot for finalized block; re-executing");
         }
         let parent_digest = block.parent();
-        if let Some(parent_snapshot) = state.parent_snapshot(parent_digest).await {
+
+        // Retry parent snapshot lookup with exponential backoff. A concurrent
+        // persist_snapshot() call may be evicting or replacing snapshots; a
+        // brief retry window avoids spurious "missing parent" failures that
+        // would otherwise nullify the view.
+        const MAX_PARENT_RETRIES: u32 = 3;
+        const PARENT_RETRY_BASE_MS: u64 = 10;
+
+        let mut parent_snapshot = state.parent_snapshot(parent_digest).await;
+        if parent_snapshot.is_none() && !snapshot_exists {
+            for attempt in 1..=MAX_PARENT_RETRIES {
+                let delay = Duration::from_millis(PARENT_RETRY_BASE_MS << (attempt - 1));
+                warn!(
+                    ?digest,
+                    ?parent_digest,
+                    attempt,
+                    ?delay,
+                    "parent snapshot not found, retrying"
+                );
+                ::tokio::time::sleep(delay).await;
+                parent_snapshot = state.parent_snapshot(parent_digest).await;
+                if parent_snapshot.is_some() {
+                    break;
+                }
+            }
+        }
+
+        if let Some(parent_snapshot) = parent_snapshot {
             let block_context = provider.context(block);
             let execution =
                 BlockExecution::execute(&parent_snapshot, executor, &block_context, &block.txs)
@@ -501,10 +528,11 @@ mod finalize_error_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use alloy_consensus::Header;
-    use alloy_primitives::{B256, Bytes};
+    use alloy_primitives::{Address, B256, Bytes, U256};
     use commonware_runtime::Runner as _;
     use commonware_utils::acknowledgement::{Acknowledgement as _, Exact};
-    use kora_domain::{StateRoot, Tx};
+    use k256::ecdsa::SigningKey;
+    use kora_domain::{StateRoot, evm::Evm};
     use kora_executor::ExecutionError;
     use kora_ledger::LedgerView;
 
@@ -577,7 +605,9 @@ mod finalize_error_tests {
             let genesis = service.genesis_block();
 
             // -- insert a transaction into the mempool --
-            let tx = Tx::new(Bytes::from_static(&[0xab, 0xcd]));
+            let sender_key = SigningKey::from_bytes(&[1u8; 32].into()).expect("valid key");
+            let to = Address::repeat_byte(0xab);
+            let tx = Evm::sign_eip1559_transfer(&sender_key, 1, to, U256::ZERO, 0, 21_000, 0, 0);
             assert!(service.submit_tx(tx.clone()).await, "tx should be accepted into mempool");
             let pool = service.txpool().await;
             assert_eq!(pool.len(), 1, "mempool should contain the submitted tx");
@@ -626,10 +656,11 @@ mod finalize_success_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use alloy_consensus::Header;
-    use alloy_primitives::{B256, Bytes};
+    use alloy_primitives::{Address, B256, U256};
     use commonware_runtime::Runner as _;
     use commonware_utils::acknowledgement::{Acknowledgement as _, Exact};
-    use kora_domain::Tx;
+    use k256::ecdsa::SigningKey;
+    use kora_domain::evm::Evm;
     use kora_executor::ExecutionError;
     use kora_ledger::LedgerView;
 
@@ -700,7 +731,9 @@ mod finalize_success_tests {
                 service.query_state_root(genesis_digest).await.expect("genesis state root");
 
             // -- insert a dummy tx into the mempool so we can verify pruning --
-            let tx = Tx::new(Bytes::from_static(&[0x01, 0x02]));
+            let sender_key = SigningKey::from_bytes(&[2u8; 32].into()).expect("valid key");
+            let to = Address::repeat_byte(0xcd);
+            let tx = Evm::sign_eip1559_transfer(&sender_key, 1, to, U256::ZERO, 0, 21_000, 0, 0);
             assert!(service.submit_tx(tx.clone()).await, "tx should be accepted");
             let pool = service.txpool().await;
             assert_eq!(pool.len(), 1);

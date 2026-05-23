@@ -21,7 +21,7 @@ use crate::{
 /// evicted from the in-memory store. The `persisted` marker is kept so that
 /// ancestor chain-walking terminates correctly, but the heavy snapshot data
 /// (state overlay, change set, tx IDs) is freed.
-const DEFAULT_MAX_PERSISTED_RETAINED: usize = 64;
+const DEFAULT_MAX_PERSISTED_RETAINED: usize = 256;
 
 /// In-memory snapshot store with bounded retention of persisted snapshots.
 ///

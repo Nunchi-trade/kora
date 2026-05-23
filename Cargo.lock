@@ -3352,6 +3352,7 @@ dependencies = [
  "commonware-utils",
  "futures",
  "k256",
+ "kora-config",
  "kora-consensus",
  "kora-crypto",
  "kora-domain",
@@ -3427,6 +3428,7 @@ dependencies = [
  "commonware-utils",
  "futures",
  "k256",
+ "kora-config",
  "kora-consensus",
  "kora-domain",
  "kora-executor",
@@ -3436,6 +3438,7 @@ dependencies = [
  "kora-traits",
  "kora-txpool",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]

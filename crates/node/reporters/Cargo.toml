@@ -37,7 +37,7 @@ alloy-primitives.workspace = true
 # Error handling
 thiserror.workspace = true
 
-# Async
+# Async runtime
 tokio.workspace = true
 
 # Tracing

@@ -22,6 +22,10 @@ impl Evm {
     }
 
     /// Sign a simple EIP-1559 transfer transaction and return its encoded bytes.
+    ///
+    /// `max_fee_per_gas` must be at least as large as the block's `base_fee_per_gas`
+    /// for the transaction to be included by the EVM. Pass `0` when the block
+    /// context has no base fee (e.g. in unit tests that use `base_fee_per_gas: None`).
     #[allow(clippy::too_many_arguments)]
     pub fn sign_eip1559_transfer(
         key: &SigningKey,
@@ -30,13 +34,15 @@ impl Evm {
         value: U256,
         nonce: u64,
         gas_limit: u64,
+        max_fee_per_gas: u128,
+        max_priority_fee_per_gas: u128,
     ) -> Tx {
         let tx = TxEip1559 {
             chain_id,
             nonce,
             gas_limit,
-            max_fee_per_gas: 0,
-            max_priority_fee_per_gas: 0,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
             to: TxKind::Call(to),
             value,
             access_list: Default::default(),
@@ -97,7 +103,7 @@ mod tests {
         let to = Address::repeat_byte(0xab);
         let value = U256::from(1000);
 
-        let tx = Evm::sign_eip1559_transfer(&key, 1, to, value, 0, 21000);
+        let tx = Evm::sign_eip1559_transfer(&key, 1, to, value, 0, 21000, 0, 0);
 
         let envelope =
             TxEnvelope::decode_2718(&mut tx.bytes.as_ref()).expect("valid envelope encoding");
@@ -111,7 +117,7 @@ mod tests {
         let to = Address::repeat_byte(0xab);
         let chain_id = 42u64;
 
-        let tx = Evm::sign_eip1559_transfer(&key, chain_id, to, U256::ZERO, 0, 21000);
+        let tx = Evm::sign_eip1559_transfer(&key, chain_id, to, U256::ZERO, 0, 21000, 0, 0);
 
         let envelope =
             TxEnvelope::decode_2718(&mut tx.bytes.as_ref()).expect("valid envelope encoding");
@@ -124,7 +130,7 @@ mod tests {
         let to = Address::repeat_byte(0xab);
         let nonce = 123u64;
 
-        let tx = Evm::sign_eip1559_transfer(&key, 1, to, U256::ZERO, nonce, 21000);
+        let tx = Evm::sign_eip1559_transfer(&key, 1, to, U256::ZERO, nonce, 21000, 0, 0);
 
         let envelope =
             TxEnvelope::decode_2718(&mut tx.bytes.as_ref()).expect("valid envelope encoding");
@@ -137,7 +143,7 @@ mod tests {
         let to = Address::repeat_byte(0xab);
         let gas_limit = 50000u64;
 
-        let tx = Evm::sign_eip1559_transfer(&key, 1, to, U256::ZERO, 0, gas_limit);
+        let tx = Evm::sign_eip1559_transfer(&key, 1, to, U256::ZERO, 0, gas_limit, 0, 0);
 
         let envelope =
             TxEnvelope::decode_2718(&mut tx.bytes.as_ref()).expect("valid envelope encoding");
@@ -150,7 +156,7 @@ mod tests {
         let to = Address::repeat_byte(0xab);
         let value = U256::from(999_999);
 
-        let tx = Evm::sign_eip1559_transfer(&key, 1, to, value, 0, 21000);
+        let tx = Evm::sign_eip1559_transfer(&key, 1, to, value, 0, 21000, 0, 0);
 
         let envelope =
             TxEnvelope::decode_2718(&mut tx.bytes.as_ref()).expect("valid envelope encoding");
@@ -162,7 +168,7 @@ mod tests {
         let key = signing_key_from_seed(1);
         let to = Address::repeat_byte(0xcd);
 
-        let tx = Evm::sign_eip1559_transfer(&key, 1, to, U256::ZERO, 0, 21000);
+        let tx = Evm::sign_eip1559_transfer(&key, 1, to, U256::ZERO, 0, 21000, 0, 0);
 
         let envelope =
             TxEnvelope::decode_2718(&mut tx.bytes.as_ref()).expect("valid envelope encoding");
@@ -174,8 +180,8 @@ mod tests {
         let key = signing_key_from_seed(1);
         let to = Address::repeat_byte(0xab);
 
-        let tx1 = Evm::sign_eip1559_transfer(&key, 1, to, U256::from(100), 0, 21000);
-        let tx2 = Evm::sign_eip1559_transfer(&key, 1, to, U256::from(200), 0, 21000);
+        let tx1 = Evm::sign_eip1559_transfer(&key, 1, to, U256::from(100), 0, 21000, 0, 0);
+        let tx2 = Evm::sign_eip1559_transfer(&key, 1, to, U256::from(200), 0, 21000, 0, 0);
 
         assert_ne!(tx1.bytes, tx2.bytes);
     }
@@ -185,8 +191,8 @@ mod tests {
         let key = signing_key_from_seed(1);
         let to = Address::repeat_byte(0xab);
 
-        let tx1 = Evm::sign_eip1559_transfer(&key, 1, to, U256::ZERO, 0, 21000);
-        let tx2 = Evm::sign_eip1559_transfer(&key, 1, to, U256::ZERO, 1, 21000);
+        let tx1 = Evm::sign_eip1559_transfer(&key, 1, to, U256::ZERO, 0, 21000, 0, 0);
+        let tx2 = Evm::sign_eip1559_transfer(&key, 1, to, U256::ZERO, 1, 21000, 0, 0);
 
         assert_ne!(tx1.bytes, tx2.bytes);
     }
@@ -197,7 +203,7 @@ mod tests {
         let to = Address::repeat_byte(0xef);
         let sender = Evm::address_from_key(&key);
 
-        let tx = Evm::sign_eip1559_transfer(&key, 1, to, U256::from(500), 0, 21000);
+        let tx = Evm::sign_eip1559_transfer(&key, 1, to, U256::from(500), 0, 21000, 0, 0);
 
         let envelope =
             TxEnvelope::decode_2718(&mut tx.bytes.as_ref()).expect("valid envelope encoding");

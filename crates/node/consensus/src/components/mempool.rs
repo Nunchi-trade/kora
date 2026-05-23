@@ -90,7 +90,16 @@ mod tests {
         let sender_key = signing_key_from_seed(sender_seed);
         let recipient_key = signing_key_from_seed(recipient_seed);
         let recipient = Evm::address_from_key(&recipient_key);
-        Evm::sign_eip1559_transfer(&sender_key, 1, recipient, U256::from(value), nonce, 21_000)
+        Evm::sign_eip1559_transfer(
+            &sender_key,
+            1,
+            recipient,
+            U256::from(value),
+            nonce,
+            21_000,
+            0,
+            0,
+        )
     }
 
     fn signed_order_key(tx: &Tx) -> (Address, u64, TxId) {

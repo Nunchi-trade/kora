@@ -413,7 +413,7 @@ impl LedgerView {
         };
 
         let result = qmdb.commit_changes(changes).await;
-        let snapshots_handle = {
+        {
             let inner = self.inner.lock().await;
             inner.snapshots.clear_persisting_chain(&chain);
             match result {
@@ -437,15 +437,16 @@ impl LedgerView {
                         );
                     }
                     inner.snapshots.mark_persisted(&chain);
-                    Ok(inner.snapshots.clone())
+                    // Evict oldest persisted snapshots to bound memory usage.
+                    // Must happen inside the ledger mutex to prevent a TOCTOU
+                    // race where another thread reads a snapshot between
+                    // mark_persisted() and eviction.
+                    inner.snapshots.evict_persisted();
+                    Ok(())
                 }
                 Err(err) => Err(LedgerError::from(err)),
             }
         }?;
-        // Evict oldest persisted snapshots to bound memory usage.
-        // Done outside the `inner` mutex since `InMemorySnapshotStore` uses
-        // its own fine-grained `RwLock`s internally.
-        snapshots_handle.evict_persisted();
         Ok(true)
     }
 
@@ -676,8 +677,8 @@ mod tests {
 
     static PARTITION_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-    const GENESIS_BALANCE: u64 = 1_000_000;
-    const DUPLICATE_BALANCE: u64 = 500_000;
+    const GENESIS_BALANCE: u64 = 1_000_000_000_000_000_000; // 1 ETH in wei
+    const DUPLICATE_BALANCE: u64 = 1_000_000_000_000_000_000; // 1 ETH in wei
     const TRANSFER_ONE: u64 = 10;
     const TRANSFER_TWO: u64 = 5;
     const TRANSFER_DUPLICATE: u64 = 1;
@@ -722,6 +723,8 @@ mod tests {
             U256::from(value),
             nonce,
             GAS_LIMIT_TRANSFER,
+            INITIAL_BASE_FEE as u128,
+            0,
         )
     }
 

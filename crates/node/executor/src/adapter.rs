@@ -84,12 +84,59 @@ impl<S: StateDbRead> DatabaseRef for StateDbAdapter<S> {
 
 #[cfg(test)]
 mod tests {
+    use alloy_primitives::Bytes;
+    use kora_traits::StateDbError;
+
     use super::*;
+
+    /// Minimal mock that satisfies `StateDbRead` for tests that only exercise
+    /// the block-hash lookup path and never actually call the state methods.
+    #[derive(Clone)]
+    struct NoopState;
+
+    impl StateDbRead for NoopState {
+        fn nonce(
+            &self,
+            _: &Address,
+        ) -> impl std::future::Future<Output = Result<u64, StateDbError>> + Send {
+            async { Ok(0) }
+        }
+
+        fn balance(
+            &self,
+            _: &Address,
+        ) -> impl std::future::Future<Output = Result<U256, StateDbError>> + Send {
+            async { Ok(U256::ZERO) }
+        }
+
+        fn code_hash(
+            &self,
+            _: &Address,
+        ) -> impl std::future::Future<Output = Result<B256, StateDbError>> + Send {
+            async { Ok(B256::ZERO) }
+        }
+
+        fn code(
+            &self,
+            _: &B256,
+        ) -> impl std::future::Future<Output = Result<Bytes, StateDbError>> + Send {
+            async { Ok(Bytes::new()) }
+        }
+
+        fn storage(
+            &self,
+            _: &Address,
+            _: &U256,
+        ) -> impl std::future::Future<Output = Result<U256, StateDbError>> + Send {
+            async { Ok(U256::ZERO) }
+        }
+    }
 
     #[test]
     fn adapter_new() {
-        let adapter = StateDbAdapter::new((), HashMap::new());
-        assert_eq!(adapter.state(), &());
+        let adapter = StateDbAdapter::new(NoopState, HashMap::new());
+        // Verify the adapter is created successfully; state() returns a reference.
+        let _ = adapter.state();
     }
 
     #[test]
@@ -97,7 +144,7 @@ mod tests {
         let mut hashes = HashMap::new();
         let expected = B256::repeat_byte(0xab);
         hashes.insert(42, expected);
-        let adapter = StateDbAdapter::new((), hashes);
+        let adapter = StateDbAdapter::new(NoopState, hashes);
 
         let result = DatabaseRef::block_hash_ref(&adapter, 42).unwrap();
         assert_eq!(result, expected);
@@ -105,7 +152,7 @@ mod tests {
 
     #[test]
     fn block_hash_ref_returns_zero_for_unknown() {
-        let adapter = StateDbAdapter::new((), HashMap::new());
+        let adapter = StateDbAdapter::new(NoopState, HashMap::new());
 
         let result = DatabaseRef::block_hash_ref(&adapter, 999).unwrap();
         assert_eq!(result, B256::ZERO);
@@ -120,7 +167,7 @@ mod tests {
         hashes.insert(10, hash_10);
         hashes.insert(11, hash_11);
         hashes.insert(12, hash_12);
-        let adapter = StateDbAdapter::new((), hashes);
+        let adapter = StateDbAdapter::new(NoopState, hashes);
 
         assert_eq!(DatabaseRef::block_hash_ref(&adapter, 10).unwrap(), hash_10);
         assert_eq!(DatabaseRef::block_hash_ref(&adapter, 11).unwrap(), hash_11);
