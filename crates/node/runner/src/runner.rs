@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     ffi::OsString,
     path::{Path, PathBuf},
     sync::Arc,
@@ -20,7 +21,7 @@ use commonware_consensus::{
     types::{Epoch, FixedEpocher, ViewDelta},
 };
 use commonware_cryptography::{Committable as _, bls12381::primitives::variant::MinSig, ed25519};
-use commonware_p2p::{Blocker, Manager, TrackedPeers};
+use commonware_p2p::{Blocker, Manager, Receiver as _, Recipients, Sender as _, TrackedPeers};
 use commonware_runtime::{
     Clock as _, Handle as RuntimeHandle, Metrics as _, Spawner, ThreadPooler as _,
     buffer::paged::CacheRef, tokio as cw_tokio,
@@ -46,6 +47,15 @@ const EPOCH_LENGTH: u64 = u64::MAX;
 const PARTITION_PREFIX: &str = "kora";
 const TXPOOL_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 const RUNTIME_DIR_ENV: &str = "KORA_RUNTIME_DIR";
+
+/// Maximum number of transaction hashes retained in the gossip seen-set.
+/// When the set exceeds this size it is cleared to avoid unbounded memory
+/// growth. Under normal load the TTL-based cleanup keeps the set far smaller.
+const TX_GOSSIP_SEEN_SET_CAPACITY: usize = 65_536;
+
+/// Buffer size for the internal channel that forwards locally accepted
+/// transactions to the P2P gossip broadcast task.
+const TX_GOSSIP_OUTBOUND_BUFFER: usize = 4096;
 
 type Peer = ed25519::PublicKey;
 type CertArchive = Finalization<ThresholdScheme, ConsensusDigest>;
@@ -348,6 +358,30 @@ fn spawn_txpool_cleanup(pool: TransactionPool, context: cw_tokio::Context) {
     });
 }
 
+/// Bounded seen-set for transaction gossip de-duplication.
+///
+/// Tracks the hashes of recently seen transactions so we neither re-broadcast
+/// locally originated transactions that come back from peers nor re-insert
+/// gossipped transactions we already have.  When the set exceeds
+/// [`TX_GOSSIP_SEEN_SET_CAPACITY`] it is cleared wholesale -- this is cheaper
+/// than an LRU and perfectly safe because the txpool itself provides the
+/// ultimate dedup (via `AlreadyExists` / `NonceAlreadyInPool`).
+type SeenSet = Arc<parking_lot::Mutex<HashSet<B256>>>;
+
+fn new_seen_set() -> SeenSet {
+    Arc::new(parking_lot::Mutex::new(HashSet::with_capacity(1024)))
+}
+
+/// Returns `true` if the hash was **not** previously present (i.e. it is new).
+fn mark_seen(seen: &SeenSet, hash: B256) -> bool {
+    let mut set = seen.lock();
+    if set.len() >= TX_GOSSIP_SEEN_SET_CAPACITY {
+        debug!(capacity = TX_GOSSIP_SEEN_SET_CAPACITY, "tx gossip seen-set full, clearing");
+        set.clear();
+    }
+    set.insert(hash)
+}
+
 /// Monitor critical consensus infrastructure tasks for unexpected termination.
 ///
 /// Each of the three handles (`engine`, `marshal`, `broadcast`) wraps a
@@ -552,6 +586,97 @@ impl NodeRunner for ProductionRunner {
         let txpool = ledger.txpool().await;
         spawn_txpool_cleanup(txpool.clone(), context.clone());
 
+        // -- Transaction gossip infrastructure --
+        let (gossip_outbound_tx, gossip_seen): (
+            Option<tokio::sync::mpsc::Sender<alloy_primitives::Bytes>>,
+            Option<SeenSet>,
+        ) = if config.network.tx_gossip {
+            let (tx_gossip_sender, tx_gossip_receiver) = transport.tx_gossip.channel;
+            let seen = new_seen_set();
+            let (outbound_tx, gossip_outbound_rx) =
+                tokio::sync::mpsc::channel::<alloy_primitives::Bytes>(TX_GOSSIP_OUTBOUND_BUFFER);
+
+            // Outbound: read from internal channel, broadcast via P2P.
+            {
+                let seen = seen.clone();
+                let mut sender = tx_gossip_sender;
+                context.with_label("tx-gossip-out").shared(true).spawn(move |_| async move {
+                    let mut rx = gossip_outbound_rx;
+                    while let Some(raw) = rx.recv().await {
+                        let hash = keccak256(&raw);
+                        if !mark_seen(&seen, hash) {
+                            continue;
+                        }
+                        let msg = bytes::Bytes::copy_from_slice(&raw);
+                        if let Err(e) = sender.send(Recipients::All, msg, false).await {
+                            warn!(error = %e, "tx gossip: failed to broadcast transaction");
+                        } else {
+                            trace!(?hash, "tx gossip: broadcast transaction to peers");
+                        }
+                    }
+                    debug!("tx gossip outbound channel closed");
+                });
+            }
+
+            // Inbound: read from P2P, validate, insert into local pool.
+            {
+                let seen = seen.clone();
+                let gossip_ledger = ledger.clone();
+                let gossip_chain_id = self.chain_id;
+                let gossip_state = state.qmdb_state().await;
+                let gossip_pool = txpool.clone();
+                let mut receiver = tx_gossip_receiver;
+                context.with_label("tx-gossip-in").shared(true).spawn(move |_| async move {
+                    loop {
+                        let (peer, raw) = match receiver.recv().await {
+                            Ok(msg) => msg,
+                            Err(e) => {
+                                warn!(error = %e, "tx gossip: receive error, stopping inbound handler");
+                                break;
+                            }
+                        };
+
+                        let hash = keccak256(&raw);
+                        if !mark_seen(&seen, hash) {
+                            trace!(?hash, ?peer, "tx gossip: skipping already-seen transaction");
+                            continue;
+                        }
+
+                        let data = alloy_primitives::Bytes::copy_from_slice(raw.as_ref());
+                        let tx = Tx::new(data);
+                        let tx_id = tx.id();
+
+                        let validator = TransactionValidator::new(
+                            gossip_chain_id,
+                            gossip_state.clone(),
+                            PoolConfig::default(),
+                        )
+                        .with_pool(gossip_pool.clone());
+                        if let Err(e) = validator.validate(tx.clone()).await {
+                            trace!(?tx_id, ?peer, error = %e, "tx gossip: peer tx failed validation");
+                            continue;
+                        }
+
+                        if gossip_ledger.submit_tx(tx).await {
+                            debug!(?tx_id, ?peer, "tx gossip: accepted transaction from peer");
+                        } else {
+                            trace!(?tx_id, ?peer, "tx gossip: ledger rejected transaction (duplicate)");
+                        }
+                    }
+                });
+            }
+
+            info!("Transaction gossip enabled");
+            (Some(outbound_tx), Some(seen))
+        } else {
+            // Drop the gossip channel - we won't use it
+            drop(transport.tx_gossip);
+            info!(
+                "Transaction gossip disabled (enable with network.tx_gossip = true or --tx-gossip)"
+            );
+            (None, None)
+        };
+
         let context_provider = RevmContextProvider { gas_limit, block_index: block_index.clone() };
         recover_finalized_state(
             &ledger,
@@ -576,12 +701,16 @@ impl NodeRunner for ProductionRunner {
             let tx_state = state.qmdb_state().await;
             let chain_id = self.chain_id;
             let tx_pool = txpool.clone();
+            let gossip_tx = gossip_outbound_tx.clone();
+            let gossip_seen_rpc = gossip_seen.clone();
             let tx_submit: kora_rpc::TxSubmitCallback = Arc::new(move |data| {
                 let ledger = tx_ledger.clone();
                 let state = tx_state.clone();
                 let pool = tx_pool.clone();
+                let gossip = gossip_tx.clone();
+                let seen = gossip_seen_rpc.clone();
                 Box::pin(async move {
-                    let tx = Tx::new(data);
+                    let tx = Tx::new(data.clone());
                     let tx_id = tx.id();
                     let validator =
                         TransactionValidator::new(chain_id, state, PoolConfig::default())
@@ -592,6 +721,14 @@ impl NodeRunner for ProductionRunner {
                     })?;
                     if ledger.submit_tx(tx).await {
                         debug!(?tx_id, "rpc submit: tx inserted into mempool");
+                        // Forward to gossip if enabled.
+                        if let (Some(gossip), Some(seen)) = (&gossip, &seen) {
+                            let hash = keccak256(&data);
+                            mark_seen(seen, hash);
+                            if let Err(e) = gossip.try_send(data) {
+                                warn!(error = %e, "tx gossip: outbound channel full, skipping broadcast");
+                            }
+                        }
                         Ok(())
                     } else {
                         warn!(

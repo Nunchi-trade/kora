@@ -21,6 +21,9 @@ pub const CHANNEL_BLOCKS: u64 = 3;
 /// Channel ID for backfill messages.
 pub const CHANNEL_BACKFILL: u64 = 4;
 
+/// Channel ID for transaction gossip messages.
+pub const CHANNEL_TX_GOSSIP: u64 = 5;
+
 /// Type alias for channel sender.
 pub type Sender<P, E> = discovery::Sender<P, E>;
 
@@ -61,5 +64,20 @@ pub struct MarshalChannels<P: PublicKey, E: Clock> {
 impl<P: PublicKey, E: Clock> fmt::Debug for MarshalChannels<P, E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MarshalChannels").finish_non_exhaustive()
+    }
+}
+
+/// Channel for transaction gossip.
+///
+/// This channel handles broadcasting new transactions to peers and receiving
+/// gossipped transactions from peers.
+pub struct TxGossipChannel<P: PublicKey, E: Clock> {
+    /// Sender/receiver pair for transaction gossip.
+    pub channel: (Sender<P, E>, Receiver<P>),
+}
+
+impl<P: PublicKey, E: Clock> fmt::Debug for TxGossipChannel<P, E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TxGossipChannel").finish_non_exhaustive()
     }
 }

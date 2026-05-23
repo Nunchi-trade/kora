@@ -13,12 +13,13 @@ use commonware_utils::NZUsize;
 use kora_config::NodeConfig;
 use kora_service::TransportProvider;
 use kora_transport::{
-    CHANNEL_BACKFILL, CHANNEL_BLOCKS, CHANNEL_CERTS, CHANNEL_RESOLVER, CHANNEL_VOTES,
+    CHANNEL_BACKFILL, CHANNEL_BLOCKS, CHANNEL_CERTS, CHANNEL_RESOLVER, CHANNEL_TX_GOSSIP,
+    CHANNEL_VOTES,
 };
 
 use crate::{
     SimContext, SimTransportError,
-    channels::{SimMarshalChannels, SimSimplexChannels},
+    channels::{SimMarshalChannels, SimSimplexChannels, SimTxGossipChannel},
 };
 
 /// Configuration for simulated network links.
@@ -115,6 +116,8 @@ pub struct SimChannels<P: PublicKey> {
     pub simplex: SimSimplexChannels<P>,
     /// Marshal block dissemination channels.
     pub marshal: SimMarshalChannels<P>,
+    /// Transaction gossip channel.
+    pub tx_gossip: SimTxGossipChannel<P>,
 }
 
 impl<P: PublicKey> fmt::Debug for SimChannels<P> {
@@ -148,10 +151,15 @@ pub async fn register_node_channels<P: PublicKey>(
         .register(CHANNEL_BACKFILL, quota)
         .await
         .map_err(|e| SimTransportError::ChannelRegistration(format!("backfill: {e}")))?;
+    let tx_gossip = control
+        .register(CHANNEL_TX_GOSSIP, quota)
+        .await
+        .map_err(|e| SimTransportError::ChannelRegistration(format!("tx_gossip: {e}")))?;
 
     Ok(SimChannels {
         simplex: SimSimplexChannels { votes, certs, resolver },
         marshal: SimMarshalChannels { blocks, backfill },
+        tx_gossip: SimTxGossipChannel { channel: tx_gossip },
     })
 }
 

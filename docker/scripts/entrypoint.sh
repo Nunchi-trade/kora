@@ -121,10 +121,18 @@ case "$MODE" in
             done
         fi
 
+        TX_GOSSIP=${TX_GOSSIP:-false}
+        GOSSIP_FLAG=""
+        if [[ "$TX_GOSSIP" == "true" ]]; then
+            GOSSIP_FLAG="--tx-gossip"
+            log "Transaction gossip enabled"
+        fi
+
         exec /usr/local/bin/kora validator \
             --data-dir "$DATA_DIR" \
             --peers "${SHARED_DIR}/peers.json" \
             --chain-id "$CHAIN_ID" \
+            $GOSSIP_FLAG \
             "$@"
         ;;
 

@@ -23,6 +23,9 @@ pub const DEFAULT_BLOCK_BACKLOG: usize = 512;
 /// Default backlog for resolver/backfill channels: burst-heavy during catch-up.
 pub const DEFAULT_RESOLVER_BACKLOG: usize = 1024;
 
+/// Default backlog for transaction gossip channel: high-volume, small messages.
+pub const DEFAULT_GOSSIP_BACKLOG: usize = 1024;
+
 /// Default namespace for kora network messages.
 pub const DEFAULT_NAMESPACE: &[u8] = b"_COMMONWARE_KORA_NETWORK";
 
@@ -43,6 +46,9 @@ pub struct TransportConfig<C: commonware_cryptography::Signer> {
 
     /// Backlog size for resolver and backfill channels.
     pub(crate) resolver_backlog: usize,
+
+    /// Backlog size for transaction gossip channel.
+    pub(crate) gossip_backlog: usize,
 }
 
 impl<C: commonware_cryptography::Signer> fmt::Debug for TransportConfig<C> {
@@ -51,6 +57,7 @@ impl<C: commonware_cryptography::Signer> fmt::Debug for TransportConfig<C> {
             .field("consensus_backlog", &self.consensus_backlog)
             .field("block_backlog", &self.block_backlog)
             .field("resolver_backlog", &self.resolver_backlog)
+            .field("gossip_backlog", &self.gossip_backlog)
             .finish_non_exhaustive()
     }
 }
@@ -83,6 +90,7 @@ impl<C: commonware_cryptography::Signer> TransportConfig<C> {
             consensus_backlog: DEFAULT_CONSENSUS_BACKLOG,
             block_backlog: DEFAULT_BLOCK_BACKLOG,
             resolver_backlog: DEFAULT_RESOLVER_BACKLOG,
+            gossip_backlog: DEFAULT_GOSSIP_BACKLOG,
         }
     }
 
@@ -109,6 +117,7 @@ impl<C: commonware_cryptography::Signer> TransportConfig<C> {
             consensus_backlog: DEFAULT_CONSENSUS_BACKLOG,
             block_backlog: DEFAULT_BLOCK_BACKLOG,
             resolver_backlog: DEFAULT_RESOLVER_BACKLOG,
+            gossip_backlog: DEFAULT_GOSSIP_BACKLOG,
         }
     }
 
@@ -118,6 +127,7 @@ impl<C: commonware_cryptography::Signer> TransportConfig<C> {
         self.consensus_backlog = backlog;
         self.block_backlog = backlog;
         self.resolver_backlog = backlog;
+        self.gossip_backlog = backlog;
         self
     }
 
@@ -139,6 +149,13 @@ impl<C: commonware_cryptography::Signer> TransportConfig<C> {
     #[must_use]
     pub const fn with_resolver_backlog(mut self, backlog: usize) -> Self {
         self.resolver_backlog = backlog;
+        self
+    }
+
+    /// Set the backlog size for the transaction gossip channel.
+    #[must_use]
+    pub const fn with_gossip_backlog(mut self, backlog: usize) -> Self {
+        self.gossip_backlog = backlog;
         self
     }
 
@@ -286,6 +303,7 @@ mod tests {
         assert_eq!(DEFAULT_CONSENSUS_BACKLOG, 2048);
         assert_eq!(DEFAULT_BLOCK_BACKLOG, 512);
         assert_eq!(DEFAULT_RESOLVER_BACKLOG, 1024);
+        assert_eq!(DEFAULT_GOSSIP_BACKLOG, 1024);
         assert_eq!(DEFAULT_NAMESPACE, b"_COMMONWARE_KORA_NETWORK");
     }
 }

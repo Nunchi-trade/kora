@@ -12,8 +12,8 @@ use rand_core::CryptoRngCore;
 use crate::{
     TransportBundle, TransportConfig, TransportError, TransportProvider,
     channels::{
-        CHANNEL_BACKFILL, CHANNEL_BLOCKS, CHANNEL_CERTS, CHANNEL_RESOLVER, CHANNEL_VOTES,
-        MarshalChannels, SimplexChannels,
+        CHANNEL_BACKFILL, CHANNEL_BLOCKS, CHANNEL_CERTS, CHANNEL_RESOLVER, CHANNEL_TX_GOSSIP,
+        CHANNEL_VOTES, MarshalChannels, SimplexChannels, TxGossipChannel,
     },
 };
 
@@ -71,6 +71,7 @@ where
         let consensus_backlog = self.config.consensus_backlog;
         let block_backlog = self.config.block_backlog;
         let resolver_backlog = self.config.resolver_backlog;
+        let gossip_backlog = self.config.gossip_backlog;
 
         let (mut network, oracle) =
             discovery::Network::new(context.with_label("network"), self.config.inner);
@@ -80,14 +81,16 @@ where
         let resolver = network.register(CHANNEL_RESOLVER, self.quota, resolver_backlog);
         let blocks = network.register(CHANNEL_BLOCKS, self.quota, block_backlog);
         let backfill = network.register(CHANNEL_BACKFILL, self.quota, resolver_backlog);
+        let tx_gossip_channel = network.register(CHANNEL_TX_GOSSIP, self.quota, gossip_backlog);
 
         let handle = network.start();
 
-        tracing::info!("network transport started with 5 channels");
+        tracing::info!("network transport started with 6 channels");
 
         let bundle = TransportBundle::new(
             SimplexChannels { votes, certs, resolver },
             MarshalChannels { blocks, backfill },
+            TxGossipChannel { channel: tx_gossip_channel },
             handle,
         );
 

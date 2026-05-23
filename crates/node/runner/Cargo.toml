@@ -37,7 +37,9 @@ alloy-consensus = { workspace = true }
 alloy-primitives.workspace = true
 
 axum.workspace = true
+bytes.workspace = true
 futures.workspace = true
+parking_lot.workspace = true
 hex.workspace = true
 tokio.workspace = true
 tracing.workspace = true

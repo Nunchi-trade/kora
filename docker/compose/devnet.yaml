@@ -51,6 +51,7 @@ x-validator-common: &validator-common
     - RUST_LOG=${RUST_LOG:-info}
     - CHAIN_ID=${CHAIN_ID:-1337}
     - KORA_RUNTIME_DIR=${KORA_RUNTIME_DIR:-/runtime}
+    - TX_GOSSIP=${TX_GOSSIP:-true}
     - HEALTHCHECK_MODE=ready
 
 services:

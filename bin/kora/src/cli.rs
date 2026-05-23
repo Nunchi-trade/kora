@@ -53,6 +53,10 @@ pub(crate) struct ValidatorArgs {
     /// Prometheus metrics server bind address.
     #[arg(long, default_value = "0.0.0.0:9002")]
     pub metrics_addr: String,
+
+    /// Enable P2P transaction gossip between validators.
+    #[arg(long, default_value = "false")]
+    pub tx_gossip: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -129,6 +133,10 @@ impl Cli {
 
     fn run_validator(&self, args: &ValidatorArgs) -> eyre::Result<()> {
         let mut config = self.load_config()?;
+
+        if args.tx_gossip {
+            config.network.tx_gossip = true;
+        }
 
         tracing::info!(chain_id = config.chain_id, "Starting validator");
 
