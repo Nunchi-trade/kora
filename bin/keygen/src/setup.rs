@@ -187,14 +187,7 @@ pub(crate) fn run(args: SetupArgs) -> Result<()> {
     ];
     allocations.extend(funded_loadgen_allocations());
 
-    let genesis = GenesisConfig {
-        chain_id: args.chain_id,
-        timestamp: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs(),
-        allocations,
-    };
+    let genesis = GenesisConfig { chain_id: args.chain_id, timestamp: 0, allocations };
     let genesis_path = args.output_dir.join("genesis.json");
     fs::write(&genesis_path, serde_json::to_string_pretty(&genesis)?)?;
     tracing::info!(path = ?genesis_path, "Wrote genesis configuration");
