@@ -36,7 +36,7 @@ pub use subscription::{
 };
 
 mod state;
-pub use state::{NodeState, NodeStatus};
+pub use state::{NodeState, NodeStatus, PartitionStatus};
 
 mod state_provider;
 pub use state_provider::{NoopStateProvider, StateProvider};

@@ -15,6 +15,39 @@ use serde::{Deserialize, Serialize};
 /// Default validator count used by tests and legacy callers.
 pub(crate) const DEFAULT_VALIDATOR_COUNT: u32 = 4;
 
+/// Network partition status derived from peer connectivity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PartitionStatus {
+    /// All expected peers are connected.
+    Healthy,
+    /// Some peers are missing but quorum is still possible.
+    Degraded,
+    /// Too few peers for BFT quorum (fewer than 2f+1).
+    Partitioned,
+}
+
+impl PartitionStatus {
+    /// Derive partition status from the number of connected peers and total
+    /// expected peers (i.e. `validator_count - 1`).
+    ///
+    /// For a BFT system with `n` validators, quorum requires `2f+1` where
+    /// `f = (n-1)/3`. A node needs at least `2f` *other* peers to form
+    /// quorum (since it counts itself as part of the `2f+1`).
+    const fn from_peer_counts(connected_peers: u64, total_expected_peers: u64) -> Self {
+        if connected_peers >= total_expected_peers {
+            Self::Healthy
+        } else {
+            // total_validators = total_expected_peers + 1 (include self)
+            let total_validators = total_expected_peers + 1;
+            // f = (n-1) / 3, quorum = 2f+1, peers needed = quorum - 1 (self)
+            let f = (total_validators.saturating_sub(1)) / 3;
+            let quorum_peers_needed = 2 * f; // 2f peers + self = 2f+1
+            if connected_peers >= quorum_peers_needed { Self::Degraded } else { Self::Partitioned }
+        }
+    }
+}
+
 /// Shared node state that can be updated by the consensus engine.
 #[derive(Debug, Clone)]
 pub struct NodeState {
@@ -120,6 +153,10 @@ impl NodeState {
 
     /// Get current node status.
     pub fn status(&self) -> NodeStatus {
+        let peer_count = self.inner.peer_count.load(Ordering::Relaxed);
+        let total_expected_peers = u64::from(self.inner.validator_count.get()).saturating_sub(1);
+        let partition_status = PartitionStatus::from_peer_counts(peer_count, total_expected_peers);
+
         NodeStatus {
             chain_id: self.inner.chain_id,
             validator_index: self.inner.validator_index,
@@ -128,7 +165,9 @@ impl NodeState {
             finalized_count: self.inner.finalized_count.load(Ordering::Relaxed),
             proposed_count: self.inner.proposed_count.load(Ordering::Relaxed),
             nullified_count: self.inner.nullified_count.load(Ordering::Relaxed),
-            peer_count: self.inner.peer_count.load(Ordering::Relaxed),
+            peer_count,
+            total_expected_peers,
+            partition_status,
             is_leader: *self.inner.is_leader.read(),
         }
     }
@@ -154,6 +193,10 @@ pub struct NodeStatus {
     pub nullified_count: u64,
     /// Number of connected peers.
     pub peer_count: u64,
+    /// Total number of expected peers (validator_count - 1).
+    pub total_expected_peers: u64,
+    /// Network partition status derived from peer connectivity.
+    pub partition_status: PartitionStatus,
     /// Whether this node is the current leader.
     pub is_leader: bool,
 }
@@ -173,6 +216,8 @@ mod tests {
             proposed_count: 10,
             nullified_count: 5,
             peer_count: 3,
+            total_expected_peers: 3,
+            partition_status: PartitionStatus::Healthy,
             is_leader: true,
         };
 
@@ -187,6 +232,8 @@ mod tests {
         assert_eq!(status.proposed_count, parsed.proposed_count);
         assert_eq!(status.nullified_count, parsed.nullified_count);
         assert_eq!(status.peer_count, parsed.peer_count);
+        assert_eq!(status.total_expected_peers, parsed.total_expected_peers);
+        assert_eq!(status.partition_status, parsed.partition_status);
         assert_eq!(status.is_leader, parsed.is_leader);
     }
 
@@ -201,6 +248,8 @@ mod tests {
             proposed_count: 0,
             nullified_count: 0,
             peer_count: 0,
+            total_expected_peers: 3,
+            partition_status: PartitionStatus::Partitioned,
             is_leader: false,
         };
 
@@ -213,6 +262,8 @@ mod tests {
         assert!(json.contains("proposedCount"));
         assert!(json.contains("nullifiedCount"));
         assert!(json.contains("peerCount"));
+        assert!(json.contains("totalExpectedPeers"));
+        assert!(json.contains("partitionStatus"));
         assert!(json.contains("isLeader"));
     }
 
@@ -309,5 +360,68 @@ mod tests {
 
         state.set_finalized_height(100);
         assert_eq!(state.finalized_height(), 100);
+    }
+
+    // -- PartitionStatus tests --
+
+    #[test]
+    fn partition_status_healthy_when_all_peers_connected() {
+        // 4 validators: 3 expected peers, 3 connected
+        assert_eq!(PartitionStatus::from_peer_counts(3, 3), PartitionStatus::Healthy);
+    }
+
+    #[test]
+    fn partition_status_degraded_when_one_peer_missing() {
+        // 4 validators (f=1): need 2 peers for quorum, have 2
+        assert_eq!(PartitionStatus::from_peer_counts(2, 3), PartitionStatus::Degraded);
+    }
+
+    #[test]
+    fn partition_status_partitioned_when_below_quorum() {
+        // 4 validators (f=1): need 2 peers for quorum, have 1
+        assert_eq!(PartitionStatus::from_peer_counts(1, 3), PartitionStatus::Partitioned);
+    }
+
+    #[test]
+    fn partition_status_partitioned_when_no_peers() {
+        assert_eq!(PartitionStatus::from_peer_counts(0, 3), PartitionStatus::Partitioned);
+    }
+
+    #[test]
+    fn partition_status_seven_validators() {
+        // 7 validators (f=2): need 4 peers for quorum (2f peers + self = 5 = 2f+1)
+        assert_eq!(PartitionStatus::from_peer_counts(6, 6), PartitionStatus::Healthy);
+        assert_eq!(PartitionStatus::from_peer_counts(5, 6), PartitionStatus::Degraded);
+        assert_eq!(PartitionStatus::from_peer_counts(4, 6), PartitionStatus::Degraded);
+        assert_eq!(PartitionStatus::from_peer_counts(3, 6), PartitionStatus::Partitioned);
+    }
+
+    #[test]
+    fn partition_status_serializes_lowercase() {
+        let healthy = serde_json::to_string(&PartitionStatus::Healthy).unwrap();
+        assert_eq!(healthy, "\"healthy\"");
+        let degraded = serde_json::to_string(&PartitionStatus::Degraded).unwrap();
+        assert_eq!(degraded, "\"degraded\"");
+        let partitioned = serde_json::to_string(&PartitionStatus::Partitioned).unwrap();
+        assert_eq!(partitioned, "\"partitioned\"");
+    }
+
+    #[test]
+    fn partition_status_included_in_node_status() {
+        // With 4 validators (default), peer_count=0 should be partitioned
+        let state = NodeState::new(1, 0);
+        let status = state.status();
+        assert_eq!(status.total_expected_peers, 3);
+        assert_eq!(status.partition_status, PartitionStatus::Partitioned);
+
+        // Set all peers connected
+        state.set_peer_count(3);
+        let status = state.status();
+        assert_eq!(status.partition_status, PartitionStatus::Healthy);
+
+        // One peer missing
+        state.set_peer_count(2);
+        let status = state.status();
+        assert_eq!(status.partition_status, PartitionStatus::Degraded);
     }
 }

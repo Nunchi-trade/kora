@@ -65,6 +65,7 @@ impl kora_metrics::MetricsRegister for RuntimeMetrics<'_> {
 const EPOCH_LENGTH: u64 = u64::MAX;
 const PARTITION_PREFIX: &str = "kora";
 const TXPOOL_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
+const PARTITION_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 const RUNTIME_DIR_ENV: &str = "KORA_RUNTIME_DIR";
 const CHECKPOINT_INTERVAL_ENV: &str = "KORA_CHECKPOINT_INTERVAL";
 const DEFAULT_CHECKPOINT_INTERVAL: u64 = 256;
@@ -604,6 +605,46 @@ fn mark_seen(seen: &SeenSet, hash: B256) -> bool {
     set.insert(hash)
 }
 
+/// Periodically check peer connectivity and log warnings when the network
+/// appears degraded or partitioned.
+///
+/// This task reads the peer count from `NodeState` every
+/// [`PARTITION_CHECK_INTERVAL`] and compares it against the expected peer
+/// count to determine partition status. Warnings and errors are emitted so
+/// operators (and log-based alerting) can detect connectivity issues even
+/// without Prometheus.
+fn spawn_partition_monitor(node_state: kora_rpc::NodeState, context: cw_tokio::Context) {
+    context.with_label("partition-monitor").shared(false).spawn(move |ctx| async move {
+        loop {
+            ctx.sleep(PARTITION_CHECK_INTERVAL).await;
+            let status = node_state.status();
+            match status.partition_status {
+                kora_rpc::PartitionStatus::Healthy => {
+                    trace!(
+                        peer_count = status.peer_count,
+                        expected = status.total_expected_peers,
+                        "partition check: healthy"
+                    );
+                }
+                kora_rpc::PartitionStatus::Degraded => {
+                    warn!(
+                        peer_count = status.peer_count,
+                        expected = status.total_expected_peers,
+                        "partition check: DEGRADED — some peers missing but quorum still possible"
+                    );
+                }
+                kora_rpc::PartitionStatus::Partitioned => {
+                    error!(
+                        peer_count = status.peer_count,
+                        expected = status.total_expected_peers,
+                        "partition check: PARTITIONED — below quorum threshold, consensus cannot progress"
+                    );
+                }
+            }
+        }
+    });
+}
+
 /// Monitor critical consensus infrastructure tasks for unexpected termination.
 ///
 /// Each of the three handles (`engine`, `marshal`, `broadcast`) wraps a
@@ -1030,6 +1071,8 @@ impl NodeRunner for ProductionRunner {
             }
             drop(rpc.start());
             info!(addr = %addr, "RPC server started with live state provider");
+
+            spawn_partition_monitor(node_state.clone(), context.clone());
         }
 
         if let Some(metrics_addr) = self.metrics_addr {

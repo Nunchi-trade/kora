@@ -256,3 +256,62 @@ groups:
         annotations:
           summary: "Consensus efficiency crashed from >50% to {{ $value | humanizePercentage }}"
           description: "Efficiency dropped off a cliff. This pattern precedes permanent stalls caused by mempool poisoning."
+
+  - name: network_partition
+    rules:
+      # Individual peer disconnected — no messages received from a tracked peer
+      - alert: PeerDisconnected
+        expr: >
+          network_tracker_directory_tracked > 0
+          and sum by (instance) (rate(network_spawner_messages_received_total[2m])) == 0
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: "No P2P messages received on {{ $labels.instance }}"
+          description: "Node has tracked peers but received zero messages in 2 minutes. Likely disconnected from the network."
+
+      # Potential network partition — fewer than 3 tracked peers (quorum requires 3/4)
+      - alert: NetworkPartition
+        expr: network_tracker_directory_tracked < 3
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Network partition detected on {{ $labels.instance }}: only {{ $value }} tracked peers"
+          description: "Fewer than 3 peers tracked. BFT consensus requires 2f+1 (3 of 4) validators. This node cannot participate in quorum."
+
+      # High message drop rate — early warning for degraded connectivity
+      - alert: HighMessageDropRate
+        expr: >
+          sum(rate(network_router_messages_dropped_total[5m]))
+          / clamp_min(sum(rate(network_spawner_messages_sent_total[5m])), 1) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "P2P message drop rate is {{ $value | humanizePercentage }}"
+          description: "Over 10% of sent messages are being dropped. Network connectivity may be degraded. Observed 18.5% drop rate before production stall."
+
+      # Asymmetric connectivity — node can send but not receive (or vice versa)
+      - alert: AsymmetricConnectivity
+        expr: >
+          sum(rate(network_spawner_messages_sent_total[5m])) > 1
+          and sum(rate(network_spawner_messages_received_total[5m])) < 0.01
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Asymmetric connectivity on {{ $labels.instance }}: sending but not receiving"
+          description: "Node is sending P2P messages but receiving none. Likely a one-way network partition."
+
+      # All peers rate-limited — possible flooding or misconfiguration
+      - alert: HighRateLimitedMessages
+        expr: >
+          sum(rate(network_spawner_messages_rate_limited_total[5m])) > 10
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} messages/s rate-limited on {{ $labels.instance }}"
+          description: "High rate of P2P messages being rate-limited. May indicate flooding, replay storms, or overly aggressive rate limits."
