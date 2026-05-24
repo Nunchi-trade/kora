@@ -204,7 +204,13 @@ fn index_recovered_block(
 /// Number of recent blocks to restore during startup to pre-populate the
 /// snapshot cache. This ensures that blocks arriving shortly after restart
 /// can find their parent snapshot without entering catch-up mode.
-const SNAPSHOT_PREPOPULATE_COUNT: u64 = 16;
+///
+/// A larger window (64 blocks) means the node can survive outages where
+/// the network advances up to 64 blocks before the node restarts.  Blocks
+/// within this window are resolved from the local archive without needing
+/// catch-up trust.  Beyond this window, the catch-up mechanism in
+/// `RevmApplication::verify_block` handles the gap.
+const SNAPSHOT_PREPOPULATE_COUNT: u64 = 64;
 
 async fn recover_finalized_state<FB, FC>(
     ledger: &LedgerService,
@@ -831,25 +837,35 @@ impl NodeRunner for ProductionRunner {
         let checkpoint_interval = checkpoint_interval();
         info!(checkpoint_interval, "configured finalized archive and QMDB checkpoint interval");
 
+        // Migrate any legacy immutable archive partitions left over from
+        // before the switch to prunable archives. The old backend used
+        // different partition names, so its data is silently orphaned on
+        // upgrade. This detects, warns, and removes the stale partitions.
+        let finalizations_prefix = format!("{partition_prefix}-finalizations-by-height");
+        let blocks_prefix = format!("{partition_prefix}-finalized-blocks");
+        ArchiveInitializer::migrate_from_immutable(&context, &finalizations_prefix).await;
+        ArchiveInitializer::migrate_from_immutable(&context, &blocks_prefix).await;
+
         <ThresholdScheme as commonware_cryptography::certificate::Scheme>::certificate_codec_config_unbounded();
         let finalizations_by_height =
-            ArchiveInitializer::init_checkpointed::<_, ConsensusDigest, CertArchive>(
+            ArchiveInitializer::init_prunable_checkpointed::<_, ConsensusDigest, CertArchive>(
                 context.with_label("finalizations_by_height"),
-                format!("{partition_prefix}-finalizations-by-height"),
+                finalizations_prefix,
                 (),
                 checkpoint_interval,
             )
             .await
             .context("init finalizations archive")?;
 
-        let finalized_blocks = ArchiveInitializer::init_checkpointed::<_, ConsensusDigest, Block>(
-            context.with_label("finalized_blocks"),
-            format!("{partition_prefix}-finalized-blocks"),
-            block_cfg,
-            checkpoint_interval,
-        )
-        .await
-        .context("init blocks archive")?;
+        let finalized_blocks =
+            ArchiveInitializer::init_prunable_checkpointed::<_, ConsensusDigest, Block>(
+                context.with_label("finalized_blocks"),
+                blocks_prefix,
+                block_cfg,
+                checkpoint_interval,
+            )
+            .await
+            .context("init blocks archive")?;
 
         let has_finalized_history = finalized_blocks.last_index().is_some();
         let state = LedgerView::init_with_genesis_options(
@@ -892,6 +908,7 @@ impl NodeRunner for ProductionRunner {
             {
                 let seen = seen.clone();
                 let mut sender = tx_gossip_sender;
+                let out_metrics = app_metrics.clone();
                 context.with_label("tx-gossip-out").shared(true).spawn(move |_| async move {
                     let mut rx = gossip_outbound_rx;
                     while let Some(raw) = rx.recv().await {
@@ -902,8 +919,10 @@ impl NodeRunner for ProductionRunner {
                         let msg = bytes::Bytes::copy_from_slice(&raw);
                         if let Err(e) = sender.send(Recipients::All, msg, false).await {
                             warn!(error = %e, "tx gossip: failed to broadcast transaction");
+                            out_metrics.gossip_tx_broadcast_failed.inc();
                         } else {
                             trace!(?hash, "tx gossip: broadcast transaction to peers");
+                            out_metrics.gossip_tx_broadcast.inc();
                         }
                     }
                     debug!("tx gossip outbound channel closed");
@@ -915,9 +934,9 @@ impl NodeRunner for ProductionRunner {
                 let seen = seen.clone();
                 let gossip_ledger = ledger.clone();
                 let gossip_chain_id = self.chain_id;
-                let gossip_state = state.qmdb_state().await;
                 let gossip_pool = txpool.clone();
                 let mut receiver = tx_gossip_receiver;
+                let in_metrics = app_metrics.clone();
                 context.with_label("tx-gossip-in").shared(true).spawn(move |_| async move {
                     loop {
                         let (peer, raw) = match receiver.recv().await {
@@ -928,6 +947,7 @@ impl NodeRunner for ProductionRunner {
                             }
                         };
 
+                        in_metrics.gossip_tx_received.inc();
                         let hash = keccak256(&raw);
                         if !mark_seen(&seen, hash) {
                             trace!(?hash, ?peer, "tx gossip: skipping already-seen transaction");
@@ -938,14 +958,20 @@ impl NodeRunner for ProductionRunner {
                         let tx = Tx::new(data);
                         let tx_id = tx.id();
 
+                        // Fetch the latest state on each validation so nonce
+                        // and balance checks reflect finalized blocks.  The
+                        // previous code captured state once at startup, making
+                        // gossip validation increasingly stale.
+                        let current_state = gossip_ledger.latest_state().await;
                         let validator = TransactionValidator::new(
                             gossip_chain_id,
-                            gossip_state.clone(),
+                            current_state,
                             PoolConfig::default(),
                         )
                         .with_pool(gossip_pool.clone());
                         if let Err(e) = validator.validate(tx.clone()).await {
                             trace!(?tx_id, ?peer, error = %e, "tx gossip: peer tx failed validation");
+                            in_metrics.gossip_tx_invalid.inc();
                             continue;
                         }
 

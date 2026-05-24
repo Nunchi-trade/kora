@@ -27,8 +27,8 @@ impl Default for PoolConfig {
             max_pending_txs: 4096,
             max_queued_txs: 1024,
             max_txs_per_sender: 256,
-            max_tx_size: 128 * 1024, // 128 KB
-            min_gas_price: 0,
+            max_tx_size: 128 * 1024,      // 128 KB
+            min_gas_price: 1_000_000_000, // 1 gwei, matches INITIAL_BASE_FEE
             replacement_bump_percent: 10,
             pending_ttl_secs: 30 * 60,
             queued_ttl_secs: 60 * 60,
@@ -44,7 +44,7 @@ impl PoolConfig {
             max_queued_txs: 1024,
             max_txs_per_sender: 256,
             max_tx_size: 128 * 1024,
-            min_gas_price: 0,
+            min_gas_price: 1_000_000_000, // 1 gwei, matches INITIAL_BASE_FEE
             replacement_bump_percent: 10,
             pending_ttl_secs: 30 * 60,
             queued_ttl_secs: 60 * 60,
@@ -119,7 +119,7 @@ mod tests {
         assert_eq!(config.max_queued_txs, 1024);
         assert_eq!(config.max_txs_per_sender, 256);
         assert_eq!(config.max_tx_size, 128 * 1024);
-        assert_eq!(config.min_gas_price, 0);
+        assert_eq!(config.min_gas_price, 1_000_000_000);
         assert_eq!(config.replacement_bump_percent, 10);
         assert_eq!(config.pending_ttl_secs, 30 * 60);
         assert_eq!(config.queued_ttl_secs, 60 * 60);

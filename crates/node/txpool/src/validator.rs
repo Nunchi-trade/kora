@@ -486,7 +486,7 @@ mod tests {
 
         let state =
             MockState::new().with_account(sender, 0, U256::from(1_000_000_000_000_000_000u64));
-        let config = PoolConfig::default().with_min_gas_price(1_000_000_000);
+        let config = PoolConfig::default(); // min_gas_price defaults to 1 gwei
         let validator = TransactionValidator::new(chain_id, state, config);
 
         let result = validator.validate(raw_tx).await;

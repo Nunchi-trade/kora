@@ -143,17 +143,18 @@ async fn setup_validator(
     let network = control.register(2, TEST_QUOTA).await.unwrap();
     broadcast_engine.start(network);
 
-    // 3. Use ArchiveInitializer::init_finalizations() for finalizations archive
-    let finalizations_by_height = ArchiveInitializer::init_finalizations(
+    // 3. Use ArchiveInitializer::init_prunable() for finalizations archive
+    let finalizations_by_height = ArchiveInitializer::init_prunable(
         context.with_label("finalizations_by_height"),
+        "finalizations",
         S::certificate_codec_config_unbounded(),
     )
     .await
     .expect("failed to init finalizations archive");
 
-    // 4. Use ArchiveInitializer::init_blocks() for blocks archive
+    // 4. Use ArchiveInitializer::init_prunable() for blocks archive
     let finalized_blocks =
-        ArchiveInitializer::init_blocks(context.with_label("finalized_blocks"), ())
+        ArchiveInitializer::init_prunable(context.with_label("finalized_blocks"), "blocks", ())
             .await
             .expect("failed to init blocks archive");
 
