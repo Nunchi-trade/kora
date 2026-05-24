@@ -27,6 +27,16 @@ const MAX_LOADGEN_ACCOUNTS: usize = u8::MAX as usize;
 /// Intrinsic gas for a simple ETH transfer (21,000).
 const TRANSFER_GAS_LIMIT: u64 = 21_000;
 
+/// Max fee per gas for load-generated transactions (10 gwei).
+///
+/// Must exceed the chain's base fee (currently `INITIAL_BASE_FEE` = 1 gwei)
+/// plus any priority fee. 10 gwei gives ample headroom for base-fee
+/// fluctuations during sustained load.
+const MAX_FEE_PER_GAS: u128 = 10_000_000_000;
+
+/// Max priority fee (tip) per gas for load-generated transactions (1 gwei).
+const MAX_PRIORITY_FEE_PER_GAS: u128 = 1_000_000_000;
+
 /// Maximum retry attempts before giving up on a transaction.
 const MAX_RETRY_ATTEMPTS: u64 = 10;
 
@@ -155,13 +165,15 @@ fn sign_eip1559_transfer(
     value: U256,
     nonce: u64,
     gas_limit: u64,
+    max_fee_per_gas: u128,
+    max_priority_fee_per_gas: u128,
 ) -> Bytes {
     let tx = TxEip1559 {
         chain_id,
         nonce,
         gas_limit,
-        max_fee_per_gas: 0,
-        max_priority_fee_per_gas: 0,
+        max_fee_per_gas,
+        max_priority_fee_per_gas,
         to: TxKind::Call(to),
         value,
         access_list: Default::default(),
@@ -394,6 +406,8 @@ async fn main() -> Result<()> {
                 transfer_amount,
                 nonce,
                 TRANSFER_GAS_LIMIT,
+                MAX_FEE_PER_GAS,
+                MAX_PRIORITY_FEE_PER_GAS,
             );
             success_count.fetch_add(1, Ordering::Relaxed);
             if (i + 1) % 1000 == 0 {
@@ -493,6 +507,8 @@ async fn main() -> Result<()> {
                         transfer_amount,
                         nonce,
                         TRANSFER_GAS_LIMIT,
+                        MAX_FEE_PER_GAS,
+                        MAX_PRIORITY_FEE_PER_GAS,
                     );
 
                     // Retry with exponential backoff on transient errors. Nonce
@@ -744,8 +760,16 @@ mod tests {
     fn sign_eip1559_transfer_produces_valid_envelope() {
         let account = Account::new(1);
         let to = Address::repeat_byte(0xBB);
-        let raw =
-            sign_eip1559_transfer(&account.key, 1337, to, U256::from(1), 0, TRANSFER_GAS_LIMIT);
+        let raw = sign_eip1559_transfer(
+            &account.key,
+            1337,
+            to,
+            U256::from(1),
+            0,
+            TRANSFER_GAS_LIMIT,
+            MAX_FEE_PER_GAS,
+            MAX_PRIORITY_FEE_PER_GAS,
+        );
         // EIP-2718 type-2 envelope starts with 0x02
         assert!(!raw.is_empty());
         assert_eq!(raw[0], 0x02, "expected EIP-1559 type prefix");
