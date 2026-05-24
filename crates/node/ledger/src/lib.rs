@@ -396,22 +396,22 @@ impl LedgerView {
         parent: ConsensusDigest,
         timeout: Duration,
     ) -> Option<LedgerSnapshot> {
-        // Fast path: already available.
-        if let Some(snap) = self.parent_snapshot(parent).await {
-            return Some(snap);
-        }
-
         let deadline = ::tokio::time::Instant::now() + timeout;
         loop {
+            // Register the notification future BEFORE checking the snapshot.
+            // This eliminates the race window where `notify_waiters()` fires
+            // between the check and the wait, which would cause a lost
+            // wake-up and an unnecessary full-timeout delay.
+            let notified = self.snapshot_notify.notified();
+            if let Some(snap) = self.parent_snapshot(parent).await {
+                return Some(snap);
+            }
             let remaining = deadline.saturating_duration_since(::tokio::time::Instant::now());
             if remaining.is_zero() {
                 break;
             }
             // Wait for any snapshot insertion, or the remaining timeout.
-            let _ = ::tokio::time::timeout(remaining, self.snapshot_notify.notified()).await;
-            if let Some(snap) = self.parent_snapshot(parent).await {
-                return Some(snap);
-            }
+            let _ = ::tokio::time::timeout(remaining, notified).await;
         }
         None
     }

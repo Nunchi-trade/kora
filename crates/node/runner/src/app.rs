@@ -34,7 +34,7 @@ use tracing::{debug, error, trace, warn};
 /// giving up and nullifying the view.  Uses event-driven notification
 /// (via [`LedgerService::wait_for_snapshot`]) so the wake-up is immediate
 /// once the snapshot is inserted, with this timeout as the upper bound.
-const SNAPSHOT_WAIT_TIMEOUT: Duration = Duration::from_millis(50);
+const SNAPSHOT_WAIT_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// Maximum number of unfinalized blocks a leader may be ahead of the last
 /// finalized height before it voluntarily skips its proposal turn.  This
