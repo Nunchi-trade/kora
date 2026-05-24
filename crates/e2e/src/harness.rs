@@ -488,15 +488,16 @@ where
     broadcast_engine.start(blocks);
 
     ThresholdScheme::certificate_codec_config_unbounded();
-    let finalizations_by_height = ArchiveInitializer::init::<_, ConsensusDigest, CertArchive>(
-        ctx.with_label("finalizations_by_height"),
-        format!("{marshal_partition}-finalizations-by-height"),
-        (),
-    )
-    .await
-    .context("init finalizations archive")?;
+    let finalizations_by_height =
+        ArchiveInitializer::init_prunable::<_, ConsensusDigest, CertArchive>(
+            ctx.with_label("finalizations_by_height"),
+            format!("{marshal_partition}-finalizations-by-height"),
+            (),
+        )
+        .await
+        .context("init finalizations archive")?;
 
-    let finalized_blocks = ArchiveInitializer::init::<_, ConsensusDigest, Block>(
+    let finalized_blocks = ArchiveInitializer::init_prunable::<_, ConsensusDigest, Block>(
         ctx.with_label("finalized_blocks"),
         format!("{marshal_partition}-finalized-blocks"),
         block_codec_config,
