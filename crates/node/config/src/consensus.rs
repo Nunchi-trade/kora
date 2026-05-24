@@ -35,10 +35,22 @@ pub const DEFAULT_SIMPLEX_WRITE_BUFFER_BYTES: usize = 16 * 1024 * 1024;
 pub const DEFAULT_SIMPLEX_LEADER_TIMEOUT_SECS: u64 = 1;
 
 /// Default Simplex certification timeout in seconds.
-pub const DEFAULT_SIMPLEX_CERTIFICATION_TIMEOUT_SECS: u64 = 10;
+///
+/// This bounds how long validators wait for enough votes to form a
+/// finality certificate after notarizing a block.  The previous value
+/// of 10 s meant that when a leader was dead or partitioned, the entire
+/// cluster would stall for 10 s per dead leader before moving on.
+/// Reducing to 5 s halves the wasted time per dead-leader rotation while
+/// still providing ample margin for BLS signature collection on healthy
+/// networks (typically < 20 ms).
+pub const DEFAULT_SIMPLEX_CERTIFICATION_TIMEOUT_SECS: u64 = 5;
 
 /// Default Simplex nullification retry timeout in seconds.
-pub const DEFAULT_SIMPLEX_TIMEOUT_RETRY_SECS: u64 = 2;
+///
+/// After a view is nullified, this controls how long the validator waits
+/// before retrying.  Reducing from 2 s to 1 s allows faster recovery
+/// from transient snapshot misses under CPU contention.
+pub const DEFAULT_SIMPLEX_TIMEOUT_RETRY_SECS: u64 = 1;
 
 /// Default Simplex fetch timeout in seconds.
 pub const DEFAULT_SIMPLEX_FETCH_TIMEOUT_SECS: u64 = 5;

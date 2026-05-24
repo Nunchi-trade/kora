@@ -33,8 +33,16 @@ use tracing::{debug, error, info, trace, warn};
 /// Maximum number of attempts to poll for a parent snapshot before giving up.
 ///
 /// Each attempt sleeps for [`SNAPSHOT_POLL_INTERVAL`], so the total wait is at
-/// most `SNAPSHOT_POLL_ATTEMPTS * SNAPSHOT_POLL_INTERVAL` (50 ms by default).
-const SNAPSHOT_POLL_ATTEMPTS: u32 = 5;
+/// most `SNAPSHOT_POLL_ATTEMPTS * SNAPSHOT_POLL_INTERVAL` (100 ms by default).
+///
+/// Under CPU contention (e.g. 23 threads on 0.75 cores), the finalization
+/// reporter may need more time to produce the parent snapshot.  The previous
+/// budget of 50 ms was frequently exhausted, causing the leader to return
+/// `None` from `propose()` -- which Simplex interprets as a nullification.
+/// Doubling the budget to 100 ms converts a large fraction of those
+/// nullified views into successful proposals without meaningfully delaying
+/// the happy path (the first poll usually succeeds within 1-2 ms).
+const SNAPSHOT_POLL_ATTEMPTS: u32 = 10;
 
 /// Duration to sleep between successive parent-snapshot poll attempts.
 const SNAPSHOT_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -44,12 +52,14 @@ const SNAPSHOT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// prevents a single fast leader from racing too far ahead of finalization,
 /// which can cascade into snapshot-miss failures for other validators.
 ///
-/// A value of 8 was too tight after a node restart: the finalization pipeline
-/// lags while the node re-syncs, and with only 8 blocks of headroom every
-/// proposal gets skipped, preventing the node from ever catching up.  A
-/// value of 64 gives finalization plenty of room to drain without stalling
-/// proposals on healthy nodes.  At the current throughput ceiling of ~30
-/// blocks/s, a gap of 64 represents roughly 2 seconds of blocks.
+/// The previous value of 8 was too tight under CPU contention and after node
+/// restarts: transient finalization stalls (or the finalization pipeline
+/// lagging during re-sync) would trip the guard and force every leader to
+/// skip, producing a cascade of nullifications that could stall the entire
+/// network.  A value of 64 gives finalization plenty of room to drain
+/// without stalling proposals on healthy nodes.  At the current throughput
+/// ceiling of ~30 blocks/s, a gap of 64 represents roughly 2 seconds of
+/// blocks.
 const MAX_PROPOSAL_LAG: u64 = 64;
 
 fn unix_timestamp_secs<Env: Clock>(env: &Env) -> u64 {
@@ -191,7 +201,7 @@ where
         // Consensus can advance views faster than the execution layer
         // produces snapshots.  Rather than immediately returning `None`
         // (which nullifies the view), we poll for up to
-        // `SNAPSHOT_POLL_ATTEMPTS * SNAPSHOT_POLL_INTERVAL` (50 ms).
+        // `SNAPSHOT_POLL_ATTEMPTS * SNAPSHOT_POLL_INTERVAL` (100 ms).
         // In the common case the snapshot arrives within the first few
         // milliseconds, converting what would have been a nullified view
         // into a successful proposal.
@@ -207,6 +217,10 @@ where
             match snap {
                 Some(s) => {
                     if poll_count > 0 {
+                        let wait_secs = poll_start.elapsed().as_secs_f64();
+                        if let Some(ref m) = self.metrics {
+                            m.snapshot_poll_wait.observe(wait_secs);
+                        }
                         debug!(
                             parent_height = parent.height,
                             ?parent_digest,
@@ -218,6 +232,9 @@ where
                     s
                 }
                 None => {
+                    if let Some(ref m) = self.metrics {
+                        m.proposal_snapshot_misses.inc();
+                    }
                     warn!(
                         parent_height = parent.height,
                         ?parent_digest,
@@ -628,6 +645,7 @@ where
         A: BlockProvider<Block = Self::Block>,
     {
         let node_state = self.node_state.clone();
+        let metrics = self.metrics.clone();
         let env = context.0;
         async move {
             let start = Instant::now();
@@ -642,6 +660,9 @@ where
             if let Some(ref state) = node_state {
                 let finalized = state.finalized_height();
                 if parent.height > finalized + MAX_PROPOSAL_LAG {
+                    if let Some(ref m) = metrics {
+                        m.proposal_lag_skips.inc();
+                    }
                     warn!(
                         parent_height = parent.height,
                         finalized_height = finalized,

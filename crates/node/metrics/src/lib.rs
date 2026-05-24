@@ -15,6 +15,13 @@ use prometheus_client::metrics::{
 /// Default histogram buckets for block build time (seconds).
 const BLOCK_BUILD_BUCKETS: [f64; 9] = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0];
 
+/// Default histogram buckets for snapshot poll wait time (seconds).
+///
+/// Captures the delay between "leader needs parent snapshot" and "snapshot
+/// available".  Most waits resolve in under 5 ms; the higher buckets detect
+/// CPU-contention-related stalls.
+const SNAPSHOT_POLL_BUCKETS: [f64; 8] = [0.001, 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.15];
+
 /// Application-level metrics for a Kora node.
 ///
 /// Create with [`AppMetrics::new`] and register with
@@ -37,6 +44,21 @@ pub struct AppMetrics {
     pub block_build_time: Histogram,
     /// Number of transactions included in the most recently built block.
     pub block_txs_included: Gauge,
+
+    // -- Proposal health --
+    /// Total proposals skipped because the parent snapshot was not ready
+    /// after the full poll window.  A rising count indicates the execution
+    /// layer is consistently slower than the consensus layer.
+    pub proposal_snapshot_misses: Counter,
+    /// Total proposals skipped because the tip was too far ahead of the
+    /// last finalized height (proposal lag guard).  A rising count means
+    /// finalization is not keeping up with block production.
+    pub proposal_lag_skips: Counter,
+    /// Histogram of time spent waiting for the parent snapshot to become
+    /// available during `build_block`, in seconds.  Only recorded when at
+    /// least one poll attempt was needed (i.e. the snapshot was not
+    /// immediately available).
+    pub snapshot_poll_wait: Histogram,
 
     // -- Finalization --
     /// Total number of finalization failures.
@@ -73,6 +95,9 @@ impl AppMetrics {
             txpool_rejected: Family::default(),
             block_build_time: Histogram::new(BLOCK_BUILD_BUCKETS),
             block_txs_included: Gauge::default(),
+            proposal_snapshot_misses: Counter::default(),
+            proposal_lag_skips: Counter::default(),
+            snapshot_poll_wait: Histogram::new(SNAPSHOT_POLL_BUCKETS),
             finalization_failures: Counter::default(),
             blocks_finalized: Counter::default(),
             gossip_tx_broadcast: Counter::default(),
@@ -119,6 +144,21 @@ impl AppMetrics {
             "kora_block_txs_included",
             "Transactions in the most recently built block",
             self.block_txs_included.clone(),
+        );
+        registry.register(
+            "kora_proposal_snapshot_misses",
+            "Proposals skipped due to missing parent snapshot",
+            self.proposal_snapshot_misses.clone(),
+        );
+        registry.register(
+            "kora_proposal_lag_skips",
+            "Proposals skipped due to finalization lag guard",
+            self.proposal_lag_skips.clone(),
+        );
+        registry.register(
+            "kora_snapshot_poll_wait_seconds",
+            "Time waiting for parent snapshot during block build",
+            self.snapshot_poll_wait.clone(),
         );
         registry.register(
             "kora_finalization_failures",
