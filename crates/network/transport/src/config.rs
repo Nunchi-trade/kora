@@ -18,10 +18,13 @@ pub const DEFAULT_BACKLOG: usize = 1024;
 pub const DEFAULT_CONSENSUS_BACKLOG: usize = 2048;
 
 /// Default backlog for block dissemination channel: lower frequency, large messages.
-pub const DEFAULT_BLOCK_BACKLOG: usize = 512;
+/// Increased from 512 to 2048: devnet testing showed ~10% block broadcast drops at 512.
+pub const DEFAULT_BLOCK_BACKLOG: usize = 2048;
 
 /// Default backlog for resolver/backfill channels: burst-heavy during catch-up.
-pub const DEFAULT_RESOLVER_BACKLOG: usize = 1024;
+/// Increased from 1024 to 2048: resolver traffic is critical for node recovery
+/// and catch-up, matching the block backlog to prevent message drops.
+pub const DEFAULT_RESOLVER_BACKLOG: usize = 2048;
 
 /// Default backlog for transaction gossip channel: high-volume, small messages.
 pub const DEFAULT_GOSSIP_BACKLOG: usize = 1024;
@@ -301,8 +304,8 @@ mod tests {
         assert_eq!(DEFAULT_MAX_MESSAGE_SIZE, 1024 * 1024);
         assert_eq!(DEFAULT_BACKLOG, 1024);
         assert_eq!(DEFAULT_CONSENSUS_BACKLOG, 2048);
-        assert_eq!(DEFAULT_BLOCK_BACKLOG, 512);
-        assert_eq!(DEFAULT_RESOLVER_BACKLOG, 1024);
+        assert_eq!(DEFAULT_BLOCK_BACKLOG, 2048);
+        assert_eq!(DEFAULT_RESOLVER_BACKLOG, 2048);
         assert_eq!(DEFAULT_GOSSIP_BACKLOG, 1024);
         assert_eq!(DEFAULT_NAMESPACE, b"_COMMONWARE_KORA_NETWORK");
     }

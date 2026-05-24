@@ -26,6 +26,53 @@ shift || true
 log() { echo "[entrypoint] $*"; }
 error() { echo "[entrypoint] ERROR: $*" >&2; exit 1; }
 
+# Wait for at least one bootstrap peer from a comma-separated list to become
+# reachable.  With multi-bootstrap support a node can join the network through
+# any available bootstrapper, removing the single-bootstrap-node SPOF.
+#
+# Usage: wait_for_any_bootstrap "$BOOTSTRAP_PEERS"
+#   BOOTSTRAP_PEERS is a comma-separated list of host:port pairs, e.g.
+#     "node0:30303,node1:30303"
+wait_for_any_bootstrap() {
+    local peers_csv="$1"
+    [[ -z "$peers_csv" ]] && return 0
+
+    # Parse into arrays
+    local hosts=()
+    local ports=()
+    IFS=',' read -ra PEER_LIST <<< "$peers_csv"
+    for peer in "${PEER_LIST[@]}"; do
+        peer=$(echo "$peer" | tr -d ' ')
+        [[ -z "$peer" ]] && continue
+        local host port
+        host=$(echo "$peer" | rev | cut -d: -f2- | rev)
+        port=$(echo "$peer" | rev | cut -d: -f1 | rev)
+        hosts+=("$host")
+        ports+=("$port")
+    done
+
+    if [[ ${#hosts[@]} -eq 0 ]]; then
+        return 0
+    fi
+
+    log "Waiting for any bootstrap peer to become reachable: ${peers_csv}"
+
+    local timeout=120
+    while true; do
+        for i in "${!hosts[@]}"; do
+            if nc -z "${hosts[$i]}" "${ports[$i]}" 2>/dev/null; then
+                log "Bootstrap peer ${hosts[$i]}:${ports[$i]} reachable"
+                return 0
+            fi
+        done
+        timeout=$((timeout - 1))
+        if [[ $timeout -le 0 ]]; then
+            error "Timeout waiting for bootstrap peers (tried: ${peers_csv})"
+        fi
+        sleep 1
+    done
+}
+
 # Ensure runtime directory exists and is writable by the kora user.
 # Docker named volumes inherit ownership from the image on first mount,
 # but we verify here in case an external volume with different ownership
@@ -77,39 +124,29 @@ case "$MODE" in
         log "Running setup mode..."
         exec /usr/local/bin/keygen setup "$@"
         ;;
-        
+
     dkg)
         log "Running DKG ceremony mode..."
-        
+
         [[ -f "${SHARED_DIR}/peers.json" ]] || error "peers.json not found"
         [[ -f "${DATA_DIR}/validator.key" ]] || error "validator.key not found"
-        
+
         if [[ -f "${DATA_DIR}/share.key" && -f "${DATA_DIR}/output.json" ]]; then
             log "DKG already completed (share.key exists)"
             exit 0
         fi
-        
+
         if [[ "$IS_BOOTSTRAP" != "true" && -n "$BOOTSTRAP_PEERS" ]]; then
-            BOOTSTRAP_HOST=$(echo "$BOOTSTRAP_PEERS" | cut -d: -f1)
-            BOOTSTRAP_PORT=$(echo "$BOOTSTRAP_PEERS" | cut -d: -f2)
-            
-            log "Waiting for bootstrap peer ${BOOTSTRAP_HOST}:${BOOTSTRAP_PORT}..."
-            timeout=120
-            while ! nc -z "$BOOTSTRAP_HOST" "$BOOTSTRAP_PORT" 2>/dev/null; do
-                timeout=$((timeout - 1))
-                [[ $timeout -le 0 ]] && error "Timeout waiting for bootstrap peer"
-                sleep 1
-            done
-            log "Bootstrap peer reachable"
+            wait_for_any_bootstrap "$BOOTSTRAP_PEERS"
         fi
-        
+
         exec /usr/local/bin/kora dkg \
             --data-dir "$DATA_DIR" \
             --peers "${SHARED_DIR}/peers.json" \
             --chain-id "$CHAIN_ID" \
             "$@"
         ;;
-        
+
     validator)
         log "Running validator mode..."
 
@@ -143,28 +180,11 @@ case "$MODE" in
             wait_for_barrier "$VALIDATOR_COUNT"
 
             if [[ "$IS_BOOTSTRAP" != "true" && -n "$BOOTSTRAP_PEERS" ]]; then
-                BOOTSTRAP_HOST=$(echo "$BOOTSTRAP_PEERS" | cut -d: -f1)
-                BOOTSTRAP_PORT=$(echo "$BOOTSTRAP_PEERS" | cut -d: -f2)
-
-                log "First startup: waiting for bootstrap peer ${BOOTSTRAP_HOST}:${BOOTSTRAP_PORT}..."
-                timeout=120
-                while ! nc -z "$BOOTSTRAP_HOST" "$BOOTSTRAP_PORT" 2>/dev/null; do
-                    timeout=$((timeout - 1))
-                    [[ $timeout -le 0 ]] && error "Timeout waiting for bootstrap peer"
-                    sleep 1
-                done
-                log "Bootstrap peer reachable"
+                wait_for_any_bootstrap "$BOOTSTRAP_PEERS"
             fi
         fi
 
         touch "${DATA_DIR}/.ready"
-
-        TX_GOSSIP=${TX_GOSSIP:-false}
-        GOSSIP_FLAG=""
-        if [[ "$TX_GOSSIP" == "true" ]]; then
-            GOSSIP_FLAG="--tx-gossip"
-            log "Transaction gossip enabled"
-        fi
 
         TX_GOSSIP=${TX_GOSSIP:-false}
         GOSSIP_FLAG=""
@@ -188,20 +208,10 @@ case "$MODE" in
         [[ -f "${DATA_DIR}/validator.key" ]] || error "validator.key not found"
 
         if [[ "$IS_BOOTSTRAP" != "true" && -n "$BOOTSTRAP_PEERS" ]]; then
-            BOOTSTRAP_HOST=$(echo "$BOOTSTRAP_PEERS" | cut -d: -f1)
-            BOOTSTRAP_PORT=$(echo "$BOOTSTRAP_PEERS" | cut -d: -f2)
-
             # Only wait for bootstrap on first startup. On restarts, the
             # P2P layer handles reconnection internally.
             if [[ ! -f "${DATA_DIR}/.bootstrap_done" ]]; then
-                log "First startup: waiting for bootstrap peer ${BOOTSTRAP_HOST}:${BOOTSTRAP_PORT}..."
-                timeout=120
-                while ! nc -z "$BOOTSTRAP_HOST" "$BOOTSTRAP_PORT" 2>/dev/null; do
-                    timeout=$((timeout - 1))
-                    [[ $timeout -le 0 ]] && error "Timeout waiting for bootstrap peer"
-                    sleep 1
-                done
-                log "Bootstrap peer reachable"
+                wait_for_any_bootstrap "$BOOTSTRAP_PEERS"
                 touch "${DATA_DIR}/.bootstrap_done"
             else
                 log "Restart detected (.bootstrap_done exists), skipping bootstrap peer wait"
@@ -216,7 +226,7 @@ case "$MODE" in
             --chain-id "$CHAIN_ID" \
             "$@"
         ;;
-        
+
     *)
         exec "$MODE" "$@"
         ;;

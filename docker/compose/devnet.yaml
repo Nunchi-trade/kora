@@ -268,8 +268,7 @@ services:
       - KORA_CHECKPOINT_INTERVAL=${KORA_CHECKPOINT_INTERVAL:-256}
       - VALIDATOR_INDEX=1
       - VALIDATOR_COUNT=4
-      - IS_BOOTSTRAP=false
-      - BOOTSTRAP_PEERS=node0:30303
+      - IS_BOOTSTRAP=true
       - PEER_NODES=node0,node1,node2,node3
       - HEALTHCHECK_MODE=ready
     ports:
@@ -297,7 +296,7 @@ services:
       - VALIDATOR_INDEX=2
       - VALIDATOR_COUNT=4
       - IS_BOOTSTRAP=false
-      - BOOTSTRAP_PEERS=node0:30303
+      - BOOTSTRAP_PEERS=node0:30303,node1:30303
       - PEER_NODES=node0,node1,node2,node3
       - HEALTHCHECK_MODE=ready
     ports:
@@ -325,7 +324,7 @@ services:
       - VALIDATOR_INDEX=3
       - VALIDATOR_COUNT=4
       - IS_BOOTSTRAP=false
-      - BOOTSTRAP_PEERS=node0:30303
+      - BOOTSTRAP_PEERS=node0:30303,node1:30303
       - PEER_NODES=node0,node1,node2,node3
       - HEALTHCHECK_MODE=ready
     ports:
@@ -350,7 +349,7 @@ services:
       - KORA_RUNTIME_DIR=${KORA_RUNTIME_DIR:-/runtime}
       - KORA_CHECKPOINT_INTERVAL=${KORA_CHECKPOINT_INTERVAL:-256}
       - IS_BOOTSTRAP=false
-      - BOOTSTRAP_PEERS=node0:30303
+      - BOOTSTRAP_PEERS=node0:30303,node1:30303
       - HEALTHCHECK_MODE=p2p
     ports:
       - "30500:30303"
