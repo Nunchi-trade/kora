@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+use commonware_utils::{Faults, N3f1};
 use kora_config::NodeConfig;
 use kora_domain::BootstrapConfig;
 use kora_rpc::NodeState;
@@ -113,11 +114,21 @@ impl Cli {
             .position(|pk| *pk == my_pk)
             .ok_or_else(|| eyre::eyre!("Our public key not found in participants list"))?;
 
+        let n = peers.participants.len();
+        let quorum = N3f1::quorum(n);
+        tracing::info!(
+            n = n,
+            quorum = quorum,
+            max_faulty = n as u32 - quorum,
+            "Consensus quorum determined by N3f1: need {} of {} validators active",
+            quorum,
+            n
+        );
+
         let dkg_config = DkgConfig {
             identity_key,
             validator_index,
             participants: peers.participants,
-            threshold: peers.threshold,
             chain_id: node_config.chain_id,
             data_dir: node_config.data_dir.clone(),
             listen_addr: node_config.network.listen_addr.parse()?,
@@ -193,6 +204,17 @@ impl Cli {
                 "DKG share_index ({validator_index}) must be less than participant count ({validator_count})"
             ));
         }
+
+        let quorum = N3f1::quorum(validator_count as usize);
+        tracing::info!(
+            validator_count = validator_count,
+            quorum = quorum,
+            max_faulty = validator_count - quorum,
+            "Consensus requires {} of {} validators active (N3f1 BFT)",
+            quorum,
+            validator_count
+        );
+
         let node_state =
             NodeState::with_validator_count(config.chain_id, validator_index, validator_count);
 
@@ -343,7 +365,6 @@ impl Cli {
 struct PeersInfo {
     participants: Vec<commonware_cryptography::ed25519::PublicKey>,
     secondary_participants: Vec<commonware_cryptography::ed25519::PublicKey>,
-    threshold: u32,
     bootstrappers: Vec<(commonware_cryptography::ed25519::PublicKey, String)>,
 }
 
@@ -356,14 +377,16 @@ fn format_bootstrappers(
         .collect()
 }
 
+/// Load peers configuration from a JSON file.
+///
+/// Accepts peers.json files with either "quorum" (new format) or "threshold"
+/// (legacy format) key -- both are ignored at runtime since the quorum is
+/// always computed from the validator count via N3f1.
 fn load_peers(path: &PathBuf) -> eyre::Result<PeersInfo> {
     use commonware_codec::ReadExt;
 
     let content = std::fs::read_to_string(path)?;
     let json: serde_json::Value = serde_json::from_str(&content)?;
-
-    let threshold =
-        json["threshold"].as_u64().ok_or_else(|| eyre::eyre!("missing threshold"))? as u32;
 
     let participants_hex: Vec<String> = json["participants"]
         .as_array()
@@ -393,7 +416,7 @@ fn load_peers(path: &PathBuf) -> eyre::Result<PeersInfo> {
         bootstrappers.push((pk, addr_str.to_string()));
     }
 
-    Ok(PeersInfo { participants, secondary_participants, threshold, bootstrappers })
+    Ok(PeersInfo { participants, secondary_participants, bootstrappers })
 }
 
 fn parse_public_keys(

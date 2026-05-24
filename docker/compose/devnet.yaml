@@ -84,7 +84,6 @@ services:
         /usr/local/bin/keygen setup \
           --validators=4 \
           --secondary-peers=1 \
-          --threshold=3 \
           --chain-id=${CHAIN_ID:-1337} \
           --output-dir=/shared && \
         echo "[init] Setting permissions..." && \
@@ -115,13 +114,11 @@ services:
         /usr/local/bin/keygen setup \
           --validators=4 \
           --secondary-peers=1 \
-          --threshold=3 \
           --chain-id=${CHAIN_ID:-1337} \
           --output-dir=/shared && \
         echo "[init] Running trusted dealer DKG..." && \
         /usr/local/bin/keygen dkg-deal \
           --validators=4 \
-          --threshold=3 \
           --output-dir=/shared && \
         echo "[init] Setting permissions..." && \
         chown -R 1000:1000 /shared/node0 /shared/node1 /shared/node2 /shared/node3 /shared/secondary0 /barrier && \

@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use commonware_utils::{Faults, N3f1};
 use serde::{Deserialize, Serialize};
 
 use crate::DkgError;
@@ -11,7 +12,11 @@ pub struct DkgOutput {
     pub group_public_key: Vec<u8>,
     /// Coefficients of the public polynomial used for share verification.
     pub public_polynomial: Vec<u8>,
-    /// Minimum number of participants required to reconstruct the secret.
+    /// Quorum size (minimum active validators for consensus), computed from N3f1.
+    ///
+    /// This is always `n - (n-1)/3` where n is the participant count. The value
+    /// stored in output.json may be stale if it was generated before this fix;
+    /// on load, we recompute it from the participant count.
     pub threshold: u32,
     /// Total number of participants in the DKG ceremony.
     pub participants: usize,
@@ -27,6 +32,8 @@ pub struct DkgOutput {
 struct OutputJson {
     group_public_key: String,
     public_polynomial: String,
+    /// Persisted as "threshold" in JSON for backward compatibility, but the
+    /// authoritative value is always recomputed from `participants` via N3f1.
     threshold: u32,
     participants: usize,
     #[serde(default)]
@@ -63,6 +70,9 @@ impl DkgOutput {
     }
 
     /// Loads a DKG output from `output.json` and `share.key` in `data_dir`.
+    ///
+    /// The `threshold` field is always recomputed from `participants` using N3f1
+    /// to ensure correctness regardless of what value was persisted in the JSON.
     pub fn load(data_dir: &Path) -> Result<Self, DkgError> {
         let output_path = data_dir.join("output.json");
         let output_str = std::fs::read_to_string(&output_path)?;
@@ -80,12 +90,16 @@ impl DkgOutput {
             .map(|k| hex::decode(k).map_err(|e| DkgError::Serialization(e.to_string())))
             .collect::<Result<Vec<_>, _>>()?;
 
+        // Always compute the correct quorum from N3f1 rather than trusting
+        // the persisted threshold value, which may be wrong in old output files.
+        let correct_threshold = N3f1::quorum(output.participants);
+
         Ok(Self {
             group_public_key: hex::decode(&output.group_public_key)
                 .map_err(|e| DkgError::Serialization(e.to_string()))?,
             public_polynomial: hex::decode(&output.public_polynomial)
                 .map_err(|e| DkgError::Serialization(e.to_string()))?,
-            threshold: output.threshold,
+            threshold: correct_threshold,
             participants: output.participants,
             share_index: share.index,
             share_secret: hex::decode(&share.secret)

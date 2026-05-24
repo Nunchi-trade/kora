@@ -6,6 +6,7 @@ use alloy_primitives::{Address, keccak256};
 use clap::Args;
 use commonware_codec::Encode;
 use commonware_cryptography::{Signer, ed25519};
+use commonware_utils::{Faults, N3f1};
 use eyre::{Result, WrapErr};
 use k256::ecdsa::SigningKey;
 use rand::RngCore;
@@ -22,9 +23,6 @@ pub(crate) struct SetupArgs {
     #[arg(long, default_value = "0")]
     pub secondary_peers: usize,
 
-    #[arg(long, default_value = "3")]
-    pub threshold: u32,
-
     #[arg(long, default_value = "1337")]
     pub chain_id: u64,
 
@@ -38,7 +36,10 @@ pub(crate) struct SetupArgs {
 #[derive(Serialize, Deserialize)]
 struct PeersConfig {
     validators: usize,
-    threshold: u32,
+    /// Minimum active validators required for consensus (N3f1 quorum).
+    /// This value is computed automatically from the validator count and
+    /// cannot be overridden -- it is persisted here for operator reference.
+    quorum: u32,
     participants: Vec<String>,
     secondary_participants: Vec<String>,
     bootstrappers: BTreeMap<String, String>,
@@ -84,11 +85,15 @@ fn funded_loadgen_allocations() -> impl Iterator<Item = GenesisAllocation> {
 }
 
 pub(crate) fn run(args: SetupArgs) -> Result<()> {
+    let quorum = N3f1::quorum(args.validators);
     tracing::info!(
         validators = args.validators,
-        threshold = args.threshold,
+        quorum = quorum,
+        max_faulty = args.validators as u32 - quorum,
         chain_id = args.chain_id,
-        "Generating devnet configuration"
+        "Generating devnet configuration (quorum determined by N3f1: need {} of {} validators)",
+        quorum,
+        args.validators
     );
 
     fs::create_dir_all(&args.output_dir).wrap_err("Failed to create output directory")?;
@@ -167,7 +172,7 @@ pub(crate) fn run(args: SetupArgs) -> Result<()> {
 
     let peers = PeersConfig {
         validators: args.validators,
-        threshold: args.threshold,
+        quorum,
         participants,
         secondary_participants,
         bootstrappers,
@@ -193,10 +198,14 @@ pub(crate) fn run(args: SetupArgs) -> Result<()> {
     tracing::info!(path = ?genesis_path, "Wrote genesis configuration");
 
     tracing::info!("Setup complete");
-    tracing::info!("  Validators: {}", args.validators);
-    tracing::info!("  Secondary peers: {}", args.secondary_peers);
-    tracing::info!("  Threshold:  {}", args.threshold);
-    tracing::info!("  Chain ID:   {}", args.chain_id);
+    tracing::info!(
+        "  Validators:    {} | Quorum (N3f1): {} (tolerates {} faults)",
+        args.validators,
+        quorum,
+        args.validators as u32 - quorum
+    );
+    tracing::info!("  Secondary:     {}", args.secondary_peers);
+    tracing::info!("  Chain ID:      {}", args.chain_id);
 
     Ok(())
 }
