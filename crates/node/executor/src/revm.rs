@@ -21,7 +21,7 @@ use revm::{
     primitives::{TxKind, hardfork::SpecId},
     state::{EvmState, EvmStorageSlot},
 };
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::{
     BlockContext, BlockExecutor, ExecutionConfig, ExecutionError, ExecutionOutcome,
@@ -415,7 +415,7 @@ impl<S: StateDb> BlockExecutor<S> for RevmExecutor {
             let result_and_state = match evm.replay() {
                 Ok(result) => result,
                 Err(e) => {
-                    warn!(hash = ?tx_hash, error = ?e, "skipping unexecutable transaction");
+                    debug!(hash = ?tx_hash, error = ?e, "skipping unexecutable transaction");
                     outcome.receipts.push(build_skipped_receipt(tx_hash, cumulative_gas));
                     continue;
                 }
