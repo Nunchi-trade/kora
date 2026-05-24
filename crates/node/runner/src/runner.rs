@@ -204,7 +204,13 @@ fn index_recovered_block(
 /// Number of recent blocks to restore during startup to pre-populate the
 /// snapshot cache. This ensures that blocks arriving shortly after restart
 /// can find their parent snapshot without entering catch-up mode.
-const SNAPSHOT_PREPOPULATE_COUNT: u64 = 16;
+///
+/// A larger window (64 blocks) means the node can survive outages where
+/// the network advances up to 64 blocks before the node restarts.  Blocks
+/// within this window are resolved from the local archive without needing
+/// catch-up trust.  Beyond this window, the catch-up mechanism in
+/// `RevmApplication::verify_block` handles the gap.
+const SNAPSHOT_PREPOPULATE_COUNT: u64 = 64;
 
 async fn recover_finalized_state<FB, FC>(
     ledger: &LedgerService,

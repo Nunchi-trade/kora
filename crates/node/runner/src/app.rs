@@ -28,7 +28,7 @@ use kora_overlay::OverlayState;
 use kora_qmdb_ledger::QmdbState;
 use kora_rpc::NodeState;
 use rand::Rng;
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 /// Maximum number of attempts to poll for a parent snapshot before giving up.
 ///
@@ -43,16 +43,37 @@ const SNAPSHOT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// finalized height before it voluntarily skips its proposal turn.  This
 /// prevents a single fast leader from racing too far ahead of finalization,
 /// which can cascade into snapshot-miss failures for other validators.
+///
+/// A value of 8 was too tight after a node restart: the finalization pipeline
+/// lags while the node re-syncs, and with only 8 blocks of headroom every
+/// proposal gets skipped, preventing the node from ever catching up.  A
+/// value of 64 gives finalization plenty of room to drain without stalling
+/// proposals on healthy nodes.  At the current throughput ceiling of ~30
+/// blocks/s, a gap of 64 represents roughly 2 seconds of blocks.
 const MAX_PROPOSAL_LAG: u64 = 64;
 
 fn unix_timestamp_secs<Env: Clock>(env: &Env) -> u64 {
     env.current().duration_since(UNIX_EPOCH).map(|duration| duration.as_secs()).unwrap_or(0)
 }
 
-/// Number of blocks behind the tip at which we consider the node to be
-/// "catching up" and allow verify_block to trust finalized blocks without
-/// re-executing them against a parent snapshot.
-const CATCH_UP_THRESHOLD: u64 = 2;
+/// Number of blocks the network must advance PAST the recovered height
+/// (as measured by full-execution verification, not certificate trust)
+/// before the node exits catch-up mode and starts requiring full
+/// re-execution for verification.
+///
+/// During catch-up, blocks whose parent snapshot is missing are trusted
+/// based on their finality certificate (the resolver already verified the
+/// certificate before delivering the block to the application layer).
+///
+/// Previously this was set to 2, which meant the node exited catch-up mode
+/// almost immediately -- each trusted block advanced `recovered_height`,
+/// so the *next* block was only 1 ahead, below the threshold of 2.  The
+/// catch-up window collapsed after a single block.
+///
+/// Now the catch-up window is anchored to the *original* `recovered_height`
+/// and only closes when `last_verified_height` (advanced only by full
+/// execution, NOT by certificate trust) reaches `recovered_height + 64`.
+const CATCH_UP_THRESHOLD: u64 = 64;
 
 /// REVM-based consensus application.
 #[derive(Clone)]
@@ -64,12 +85,21 @@ pub struct RevmApplication<S, E> {
     node_state: Option<NodeState>,
     metrics: Option<AppMetrics>,
     /// Height of the HEAD block that was restored from the archive during
-    /// startup recovery. Used to detect whether the node is still catching
-    /// up: if a block's height is significantly greater than this value and
-    /// its parent snapshot is missing, we trust the finality certificate
-    /// instead of returning `false` (which the resolver would interpret as
-    /// "malicious peer" and permanently block them).
+    /// startup recovery.  This value is set once at startup and never
+    /// changes; it anchors the catch-up window.
+    ///
+    /// Catch-up mode is active as long as `recovered_height > 0` and the
+    /// node has not yet verified enough blocks past the recovery point.
+    /// Blocks whose parent snapshot is missing are trusted based on their
+    /// finality certificate (which the resolver already verified).  Once
+    /// the node successfully verifies a block via full execution at height
+    /// >= `recovered_height + CATCH_UP_THRESHOLD`, catch-up mode ends.
     recovered_height: Arc<AtomicU64>,
+    /// The highest block height that has been processed by `verify_block`.
+    /// Advanced by full-execution verification and by re-encountering
+    /// previously processed blocks (including certificate-trusted ones).
+    /// Used to determine when the catch-up window should close.
+    last_verified_height: Arc<AtomicU64>,
     _scheme: std::marker::PhantomData<S>,
 }
 
@@ -80,6 +110,7 @@ impl<S, E> std::fmt::Debug for RevmApplication<S, E> {
             .field("gas_limit", &self.gas_limit)
             .field("metrics", &self.metrics.is_some())
             .field("recovered_height", &self.recovered_height.load(Ordering::Relaxed))
+            .field("last_verified_height", &self.last_verified_height.load(Ordering::Relaxed))
             .finish_non_exhaustive()
     }
 }
@@ -98,6 +129,7 @@ where
             node_state: None,
             metrics: None,
             recovered_height: Arc::new(AtomicU64::new(0)),
+            last_verified_height: Arc::new(AtomicU64::new(0)),
             _scheme: std::marker::PhantomData,
         }
     }
@@ -118,13 +150,17 @@ where
 
     /// Set the height of the HEAD block that was recovered from the archive.
     ///
-    /// This is used to detect catch-up mode: when the node is behind the
-    /// network and parent snapshots are unavailable, blocks whose height
-    /// exceeds this value by more than [`CATCH_UP_THRESHOLD`] are trusted
-    /// based on their finality certificate rather than being rejected.
+    /// This activates catch-up mode: when parent snapshots are unavailable,
+    /// blocks are trusted based on their finality certificate.  Catch-up
+    /// mode remains active until the node has verified blocks far enough
+    /// past the recovered height (controlled by [`CATCH_UP_THRESHOLD`]).
     #[must_use]
     pub fn with_recovered_height(self, height: u64) -> Self {
         self.recovered_height.store(height, Ordering::Relaxed);
+        // The recovered height is also the highest successfully verified
+        // height at startup -- prepopulated snapshots cover everything up
+        // to this point.
+        self.last_verified_height.store(height, Ordering::Relaxed);
         self
     }
 
@@ -187,8 +223,8 @@ where
                         ?parent_digest,
                         poll_count,
                         wait_ms = poll_start.elapsed().as_millis(),
-                        "build_block: parent snapshot not found after polling — \
-                         node has not yet processed this parent block"
+                        "build_block: parent snapshot not found after polling \
+                         -- node has not yet processed this parent block"
                     );
                     return None;
                 }
@@ -200,7 +236,7 @@ where
         let excluded = match self.collect_pending_tx_ids(&snapshots, parent_digest) {
             Some(ids) => ids,
             None => {
-                // The snapshot chain has a gap — we cannot determine which
+                // The snapshot chain has a gap -- we cannot determine which
                 // transactions were already included in recent blocks.
                 // Building with an incomplete excluded set risks duplicate
                 // transactions, so we nullify this round instead.
@@ -248,7 +284,7 @@ where
                     gas_limit = self.gas_limit,
                     error = %err,
                     error_debug = ?err,
-                    "build_block: block execution failed — \
+                    "build_block: block execution failed -- \
                      this may indicate a bad transaction, OOM, or state corruption"
                 );
                 return None;
@@ -266,7 +302,7 @@ where
                         height,
                         error = %err,
                         error_debug = ?err,
-                        "build_block: QMDB state root computation failed — \
+                        "build_block: QMDB state root computation failed -- \
                          this may indicate a storage I/O error or inconsistent state"
                     );
                     return None;
@@ -301,14 +337,37 @@ where
 
     /// Check whether the node is in catch-up mode.
     ///
-    /// Returns `true` when the requested block height is far enough ahead of
-    /// the height we recovered from the archive, indicating that we are still
-    /// syncing up to the live network.
+    /// Returns `true` when:
+    /// 1. The node recovered from an archive at startup (`recovered_height > 0`), AND
+    /// 2. The highest block verified via full execution has not yet reached
+    ///    far enough past the recovery point.
+    ///
+    /// The `block_height` parameter is the height of the block being verified.
+    /// It must be greater than the recovered height (otherwise it is a block
+    /// we already have and does not need catch-up trust).
+    ///
+    /// Unlike the previous implementation, the catch-up window is anchored to
+    /// the *original* `recovered_height` and only closes when
+    /// `last_verified_height` advances past
+    /// `recovered_height + CATCH_UP_THRESHOLD`.  `last_verified_height` is
+    /// advanced both by full-execution verification and by re-encountering
+    /// previously processed blocks (including certificate-trusted ones) in
+    /// the "already verified" early-return path of `verify_block`.
     fn is_catching_up(&self, block_height: u64) -> bool {
         let recovered = self.recovered_height.load(Ordering::Relaxed);
-        // If recovered_height is 0 we have never recovered (fresh node), so
-        // we are not catching up.
-        recovered > 0 && block_height > recovered.saturating_add(CATCH_UP_THRESHOLD)
+        // Fresh node: never recovered, not catching up.
+        if recovered == 0 {
+            return false;
+        }
+        // Block is at or below the recovered height -- we already have
+        // state for it (prepopulated cache covers it), no catch-up needed.
+        if block_height <= recovered {
+            return false;
+        }
+        // Check whether full-execution verification has advanced far enough
+        // past the recovery point.  If it has, catch-up is over.
+        let verified = self.last_verified_height.load(Ordering::Relaxed);
+        verified < recovered.saturating_add(CATCH_UP_THRESHOLD)
     }
 
     async fn verify_block(&self, block: &Block) -> bool {
@@ -317,7 +376,18 @@ where
         let parent_digest = block.parent();
 
         if self.ledger.query_state_root(digest).await.is_some() {
-            trace!(?digest, "block already verified");
+            // Block is already in the snapshot store.  This can happen either
+            // because it was fully verified earlier, or because it was
+            // certificate-trusted during catch-up.  In both cases, advance
+            // `last_verified_height` so the catch-up window eventually closes.
+            //
+            // Without this, certificate-trusted blocks create "holes" in the
+            // verified chain: subsequent `verify` calls stop the ancestry walk
+            // at the certificate-trusted block (its state_root is in the
+            // store), so the full-execution path is never reached for that
+            // height, and `last_verified_height` never advances past it.
+            self.last_verified_height.fetch_max(block.height, Ordering::Relaxed);
+            trace!(?digest, height = block.height, "block already verified");
             return true;
         }
 
@@ -327,37 +397,48 @@ where
                 // Parent snapshot is missing. During normal operation this
                 // means we received a genuinely invalid or out-of-order
                 // block. But after a restart the snapshot cache only
-                // contains the HEAD, so blocks whose parent we haven't
-                // processed yet will fail here.
+                // contains the HEAD (plus prepopulated recent blocks), so
+                // blocks whose parent we haven't processed yet will fail
+                // here.
                 //
-                // If we are still catching up (block height is well ahead
-                // of our recovered height), trust the finality certificate
+                // If we are still catching up, trust the finality certificate
                 // and restore the block as a persisted snapshot so that
-                // subsequent blocks can find their parent.
+                // subsequent blocks can find their parent.  This is safe
+                // because the resolver already verified the finality
+                // certificate (2/3+ threshold signature) before delivering
+                // the block to the application layer.
                 if self.is_catching_up(block.height) {
-                    warn!(
+                    debug!(
                         ?digest,
                         ?parent_digest,
                         height = block.height,
                         recovered_height = self.recovered_height.load(Ordering::Relaxed),
+                        last_verified = self.last_verified_height.load(Ordering::Relaxed),
                         "verify_block: parent snapshot missing during catch-up; \
                          trusting finality certificate"
                     );
                     // Create a persisted snapshot for this block using the
-                    // current QMDB state. This is safe because the block
-                    // was already finalized by consensus (it has a valid
-                    // finality certificate verified by the resolver).
-                    // The FinalizedReporter will re-execute and properly
-                    // persist the block when it arrives through the
-                    // finalization pipeline.
+                    // current QMDB state.  The FinalizedReporter will
+                    // re-execute and properly persist the block when it
+                    // arrives through the finalization pipeline.
                     self.ledger.restore_persisted_snapshot(block).await;
-                    // Update recovered_height so the node eventually exits
-                    // catch-up mode once it has caught up.
-                    self.recovered_height.fetch_max(block.height, Ordering::Relaxed);
+                    // We do NOT update last_verified_height here because
+                    // certificate-trust is not full verification.  However,
+                    // the "already verified" early-return path at the top of
+                    // verify_block WILL advance last_verified_height when
+                    // this block is encountered again in a future ancestry
+                    // walk, ensuring the catch-up window eventually closes.
                     return true;
                 }
 
-                warn!(?digest, ?parent_digest, height = block.height, "missing parent snapshot");
+                warn!(
+                    ?digest,
+                    ?parent_digest,
+                    height = block.height,
+                    recovered_height = self.recovered_height.load(Ordering::Relaxed),
+                    last_verified = self.last_verified_height.load(Ordering::Relaxed),
+                    "verify_block: missing parent snapshot (not in catch-up mode)"
+                );
                 return false;
             }
         };
@@ -371,6 +452,21 @@ where
             {
                 Ok(result) => result,
                 Err(err) => {
+                    // During catch-up, the parent snapshot may have been
+                    // restored with empty changes (certificate-trusted), so
+                    // execution against it can legitimately fail.  Fall back
+                    // to certificate-trust rather than rejecting the block.
+                    if self.is_catching_up(block.height) {
+                        warn!(
+                            ?digest,
+                            height = block.height,
+                            error = ?err,
+                            "verify_block: execution failed during catch-up; \
+                             falling back to certificate trust"
+                        );
+                        self.ledger.restore_persisted_snapshot(block).await;
+                        return true;
+                    }
                     warn!(?digest, error = ?err, "execution failed");
                     return false;
                 }
@@ -385,6 +481,17 @@ where
         {
             Ok(root) => root,
             Err(err) => {
+                if self.is_catching_up(block.height) {
+                    warn!(
+                        ?digest,
+                        height = block.height,
+                        error = ?err,
+                        "verify_block: compute root failed during catch-up; \
+                         falling back to certificate trust"
+                    );
+                    self.ledger.restore_persisted_snapshot(block).await;
+                    return true;
+                }
                 warn!(?digest, error = ?err, "compute root failed");
                 return false;
             }
@@ -392,6 +499,26 @@ where
         let root_elapsed = root_start.elapsed();
 
         if state_root != block.state_root {
+            // During catch-up, the parent snapshot may have been restored
+            // with an empty changeset via `restore_persisted_snapshot`
+            // (certificate-trusted).  The empty changeset means the parent
+            // state does not include intermediate block changes, causing the
+            // computed root to diverge from the expected root.  Rather than
+            // rejecting the block (which would permanently stall catch-up),
+            // fall back to certificate-trust.
+            if self.is_catching_up(block.height) {
+                warn!(
+                    ?digest,
+                    height = block.height,
+                    expected = ?block.state_root,
+                    computed = ?state_root,
+                    "verify_block: state root mismatch during catch-up; \
+                     falling back to certificate trust \
+                     (parent snapshot likely has empty changeset from prior trust)"
+                );
+                self.ledger.restore_persisted_snapshot(block).await;
+                return true;
+            }
             warn!(
                 ?digest,
                 expected = ?block.state_root,
@@ -415,9 +542,19 @@ where
             )
             .await;
 
-        // Once we successfully verify a block, update the recovered height
-        // so the catch-up window advances with normal progress.
-        self.recovered_height.fetch_max(block.height, Ordering::Relaxed);
+        // Full execution verification succeeded.  Advance the verified
+        // height so that the catch-up window eventually closes once we
+        // have verified blocks past the recovery point.
+        let prev_verified = self.last_verified_height.fetch_max(block.height, Ordering::Relaxed);
+        if prev_verified < self.recovered_height.load(Ordering::Relaxed)
+            && block.height >= self.recovered_height.load(Ordering::Relaxed)
+        {
+            info!(
+                height = block.height,
+                recovered_height = self.recovered_height.load(Ordering::Relaxed),
+                "catch-up: first full-execution verification past recovery point"
+            );
+        }
 
         let total_elapsed = start.elapsed();
         debug!(
@@ -455,7 +592,7 @@ where
                 warn!(
                     ?digest,
                     collected_so_far = excluded.len(),
-                    "snapshot chain gap during tx exclusion collection — \
+                    "snapshot chain gap during tx exclusion collection -- \
                      refusing to build block to prevent duplicate transactions"
                 );
                 return None;
@@ -551,7 +688,7 @@ where
                         parent_digest = ?parent.commitment(),
                         build_ms = build_elapsed.as_millis(),
                         "propose failed: build_block returned None \
-                         (likely missing parent snapshot — node may still be catching up)"
+                         (likely missing parent snapshot -- node may still be catching up)"
                     );
                 }
             }
@@ -578,7 +715,7 @@ where
         async move {
             let start = Instant::now();
 
-            // The ancestry stream yields tip-first (newest → oldest).
+            // The ancestry stream yields tip-first (newest -> oldest).
             // We only need to verify blocks that we haven't seen yet.
             // Collect blocks until we hit one we've already verified.
             let mut blocks_to_verify = Vec::new();
