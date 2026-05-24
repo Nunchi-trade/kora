@@ -5,6 +5,8 @@
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
+mod live_state;
+
 use std::{collections::BTreeSet, fmt, sync::Arc, time::Duration};
 
 use alloy_primitives::{Address, B256, U256};
@@ -24,6 +26,7 @@ use kora_qmdb::StateRoot as QmdbStateRoot;
 use kora_qmdb_ledger::{Error as QmdbError, QmdbChangeSet, QmdbConfig, QmdbLedger, QmdbState};
 use kora_traits::{StateDbError, StateDbRead};
 use kora_txpool::{PoolConfig, TransactionPool};
+pub use live_state::LiveState;
 use thiserror::Error;
 
 /// Snapshot type used by the ledger.
@@ -433,22 +436,25 @@ impl LedgerView {
     pub async fn compute_root(
         &self,
         parent: ConsensusDigest,
-        changes: QmdbChangeSet,
+        changes: &QmdbChangeSet,
     ) -> LedgerResult<StateRoot> {
         self.compute_root_from_store(parent, changes).await
     }
 
     /// Compute the deterministic consensus root for a state transition.
+    ///
+    /// Takes `changes` by reference to avoid cloning the entire changeset
+    /// (which contains BTreeMaps of account updates and storage slots).
     pub async fn compute_root_from_store(
         &self,
         parent: ConsensusDigest,
-        changes: QmdbChangeSet,
+        changes: &QmdbChangeSet,
     ) -> LedgerResult<StateRoot> {
         let parent_root = {
             let inner = self.inner.lock().await;
             inner.snapshots.get(&parent).ok_or(ConsensusError::SnapshotNotFound(parent))?.state_root
         };
-        Ok(StateRoot(QmdbStateRoot::transition(parent_root.0, &changes)))
+        Ok(StateRoot(QmdbStateRoot::transition(parent_root.0, changes)))
     }
 
     /// Persist `digest` and any missing ancestors to QMDB.
@@ -689,7 +695,7 @@ impl LedgerService {
     pub async fn compute_root(
         &self,
         parent: ConsensusDigest,
-        changes: QmdbChangeSet,
+        changes: &QmdbChangeSet,
     ) -> LedgerResult<StateRoot> {
         self.view.compute_root(parent, changes).await
     }
@@ -698,7 +704,7 @@ impl LedgerService {
     pub async fn compute_root_from_store(
         &self,
         parent: ConsensusDigest,
-        changes: QmdbChangeSet,
+        changes: &QmdbChangeSet,
     ) -> LedgerResult<StateRoot> {
         self.view.compute_root_from_store(parent, changes).await
     }
@@ -860,10 +866,8 @@ mod tests {
             executor.execute(&parent_snapshot.state, &context, &txs_bytes).expect("execute txs");
         let merged_changes = parent_snapshot.state.merge_changes(outcome.changes.clone());
         let parent_digest = parent.commitment();
-        let root = service
-            .compute_root(parent_digest, outcome.changes.clone())
-            .await
-            .expect("compute root");
+        let root =
+            service.compute_root(parent_digest, &outcome.changes).await.expect("compute root");
         let block = Block {
             parent: parent.id(),
             height,
@@ -1055,7 +1059,7 @@ mod tests {
             // from local persistence metadata.
             let empty_root = setup
                 .service
-                .compute_root(parent.digest, Default::default())
+                .compute_root(parent.digest, &Default::default())
                 .await
                 .expect("compute empty child root");
 

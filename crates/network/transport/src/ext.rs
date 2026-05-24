@@ -57,7 +57,6 @@ impl NetworkConfigExt for NetworkConfig {
             bootstrappers,
             DEFAULT_MAX_MESSAGE_SIZE,
         )
-        .with_backlog(2048)
         .with_allow_private_ips(true);
 
         Ok(transport_config.build(context))

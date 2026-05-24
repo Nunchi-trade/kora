@@ -16,8 +16,8 @@ use crate::{
     error::RpcError,
     state_provider::StateProvider,
     types::{
-        BlockNumberOrTag, BlockTag, BlockTransactions, CallRequest, RpcBlock, RpcLog, RpcLogFilter,
-        RpcTransaction, RpcTransactionReceipt,
+        BlockNumberOrTag, BlockTag, BlockTransactions, CallRequest, EMPTY_UNCLE_HASH, RpcBlock,
+        RpcLog, RpcLogFilter, RpcTransaction, RpcTransactionReceipt,
     },
 };
 
@@ -278,16 +278,20 @@ impl<S> IndexedStateProvider<S> {
         RpcBlock {
             hash: block.hash,
             parent_hash: block.parent_hash,
+            sha3_uncles: EMPTY_UNCLE_HASH,
             number: U64::from(block.number),
             state_root: block.state_root,
             transactions_root: B256::ZERO,
             receipts_root: B256::ZERO,
-            logs_bloom: Bytes::new(),
+            // EIP-1474: logsBloom must be a 256-byte (512 hex char) value.
+            // An empty `Bytes` breaks client-side deserializers that expect
+            // a fixed-size bloom.
+            logs_bloom: Bytes::from(vec![0u8; 256]),
             timestamp: U64::from(block.timestamp),
             gas_limit: U64::from(block.gas_limit),
             gas_used: U64::from(block.gas_used),
             extra_data: Bytes::new(),
-            mix_hash: B256::ZERO,
+            mix_hash: block.mix_hash,
             nonce: Default::default(),
             base_fee_per_gas: block.base_fee_per_gas.map(U256::from),
             miner: Address::ZERO,
@@ -512,6 +516,7 @@ mod tests {
             gas_limit: 30_000_000,
             gas_used: 21_000,
             base_fee_per_gas: Some(1_000_000_000),
+            mix_hash: B256::ZERO,
             transaction_hashes: vec![],
         }
     }

@@ -48,10 +48,10 @@ impl DkgCeremony {
         info!(
             validator_index = self.config.validator_index,
             n = self.config.n(),
-            t = self.config.t(),
+            quorum = self.config.t(),
             is_leader = self.is_leader(),
             force_restart = self.force_restart,
-            "Starting interactive DKG ceremony"
+            "Starting interactive DKG ceremony (quorum determined by N3f1)"
         );
 
         // Check if we already have output

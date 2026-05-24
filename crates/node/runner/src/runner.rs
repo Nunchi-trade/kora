@@ -33,7 +33,7 @@ use kora_consensus::BlockExecution;
 use kora_domain::{Block, BlockCfg, BootstrapConfig, ConsensusDigest, LedgerEvent, Tx, TxCfg};
 use kora_executor::{BlockContext, RevmExecutor};
 use kora_indexer::{BlockIndex, IndexedBlock};
-use kora_ledger::{LedgerService, LedgerView};
+use kora_ledger::{LedgerService, LedgerView, LiveState};
 use kora_marshal::{ArchiveInitializer, BroadcastInitializer, PeerInitializer};
 use kora_metrics::AppMetrics;
 use kora_reporters::{BlockContextProvider, FinalizedReporter, NodeStateReporter, SeedReporter};
@@ -167,6 +167,7 @@ fn seed_genesis_block_index(index: &BlockIndex, genesis: &Block, gas_limit: u64)
             gas_limit,
             gas_used: 0,
             base_fee_per_gas: Some(kora_config::INITIAL_BASE_FEE),
+            mix_hash: genesis.prevrandao,
             transaction_hashes: Vec::new(),
         },
         Vec::new(),
@@ -194,6 +195,7 @@ fn index_recovered_block(
         gas_limit: block_context.header.gas_limit,
         gas_used: 0,
         base_fee_per_gas: block_context.header.base_fee_per_gas,
+        mix_hash: block.prevrandao,
         transaction_hashes,
     };
     index.insert_block(indexed_block, Vec::new(), Vec::new());
@@ -340,7 +342,37 @@ async fn restore_checkpoint_and_replay_tail(
             Ok((restored_height, replayed_tail))
         }
         None => {
-            validate_commit_marker(data_dir, head);
+            if let Some(marker) = marker_digest {
+                // A commit marker exists on disk but does not match any
+                // block in the archive.  QMDB was last committed at a
+                // height we cannot identify, so creating a snapshot from
+                // the archive head would produce inconsistent state.
+                let head_digest = head.commitment();
+                error!(
+                    marker_digest = %hex::encode(marker.as_ref()),
+                    head_digest = %hex::encode(head_digest.as_ref()),
+                    archive_head_height = head.height,
+                    "commit marker does not match any archived block; \
+                     QMDB state is at an unknown height.  Refusing to \
+                     start with potentially inconsistent state.  \
+                     Re-sync from a trusted snapshot or wipe state."
+                );
+                anyhow::bail!(
+                    "commit marker {} does not match any archived block; \
+                     cannot safely determine QMDB state height \
+                     (archive head is at height {})",
+                    hex::encode(marker.as_ref()),
+                    head.height,
+                );
+            }
+            // No commit marker at all -- fresh node or upgrade from a
+            // pre-marker build.  Safe to trust the archive head.
+            info!(
+                archive_head_height = head.height,
+                "no commit marker found; restoring archive head as initial \
+                 QMDB state (expected for fresh nodes or first startup \
+                 after upgrade)"
+            );
             ledger.restore_persisted_snapshot(head).await;
             Ok((head.height, false))
         }
@@ -367,7 +399,7 @@ async fn replay_finalized_block(
         .await
         .with_context(|| format!("failed to replay finalized block at height {}", block.height))?;
     let state_root = ledger
-        .compute_root_from_store(parent_digest, execution.outcome.changes.clone())
+        .compute_root_from_store(parent_digest, &execution.outcome.changes)
         .await
         .with_context(|| format!("failed to compute replay root at height {}", block.height))?;
     anyhow::ensure!(
@@ -452,43 +484,6 @@ async fn prepopulate_snapshot_cache<FB>(
             head_height,
             "pre-populated snapshot cache with recent finalized blocks"
         );
-    }
-}
-
-/// Compare the on-disk commit marker against the archive head block.
-///
-/// This is a best-effort diagnostic check. A missing marker (fresh node or
-/// upgrade from a pre-marker build) is benign and logged at info level. A
-/// mismatch means QMDB may not contain the state corresponding to the
-/// archive head and is logged as a warning so operators can investigate.
-fn validate_commit_marker(data_dir: &Path, archive_head: &Block) {
-    let marker_digest = crate::commit_marker::read_commit_marker(data_dir);
-    let head_digest = archive_head.commitment();
-
-    match marker_digest {
-        None => {
-            info!(
-                archive_head_height = archive_head.height,
-                "no commit marker found; this is expected for fresh nodes or \
-                 first startup after upgrade"
-            );
-        }
-        Some(marker) if marker == head_digest => {
-            info!(
-                archive_head_height = archive_head.height,
-                "commit marker matches archive head; QMDB state is consistent"
-            );
-        }
-        Some(marker) => {
-            warn!(
-                archive_head_height = archive_head.height,
-                marker_digest = %hex::encode(marker.as_ref()),
-                head_digest = %hex::encode(head_digest.as_ref()),
-                "commit marker does not match archive head; QMDB may be behind \
-                 or inconsistent. The node will proceed but state may diverge. \
-                 Consider re-syncing from a trusted snapshot if issues arise."
-            );
-        }
     }
 }
 
@@ -823,8 +818,15 @@ impl NodeRunner for ProductionRunner {
         let page_cache = default_page_cache(&context);
         let block_cfg = block_codec_cfg(&config.consensus.block_codec);
         let partition_prefix = &self.partition_prefix;
+        // Use a single Rayon worker thread for BLS signature verification.
+        // Rayon's work-stealing scheduler busy-waits (sched_yield) when idle,
+        // and BLS batches are small enough (~6-10 msgs at 30 blocks/s) that
+        // parallelism across 2 threads provides negligible speedup.  With
+        // Docker CPU limits (0.75-1.2 cores), the second idle thread wastes
+        // ~0.21 cores of CPU in spin loops and inflates involuntary context
+        // switches by 100K+/5min.
         let strategy = context
-            .create_strategy(NZUsize!(2))
+            .create_strategy(NZUsize!(1))
             .map_err(|e| anyhow::anyhow!("failed to create signature strategy: {e}"))?;
         let checkpoint_interval = checkpoint_interval();
         info!(checkpoint_interval, "configured finalized archive and QMDB checkpoint interval");
@@ -1007,10 +1009,13 @@ impl NodeRunner for ProductionRunner {
                 node_state.set_finalized_height(last);
             }
 
-            let qmdb_state = state.qmdb_state().await;
+            // Use LiveState so RPC queries read from the latest in-memory
+            // overlay rather than the persisted QMDB checkpoint (which can lag
+            // up to 256 blocks behind head).
+            let live_state = LiveState::new(ledger.clone());
             let rpc_executor = Arc::new(RevmExecutor::new(self.chain_id));
             let indexed_provider =
-                kora_rpc::IndexedStateProvider::new(block_index.clone(), qmdb_state, rpc_executor);
+                kora_rpc::IndexedStateProvider::new(block_index.clone(), live_state, rpc_executor);
             let tx_ledger = ledger.clone();
             let chain_id = self.chain_id;
             let tx_pool = txpool.clone();

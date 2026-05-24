@@ -45,14 +45,22 @@ impl ActorInitializer {
     /// The default mailbox size.
     pub const DEFAULT_MAILBOX_SIZE: usize = 1024;
 
-    /// The default view retention timeout (10 views).
-    pub const DEFAULT_VIEW_RETENTION_TIMEOUT: ViewDelta = ViewDelta::new(2560);
+    /// The default view retention timeout.
+    ///
+    /// 256 views provides ~2.7 seconds of catch-up history at 93 blocks/s,
+    /// which is sufficient for consensus. The previous value of 2560 retained
+    /// ~27 seconds of cache data across 4 cache types, wasting ~10x more memory.
+    pub const DEFAULT_VIEW_RETENTION_TIMEOUT: ViewDelta = ViewDelta::new(256);
 
     /// The default maximum number of blocks to repair at once.
     pub const DEFAULT_MAX_REPAIR: NonZeroUsize = NZUsize!(128);
 
     /// The default prunable items per section.
-    pub const DEFAULT_PRUNABLE_ITEMS_PER_SECTION: NonZeroU64 = NZU64!(4_096);
+    ///
+    /// Pruning operates at section granularity -- items are only freed when an
+    /// entire section falls below the retention window. A smaller section size
+    /// (256 vs 4096) makes pruning more responsive and reduces peak memory.
+    pub const DEFAULT_PRUNABLE_ITEMS_PER_SECTION: NonZeroU64 = NZU64!(256);
 
     /// The default replay buffer size.
     pub const DEFAULT_REPLAY_BUFFER: NonZeroUsize = NZUsize!(8 * 1024 * 1024);
@@ -224,9 +232,9 @@ mod tests {
     #[test]
     fn test_defaults() {
         assert_eq!(ActorInitializer::DEFAULT_MAILBOX_SIZE, 1024);
-        assert_eq!(ActorInitializer::DEFAULT_VIEW_RETENTION_TIMEOUT, ViewDelta::new(2560));
+        assert_eq!(ActorInitializer::DEFAULT_VIEW_RETENTION_TIMEOUT, ViewDelta::new(256));
         assert_eq!(ActorInitializer::DEFAULT_MAX_REPAIR.get(), 128);
-        assert_eq!(ActorInitializer::DEFAULT_PRUNABLE_ITEMS_PER_SECTION.get(), 4_096);
+        assert_eq!(ActorInitializer::DEFAULT_PRUNABLE_ITEMS_PER_SECTION.get(), 256);
         assert_eq!(ActorInitializer::DEFAULT_REPLAY_BUFFER.get(), 8 * 1024 * 1024);
         assert_eq!(ActorInitializer::DEFAULT_KEY_WRITE_BUFFER.get(), 1024 * 1024);
         assert_eq!(ActorInitializer::DEFAULT_VALUE_WRITE_BUFFER.get(), 1024 * 1024);

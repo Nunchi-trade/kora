@@ -11,7 +11,7 @@ use commonware_cryptography::bls12381::{
     dkg,
     primitives::{sharing::Mode, variant::MinSig},
 };
-use commonware_utils::{N3f1, TryCollect, ordered::Set};
+use commonware_utils::{Faults, N3f1, TryCollect, ordered::Set};
 use eyre::{Result, WrapErr};
 use serde::{Deserialize, Serialize};
 
@@ -19,9 +19,6 @@ use serde::{Deserialize, Serialize};
 pub(crate) struct DkgDealArgs {
     #[arg(long, default_value = "4")]
     pub validators: usize,
-
-    #[arg(long, default_value = "3")]
-    pub threshold: u32,
 
     #[arg(long, default_value = "/shared")]
     pub output_dir: PathBuf,
@@ -43,10 +40,14 @@ struct ShareJson {
 }
 
 pub(crate) fn run(args: DkgDealArgs) -> Result<()> {
+    let quorum = N3f1::quorum(args.validators);
     tracing::info!(
         validators = args.validators,
-        threshold = args.threshold,
-        "Running trusted dealer DKG"
+        quorum = quorum,
+        max_faulty = args.validators as u32 - quorum,
+        "Running trusted dealer DKG (quorum determined by N3f1: need {} of {} validators)",
+        quorum,
+        args.validators
     );
 
     let mut participants = Vec::with_capacity(args.validators);
@@ -119,7 +120,7 @@ pub(crate) fn run(args: DkgDealArgs) -> Result<()> {
         let output_json = OutputJson {
             group_public_key: hex::encode(&group_key_bytes),
             public_polynomial: hex::encode(&public_polynomial_bytes),
-            threshold: args.threshold,
+            threshold: quorum,
             participants: args.validators,
             participant_keys: participant_keys.clone(),
         };
@@ -135,7 +136,7 @@ pub(crate) fn run(args: DkgDealArgs) -> Result<()> {
 
     tracing::info!("Trusted dealer DKG complete");
     tracing::info!("  Validators: {}", args.validators);
-    tracing::info!("  Threshold:  {}", args.threshold);
+    tracing::info!("  Quorum (N3f1): {}", quorum);
 
     Ok(())
 }

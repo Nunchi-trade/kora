@@ -14,9 +14,6 @@ fn generate_test_keys(n: usize, seed: u64) -> Vec<ed25519::PrivateKey> {
 
 fn make_test_config(keys: &[ed25519::PrivateKey], index: usize, base_port: u16) -> DkgConfig {
     let participants: Vec<_> = keys.iter().map(|k| k.public_key()).collect();
-    let n = participants.len();
-    let f = (n - 1) / 3;
-    let threshold = (n - f) as u32;
 
     let bootstrap_peers: Vec<_> = participants
         .iter()
@@ -29,7 +26,6 @@ fn make_test_config(keys: &[ed25519::PrivateKey], index: usize, base_port: u16) 
         identity_key: keys[index].clone(),
         validator_index: index,
         participants,
-        threshold,
         chain_id: 1337,
         data_dir: PathBuf::from(format!("/tmp/dkg-test-{}", index)),
         listen_addr: format!("127.0.0.1:{}", base_port + index as u16).parse().unwrap(),

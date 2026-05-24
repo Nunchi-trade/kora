@@ -50,10 +50,15 @@ impl<S: StateDbRead> DatabaseRef for StateDbAdapter<S> {
     type Error = ExecutionError;
 
     fn basic_ref(&self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
-        match block_on(self.state.nonce(&address)) {
-            Ok(nonce) => {
-                let balance = block_on(self.state.balance(&address))?;
-                let code_hash = block_on(self.state.code_hash(&address))?;
+        // Batch all three reads into a single block_on call to reduce the
+        // overhead of the async-to-sync bridge (block_in_place + handle.block_on).
+        match block_on(async {
+            let nonce = self.state.nonce(&address).await?;
+            let balance = self.state.balance(&address).await?;
+            let code_hash = self.state.code_hash(&address).await?;
+            Ok::<_, StateDbError>((nonce, balance, code_hash))
+        }) {
+            Ok((nonce, balance, code_hash)) => {
                 Ok(Some(AccountInfo { nonce, balance, code_hash, code: None, account_id: None }))
             }
             Err(StateDbError::AccountNotFound(_)) => Ok(None),

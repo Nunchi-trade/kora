@@ -5,7 +5,7 @@ use std::num::{NonZeroU16, NonZeroUsize};
 use commonware_utils::{NZU16, NZUsize};
 
 const DEFAULT_PAGE_SIZE: NonZeroU16 = NZU16!(16 * 1024);
-const DEFAULT_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(1_024);
+const DEFAULT_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(4_096);
 
 /// Configuration for the full QMDB backend.
 #[derive(Clone)]

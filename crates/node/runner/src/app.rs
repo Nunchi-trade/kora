@@ -44,9 +44,9 @@ const SNAPSHOT_WAIT_TIMEOUT: Duration = Duration::from_millis(100);
 /// A value of 8 was too tight after a node restart: the finalization pipeline
 /// lags while the node re-syncs, and with only 8 blocks of headroom every
 /// proposal gets skipped, preventing the node from ever catching up.  A
-/// value of 32 gives finalization plenty of room to drain without stalling
+/// value of 64 gives finalization plenty of room to drain without stalling
 /// proposals on healthy nodes.
-const MAX_PROPOSAL_LAG: u64 = 32;
+const MAX_PROPOSAL_LAG: u64 = 64;
 
 fn unix_timestamp_secs<Env: Clock>(env: &Env) -> u64 {
     env.current().duration_since(UNIX_EPOCH).map(|duration| duration.as_secs()).unwrap_or(0)
@@ -252,8 +252,7 @@ where
 
         let root_start = Instant::now();
         let state_root =
-            match self.ledger.compute_root_from_store(parent_digest, outcome.changes.clone()).await
-            {
+            match self.ledger.compute_root_from_store(parent_digest, &outcome.changes).await {
                 Ok(root) => root,
                 Err(err) => {
                     error!(
@@ -375,7 +374,7 @@ where
         let root_start = Instant::now();
         let state_root = match self
             .ledger
-            .compute_root_from_store(parent_digest, execution.outcome.changes.clone())
+            .compute_root_from_store(parent_digest, &execution.outcome.changes)
             .await
         {
             Ok(root) => root,

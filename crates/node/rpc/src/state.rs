@@ -23,7 +23,7 @@ pub enum PartitionStatus {
     Healthy,
     /// Some peers are missing but quorum is still possible.
     Degraded,
-    /// Too few peers for BFT quorum (fewer than 2f+1).
+    /// Too few peers for BFT quorum (fewer than n-f).
     Partitioned,
 }
 
@@ -31,18 +31,19 @@ impl PartitionStatus {
     /// Derive partition status from the number of connected peers and total
     /// expected peers (i.e. `validator_count - 1`).
     ///
-    /// For a BFT system with `n` validators, quorum requires `2f+1` where
-    /// `f = (n-1)/3`. A node needs at least `2f` *other* peers to form
-    /// quorum (since it counts itself as part of the `2f+1`).
+    /// Commonware simplex uses an N3f1 quorum model: with `n` validators and
+    /// `f = (n-1)/3` maximum Byzantine faults, quorum requires `n - f`
+    /// participants.  A node needs at least `n - f - 1` *other* peers to form
+    /// quorum (since it counts itself as one of the `n - f` participants).
     const fn from_peer_counts(connected_peers: u64, total_expected_peers: u64) -> Self {
         if connected_peers >= total_expected_peers {
             Self::Healthy
         } else {
             // total_validators = total_expected_peers + 1 (include self)
             let total_validators = total_expected_peers + 1;
-            // f = (n-1) / 3, quorum = 2f+1, peers needed = quorum - 1 (self)
+            // f = (n-1) / 3, quorum = n - f, peers needed = quorum - 1 (self)
             let f = (total_validators.saturating_sub(1)) / 3;
-            let quorum_peers_needed = 2 * f; // 2f peers + self = 2f+1
+            let quorum_peers_needed = total_validators - f - 1; // (n - f) - 1 for self
             if connected_peers >= quorum_peers_needed { Self::Degraded } else { Self::Partitioned }
         }
     }
@@ -372,13 +373,13 @@ mod tests {
 
     #[test]
     fn partition_status_degraded_when_one_peer_missing() {
-        // 4 validators (f=1): need 2 peers for quorum, have 2
+        // 4 validators (f=1): quorum = n-f = 3, need 2 peers + self
         assert_eq!(PartitionStatus::from_peer_counts(2, 3), PartitionStatus::Degraded);
     }
 
     #[test]
     fn partition_status_partitioned_when_below_quorum() {
-        // 4 validators (f=1): need 2 peers for quorum, have 1
+        // 4 validators (f=1): quorum = n-f = 3, need 2 peers + self, have 1
         assert_eq!(PartitionStatus::from_peer_counts(1, 3), PartitionStatus::Partitioned);
     }
 
@@ -389,11 +390,21 @@ mod tests {
 
     #[test]
     fn partition_status_seven_validators() {
-        // 7 validators (f=2): need 4 peers for quorum (2f peers + self = 5 = 2f+1)
+        // 7 validators (f=2): quorum = n-f = 5, need 4 peers + self
         assert_eq!(PartitionStatus::from_peer_counts(6, 6), PartitionStatus::Healthy);
         assert_eq!(PartitionStatus::from_peer_counts(5, 6), PartitionStatus::Degraded);
         assert_eq!(PartitionStatus::from_peer_counts(4, 6), PartitionStatus::Degraded);
         assert_eq!(PartitionStatus::from_peer_counts(3, 6), PartitionStatus::Partitioned);
+    }
+
+    #[test]
+    fn partition_status_fifteen_validators() {
+        // 15 validators (f=4): quorum = n-f = 11, need 10 peers + self
+        // This is the case where the old 2f formula diverged from n-f.
+        assert_eq!(PartitionStatus::from_peer_counts(14, 14), PartitionStatus::Healthy);
+        assert_eq!(PartitionStatus::from_peer_counts(10, 14), PartitionStatus::Degraded);
+        assert_eq!(PartitionStatus::from_peer_counts(9, 14), PartitionStatus::Partitioned);
+        assert_eq!(PartitionStatus::from_peer_counts(8, 14), PartitionStatus::Partitioned);
     }
 
     #[test]

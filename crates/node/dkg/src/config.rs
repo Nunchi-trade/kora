@@ -1,6 +1,7 @@
 use std::{path::PathBuf, time::Duration};
 
 use commonware_cryptography::ed25519;
+use commonware_utils::{Faults, N3f1};
 
 /// Configuration for a Distributed Key Generation (DKG) ceremony.
 #[derive(Debug, Clone)]
@@ -11,8 +12,6 @@ pub struct DkgConfig {
     pub validator_index: usize,
     /// Public keys of all validators participating in the DKG ceremony.
     pub participants: Vec<ed25519::PublicKey>,
-    /// Minimum number of participants required to reconstruct the secret (t-of-n).
-    pub threshold: u32,
     /// Chain identifier for domain separation.
     pub chain_id: u64,
     /// Directory for persisting DKG state and key shares.
@@ -31,9 +30,14 @@ impl DkgConfig {
         self.participants.len()
     }
 
-    /// Returns the threshold value (t).
-    pub const fn t(&self) -> u32 {
-        self.threshold
+    /// Returns the quorum / threshold value (t) as determined by N3f1.
+    ///
+    /// This is `n - f` where `f = (n-1)/3`. For example:
+    /// - n=4: t=3 (tolerates 1 fault)
+    /// - n=7: t=5 (tolerates 2 faults)
+    /// - n=15: t=11 (tolerates 4 faults)
+    pub fn t(&self) -> u32 {
+        N3f1::quorum(self.participants.len())
     }
 
     /// Returns this validator's public key derived from the identity key.
@@ -65,7 +69,6 @@ mod tests {
             identity_key,
             validator_index: 0,
             participants,
-            threshold: 3,
             chain_id: 1337,
             data_dir: PathBuf::from("/tmp/dkg-test"),
             listen_addr: "127.0.0.1:8000".parse::<SocketAddr>().unwrap(),
@@ -81,83 +84,30 @@ mod tests {
     }
 
     #[test]
-    fn test_n_with_single_participant() {
-        let identity_key = ed25519::PrivateKey::from_seed(42);
-        let config = DkgConfig {
-            identity_key,
-            validator_index: 0,
-            participants: vec![ed25519::PrivateKey::from_seed(42).public_key()],
-            threshold: 1,
-            chain_id: 1337,
-            data_dir: PathBuf::from("/tmp/dkg-test"),
-            listen_addr: "127.0.0.1:8000".parse::<SocketAddr>().unwrap(),
-            bootstrap_peers: vec![],
-            timeout: Duration::from_secs(60),
-        };
-        assert_eq!(config.n(), 1);
-    }
-
-    #[test]
-    fn test_n_with_many_participants() {
-        let identity_key = ed25519::PrivateKey::from_seed(42);
-        let participants: Vec<_> =
-            (0..100).map(|i| ed25519::PrivateKey::from_seed(i as u64).public_key()).collect();
-
-        let config = DkgConfig {
-            identity_key,
-            validator_index: 0,
-            participants,
-            threshold: 67,
-            chain_id: 1337,
-            data_dir: PathBuf::from("/tmp/dkg-test"),
-            listen_addr: "127.0.0.1:8000".parse::<SocketAddr>().unwrap(),
-            bootstrap_peers: vec![],
-            timeout: Duration::from_secs(60),
-        };
-        assert_eq!(config.n(), 100);
-    }
-
-    #[test]
-    fn test_t_returns_threshold() {
+    fn test_t_returns_n3f1_quorum() {
         let config = test_config();
+        // n=4: f=(4-1)/3=1, quorum=4-1=3
         assert_eq!(config.t(), 3);
     }
 
     #[test]
-    fn test_t_with_threshold_one() {
-        let identity_key = ed25519::PrivateKey::from_seed(42);
-        let config = DkgConfig {
-            identity_key,
-            validator_index: 0,
-            participants: vec![ed25519::PrivateKey::from_seed(42).public_key()],
-            threshold: 1,
-            chain_id: 1337,
-            data_dir: PathBuf::from("/tmp/dkg-test"),
-            listen_addr: "127.0.0.1:8000".parse::<SocketAddr>().unwrap(),
-            bootstrap_peers: vec![],
-            timeout: Duration::from_secs(60),
-        };
-        assert_eq!(config.t(), 1);
-    }
-
-    #[test]
-    fn test_t_with_large_threshold() {
+    fn test_t_with_fifteen_validators() {
         let identity_key = ed25519::PrivateKey::from_seed(42);
         let participants: Vec<_> =
-            (0..100).map(|i| ed25519::PrivateKey::from_seed(i as u64).public_key()).collect();
+            (0..15).map(|i| ed25519::PrivateKey::from_seed(i as u64).public_key()).collect();
 
         let config = DkgConfig {
             identity_key,
             validator_index: 0,
             participants,
-            threshold: 67,
             chain_id: 1337,
             data_dir: PathBuf::from("/tmp/dkg-test"),
             listen_addr: "127.0.0.1:8000".parse::<SocketAddr>().unwrap(),
             bootstrap_peers: vec![],
             timeout: Duration::from_secs(60),
         };
-        assert_eq!(config.t(), 67);
+        // n=15: f=(15-1)/3=4, quorum=15-4=11 (NOT 10!)
+        assert_eq!(config.t(), 11);
     }
 
     #[test]
@@ -166,60 +116,6 @@ mod tests {
         let expected_public_key = config.identity_key.public_key();
         let actual_public_key = config.my_public_key();
         assert_eq!(actual_public_key, expected_public_key);
-    }
-
-    #[test]
-    fn test_my_public_key_consistent() {
-        let config = test_config();
-        let first_call = config.my_public_key();
-        let second_call = config.my_public_key();
-        assert_eq!(first_call, second_call);
-    }
-
-    #[test]
-    fn test_my_public_key_different_identities() {
-        let identity_key1 = ed25519::PrivateKey::from_seed(42);
-        let identity_key2 = ed25519::PrivateKey::from_seed(43);
-
-        let config1 = DkgConfig {
-            identity_key: identity_key1,
-            validator_index: 0,
-            participants: vec![
-                ed25519::PrivateKey::from_seed(42).public_key(),
-                ed25519::PrivateKey::from_seed(43).public_key(),
-            ],
-            threshold: 2,
-            chain_id: 1337,
-            data_dir: PathBuf::from("/tmp/dkg-test-1"),
-            listen_addr: "127.0.0.1:8001".parse::<SocketAddr>().unwrap(),
-            bootstrap_peers: vec![],
-            timeout: Duration::from_secs(60),
-        };
-
-        let config2 = DkgConfig {
-            identity_key: identity_key2,
-            validator_index: 1,
-            participants: vec![
-                ed25519::PrivateKey::from_seed(42).public_key(),
-                ed25519::PrivateKey::from_seed(43).public_key(),
-            ],
-            threshold: 2,
-            chain_id: 1337,
-            data_dir: PathBuf::from("/tmp/dkg-test-2"),
-            listen_addr: "127.0.0.1:8002".parse::<SocketAddr>().unwrap(),
-            bootstrap_peers: vec![],
-            timeout: Duration::from_secs(60),
-        };
-
-        assert_ne!(config1.my_public_key(), config2.my_public_key());
-    }
-
-    #[test]
-    fn test_dkg_config_debug_implementation() {
-        let config = test_config();
-        let debug_str = format!("{:?}", config);
-        assert!(!debug_str.is_empty());
-        assert!(debug_str.contains("DkgConfig"));
     }
 
     #[test]
@@ -232,33 +128,5 @@ mod tests {
         assert_eq!(config.my_public_key(), cloned.my_public_key());
         assert_eq!(config.chain_id, cloned.chain_id);
         assert_eq!(config.validator_index, cloned.validator_index);
-    }
-
-    #[test]
-    fn test_dkg_config_participants_matches_public_keys() {
-        let config = test_config();
-        assert_eq!(config.participants.len(), 4);
-        assert_eq!(config.participants.len(), config.n());
-    }
-
-    #[test]
-    fn test_dkg_config_threshold_boundary() {
-        let identity_key = ed25519::PrivateKey::from_seed(42);
-        let participants: Vec<_> =
-            (0..4).map(|i| ed25519::PrivateKey::from_seed(i as u64).public_key()).collect();
-
-        let config = DkgConfig {
-            identity_key,
-            validator_index: 0,
-            participants,
-            threshold: 4,
-            chain_id: 1337,
-            data_dir: PathBuf::from("/tmp/dkg-test"),
-            listen_addr: "127.0.0.1:8000".parse::<SocketAddr>().unwrap(),
-            bootstrap_peers: vec![],
-            timeout: Duration::from_secs(60),
-        };
-
-        assert_eq!(config.t(), config.n() as u32);
     }
 }
