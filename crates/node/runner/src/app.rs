@@ -43,7 +43,7 @@ const SNAPSHOT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// finalized height before it voluntarily skips its proposal turn.  This
 /// prevents a single fast leader from racing too far ahead of finalization,
 /// which can cascade into snapshot-miss failures for other validators.
-const MAX_PROPOSAL_LAG: u64 = 8;
+const MAX_PROPOSAL_LAG: u64 = 64;
 
 fn unix_timestamp_secs<Env: Clock>(env: &Env) -> u64 {
     env.current().duration_since(UNIX_EPOCH).map(|duration| duration.as_secs()).unwrap_or(0)
