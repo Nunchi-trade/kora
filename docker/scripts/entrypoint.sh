@@ -12,13 +12,15 @@ BARRIER_DIR=${BARRIER_DIR:-/barrier}
 
 RUNTIME_DIR=${KORA_RUNTIME_DIR:-/runtime}
 
-# Limit Tokio's default worker thread count.  Tokio defaults to num_cpus
-# which, inside Docker, reads the *host* CPU count (e.g. 12) rather than
-# the cgroup limit (e.g. 0.75-1.2).  This creates dozens of idle threads
-# that compete for the CFS quota, inflating involuntary context switches
-# and triggering health-check timeouts under CPU pressure.
-# Two worker threads match what the commonware runtime already configures.
-export TOKIO_WORKER_THREADS="${TOKIO_WORKER_THREADS:-2}"
+# Cap Tokio and Rayon thread counts to avoid oversubscription.
+# Inside Docker, Tokio/Rayon read the HOST CPU count (e.g. 12) rather than
+# the cgroup limit (e.g. 2 CPUs), creating massive context switching overhead.
+# The default of 8 Tokio workers provides enough async concurrency for
+# consensus pipelining, networking, and I/O without extreme oversubscription.
+# Rayon is used only for BLS batch verification; 2 threads match the strategy
+# parameter (NZUsize!(2)) in runner.rs.
+export TOKIO_WORKER_THREADS="${TOKIO_WORKER_THREADS:-8}"
+export RAYON_NUM_THREADS="${RAYON_NUM_THREADS:-2}"
 
 MODE="${1:-validator}"
 shift || true
