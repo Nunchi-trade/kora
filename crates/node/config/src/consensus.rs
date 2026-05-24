@@ -37,13 +37,17 @@ pub const DEFAULT_SIMPLEX_LEADER_TIMEOUT_SECS: u64 = 1;
 /// Default Simplex certification timeout in seconds.
 ///
 /// Healthy views complete in ~7ms, so 2 seconds provides a generous margin
-/// for stragglers while avoiding 10-second stalls when certification fails.
+/// for stragglers while avoiding long stalls when certification fails.
 /// This matches the underlying simplex crate default
 /// ([`DEFAULT_NOTARIZATION_TIMEOUT`]).
 pub const DEFAULT_SIMPLEX_CERTIFICATION_TIMEOUT_SECS: u64 = 2;
 
 /// Default Simplex nullification retry timeout in seconds.
-pub const DEFAULT_SIMPLEX_TIMEOUT_RETRY_SECS: u64 = 2;
+///
+/// After a view is nullified, this controls how long the validator waits
+/// before retrying.  Reducing from 2 s to 1 s allows faster recovery
+/// from transient snapshot misses under CPU contention.
+pub const DEFAULT_SIMPLEX_TIMEOUT_RETRY_SECS: u64 = 1;
 
 /// Default Simplex fetch timeout in seconds.
 pub const DEFAULT_SIMPLEX_FETCH_TIMEOUT_SECS: u64 = 5;

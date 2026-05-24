@@ -1302,14 +1302,14 @@ mod tests {
     #[test]
     fn seed_genesis_block_index_indexes_real_genesis_metadata() {
         let index = BlockIndex::new();
-        let genesis = Block {
-            parent: BlockId(B256::repeat_byte(0x11)),
-            height: 0,
-            timestamp: 0,
-            prevrandao: B256::repeat_byte(0x22),
-            state_root: StateRoot(B256::repeat_byte(0x33)),
-            txs: Vec::new(),
-        };
+        let genesis = Block::new(
+            BlockId(B256::repeat_byte(0x11)),
+            0,
+            0,
+            B256::repeat_byte(0x22),
+            StateRoot(B256::repeat_byte(0x33)),
+            Vec::new(),
+        );
         let gas_limit = 45_000_000;
 
         seed_genesis_block_index(&index, &genesis, gas_limit);
@@ -1330,14 +1330,14 @@ mod tests {
     #[test]
     fn seed_genesis_block_index_uses_genesis_timestamp() {
         let index = BlockIndex::new();
-        let genesis = Block {
-            parent: BlockId(B256::ZERO),
-            height: 0,
-            timestamp: 1_700_000_000,
-            prevrandao: B256::ZERO,
-            state_root: StateRoot(B256::ZERO),
-            txs: Vec::new(),
-        };
+        let genesis = Block::new(
+            BlockId(B256::ZERO),
+            0,
+            1_700_000_000,
+            B256::ZERO,
+            StateRoot(B256::ZERO),
+            Vec::new(),
+        );
 
         seed_genesis_block_index(&index, &genesis, 30_000_000);
 

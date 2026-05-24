@@ -572,14 +572,14 @@ mod mempool_tests {
     fn publish_mempool_inclusions_broadcasts_tx_included() {
         let (sender, mut receiver) = kora_rpc::mempool_event_channel();
         let tx = Tx::new(Bytes::from_static(&[0x01, 0x02, 0x03]));
-        let block = Block {
-            parent: BlockId(B256::ZERO),
-            height: 7,
-            timestamp: 0,
-            prevrandao: B256::ZERO,
-            state_root: StateRoot(B256::ZERO),
-            txs: vec![tx.clone()],
-        };
+        let block = Block::new(
+            BlockId(B256::ZERO),
+            7,
+            0,
+            B256::ZERO,
+            StateRoot(B256::ZERO),
+            vec![tx.clone()],
+        );
         let block_hash = block.id().0;
 
         publish_mempool_inclusions(Some(&sender), &block);
@@ -688,14 +688,7 @@ mod finalize_error_tests {
             // The block's own snapshot does NOT exist in the store, so
             // `finalize_block` will attempt execution (and our FailingExecutor
             // will cause it to return Err(FinalizationError::ExecutionFailed)).
-            let block = Block {
-                parent: genesis.id(),
-                height: 1,
-                timestamp: 1,
-                prevrandao: B256::ZERO,
-                state_root: StateRoot(B256::ZERO),
-                txs: vec![tx],
-            };
+            let block = Block::new(genesis.id(), 1, 1, B256::ZERO, StateRoot(B256::ZERO), vec![tx]);
 
             // -- create an acknowledgement we can observe --
             let (ack, waiter) = Exact::handle();
@@ -816,14 +809,7 @@ mod finalize_success_tests {
             // -- build a block with no real txs but containing the dummy tx --
             // EmptySuccessExecutor ignores transactions and produces an empty
             // changeset, so the state root stays at genesis_root.
-            let block = Block {
-                parent: genesis.id(),
-                height: 1,
-                timestamp: 1,
-                prevrandao: B256::ZERO,
-                state_root: genesis_root,
-                txs: vec![tx],
-            };
+            let block = Block::new(genesis.id(), 1, 1, B256::ZERO, genesis_root, vec![tx]);
 
             let (ack, waiter) = Exact::handle();
 
@@ -881,14 +867,7 @@ mod finalize_success_tests {
                 service.query_state_root(genesis_digest).await.expect("genesis state root");
 
             // Build an empty block whose state root matches genesis (no changes).
-            let block = Block {
-                parent: genesis.id(),
-                height: 1,
-                timestamp: 1,
-                prevrandao: B256::ZERO,
-                state_root: genesis_root,
-                txs: Vec::new(),
-            };
+            let block = Block::new(genesis.id(), 1, 1, B256::ZERO, genesis_root, Vec::new());
             let block_hash = block.id().0;
 
             let index = Arc::new(BlockIndex::new());
@@ -938,14 +917,7 @@ mod finalize_success_tests {
             let genesis_root =
                 service.query_state_root(genesis_digest).await.expect("genesis state root");
 
-            let block1 = Block {
-                parent: genesis.id(),
-                height: 1,
-                timestamp: 1,
-                prevrandao: B256::ZERO,
-                state_root: genesis_root,
-                txs: Vec::new(),
-            };
+            let block1 = Block::new(genesis.id(), 1, 1, B256::ZERO, genesis_root, Vec::new());
             let block1_digest = block1.commitment();
             let block1_id = block1.id();
             let (ack1, waiter1) = Exact::handle();
@@ -973,14 +945,7 @@ mod finalize_success_tests {
                 "height 1 should remain an in-memory snapshot before the checkpoint boundary"
             );
 
-            let block2 = Block {
-                parent: block1_id,
-                height: 2,
-                timestamp: 2,
-                prevrandao: B256::ZERO,
-                state_root: genesis_root,
-                txs: Vec::new(),
-            };
+            let block2 = Block::new(block1_id, 2, 2, B256::ZERO, genesis_root, Vec::new());
             let block2_digest = block2.commitment();
             let (ack2, waiter2) = Exact::handle();
 
@@ -1422,14 +1387,14 @@ mod tests {
     fn finalized_index_preserves_transaction_receipt_and_log_metadata() {
         let tx_bytes = signed_eip1559_tx(1337, 20, 3);
         let tx_hash = keccak256(&tx_bytes);
-        let block = Block {
-            parent: BlockId(B256::repeat_byte(0x10)),
-            height: 5,
-            timestamp: 1234,
-            prevrandao: B256::repeat_byte(0x20),
-            state_root: StateRoot(B256::repeat_byte(0x30)),
-            txs: vec![Tx::new(tx_bytes)],
-        };
+        let block = Block::new(
+            BlockId(B256::repeat_byte(0x10)),
+            5,
+            1234,
+            B256::repeat_byte(0x20),
+            StateRoot(B256::repeat_byte(0x30)),
+            vec![Tx::new(tx_bytes)],
+        );
         let block_hash = block.id().0;
         let block_context = BlockContext::new(
             Header {

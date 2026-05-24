@@ -364,86 +364,96 @@ impl<S: StateDb> BlockExecutor<S> for RevmExecutor {
         // --- pre-execution hook ---
         let pre_changes = self.pre_execute(context, state)?;
 
-        let adapter = StateDbAdapter::new(state.clone(), context.recent_block_hashes.clone());
-
-        let db = State::builder().with_database_ref(adapter).build();
-
-        type Db<S> = State<revm::database::WrapDatabaseRef<StateDbAdapter<S>>>;
-        let ctx: Context<BlockEnv, _, _, Db<S>, Journal<Db<S>>, ()> =
-            Context::new(db, self.config.spec_id);
-        let ctx = ctx
-            .modify_cfg_chained(|cfg| {
-                cfg.chain_id = self.config.chain_id;
-            })
-            .modify_block_chained(|blk: &mut BlockEnv| {
-                blk.number = U256::from(context.header.number);
-                blk.timestamp = U256::from(context.header.timestamp);
-                blk.beneficiary = context.header.beneficiary;
-                blk.gas_limit = context.header.gas_limit;
-                blk.basefee = context.header.base_fee_per_gas.unwrap_or_default();
-                blk.prevrandao = Some(context.prevrandao);
-            });
-
-        let mut evm = ctx.build_mainnet();
-
         let mut outcome = ExecutionOutcome::new();
         outcome.changes.merge(pre_changes);
-        let mut cumulative_gas = 0u64;
 
-        for tx_bytes in txs {
-            let tx_hash = keccak256(tx_bytes);
+        // Empty-block short circuit: skip EVM context construction,
+        // state-db adapter cloning, and journal allocation when there
+        // are no transactions to execute.  This is the common case on
+        // low-load networks and avoids measurable setup overhead per
+        // empty block.
+        if !txs.is_empty() {
+            let adapter = StateDbAdapter::new(state.clone(), context.recent_block_hashes.clone());
 
-            let tx_env = match decode_tx_env(tx_bytes, self.config.chain_id) {
-                Ok(env) => env,
-                Err(e) => {
-                    warn!(hash = ?tx_hash, error = %e, "skipping undecodable transaction");
-                    outcome.receipts.push(build_skipped_receipt(tx_hash, cumulative_gas));
-                    continue;
+            let db = State::builder().with_database_ref(adapter).build();
+
+            type Db<S> = State<revm::database::WrapDatabaseRef<StateDbAdapter<S>>>;
+            let ctx: Context<BlockEnv, _, _, Db<S>, Journal<Db<S>>, ()> =
+                Context::new(db, self.config.spec_id);
+            let ctx = ctx
+                .modify_cfg_chained(|cfg| {
+                    cfg.chain_id = self.config.chain_id;
+                })
+                .modify_block_chained(|blk: &mut BlockEnv| {
+                    blk.number = U256::from(context.header.number);
+                    blk.timestamp = U256::from(context.header.timestamp);
+                    blk.beneficiary = context.header.beneficiary;
+                    blk.gas_limit = context.header.gas_limit;
+                    blk.basefee = context.header.base_fee_per_gas.unwrap_or_default();
+                    blk.prevrandao = Some(context.prevrandao);
+                });
+
+            let mut evm = ctx.build_mainnet();
+            let mut cumulative_gas = 0u64;
+
+            for tx_bytes in txs {
+                let tx_hash = keccak256(tx_bytes);
+
+                let tx_env = match decode_tx_env(tx_bytes, self.config.chain_id) {
+                    Ok(env) => env,
+                    Err(e) => {
+                        warn!(hash = ?tx_hash, error = %e, "skipping undecodable transaction");
+                        outcome.receipts.push(build_skipped_receipt(tx_hash, cumulative_gas));
+                        continue;
+                    }
+                };
+
+                // Enforce block gas limit: we `break` (not `continue`) because Ethereum
+                // semantics stop inclusion at the gas limit — remaining txs are simply not
+                // included. Unlike decode failures above, gas-limited txs get no placeholder
+                // receipts, so `receipts.len()` may be less than `txs.len()`.
+                let tx_gas_limit = tx_env.gas_limit;
+                if cumulative_gas.saturating_add(tx_gas_limit) > context.header.gas_limit {
+                    break;
                 }
-            };
+                evm.set_tx(tx_env);
 
-            // Enforce block gas limit: we `break` (not `continue`) because Ethereum
-            // semantics stop inclusion at the gas limit — remaining txs are simply not
-            // included. Unlike decode failures above, gas-limited txs get no placeholder
-            // receipts, so `receipts.len()` may be less than `txs.len()`.
-            let tx_gas_limit = tx_env.gas_limit;
-            if cumulative_gas.saturating_add(tx_gas_limit) > context.header.gas_limit {
-                break;
+                let result_and_state = match evm.replay() {
+                    Ok(result) => result,
+                    Err(e) => {
+                        debug!(hash = ?tx_hash, error = ?e, "skipping unexecutable transaction");
+                        outcome.receipts.push(build_skipped_receipt(tx_hash, cumulative_gas));
+                        continue;
+                    }
+                };
+
+                let gas_used = result_and_state.result.tx_gas_used();
+                cumulative_gas = cumulative_gas.saturating_add(gas_used);
+
+                let receipt =
+                    build_receipt(&result_and_state.result, tx_hash, gas_used, cumulative_gas);
+                outcome.receipts.push(receipt);
+
+                let evm_state = result_and_state.state;
+
+                // Collect addresses that were selfdestructed in this transaction.
+                // Their storage entries in QMDB become orphaned and need future GC.
+                for (address, account) in &evm_state {
+                    if account.is_selfdestructed() {
+                        outcome.selfdestructed_addresses.push(*address);
+                    }
+                }
+
+                // Extract changes by reference to avoid cloning the entire
+                // EvmState HashMap.  The original is then moved into
+                // `db.commit()` which consumes it.
+                let changes = extract_changes(&evm_state);
+                evm.ctx.modify_db(|db| db.commit(evm_state));
+                outcome.changes.merge(changes);
             }
-            evm.set_tx(tx_env);
 
-            let result_and_state = match evm.replay() {
-                Ok(result) => result,
-                Err(e) => {
-                    debug!(hash = ?tx_hash, error = ?e, "skipping unexecutable transaction");
-                    outcome.receipts.push(build_skipped_receipt(tx_hash, cumulative_gas));
-                    continue;
-                }
-            };
-
-            let gas_used = result_and_state.result.tx_gas_used();
-            cumulative_gas = cumulative_gas.saturating_add(gas_used);
-
-            let receipt =
-                build_receipt(&result_and_state.result, tx_hash, gas_used, cumulative_gas);
-            outcome.receipts.push(receipt);
-
-            let state = result_and_state.state;
-
-            // Collect addresses that were selfdestructed in this transaction.
-            // Their storage entries in QMDB become orphaned and need future GC.
-            for (address, account) in &state {
-                if account.is_selfdestructed() {
-                    outcome.selfdestructed_addresses.push(*address);
-                }
-            }
-
-            let changes = extract_changes(state.clone());
-            evm.ctx.modify_db(|db| db.commit(state));
-            outcome.changes.merge(changes);
+            outcome.gas_used = cumulative_gas;
         }
-
-        outcome.gas_used = cumulative_gas;
 
         // --- post-execution hook ---
         let post_changes = self.post_execute(context, state, &outcome.receipts)?;
@@ -673,7 +683,13 @@ fn build_receipt(
 }
 
 /// Extract state changes from REVM execution state.
-fn extract_changes(state: EvmState) -> ChangeSet {
+///
+/// Takes the state by reference to avoid a full `HashMap` clone on the
+/// hot path: the caller needs the original `EvmState` for `db.commit()`,
+/// and the previous code cloned it before extracting changes.  Iterating
+/// by reference copies only the individual field values we need, which is
+/// dramatically cheaper than cloning the entire nested structure.
+fn extract_changes(state: &EvmState) -> ChangeSet {
     let mut changes = ChangeSet::new();
 
     for (address, account) in state {
@@ -702,7 +718,7 @@ fn extract_changes(state: EvmState) -> ChangeSet {
             storage,
         };
 
-        changes.insert(address, update);
+        changes.insert(*address, update);
     }
 
     changes
@@ -986,7 +1002,7 @@ mod tests {
     #[test]
     fn extract_changes_empty() {
         let state = EvmState::default();
-        let changes = extract_changes(state);
+        let changes = extract_changes(&state);
         assert!(changes.is_empty());
     }
 
@@ -1009,7 +1025,7 @@ mod tests {
 
         state.insert(Address::ZERO, account);
 
-        let changes = extract_changes(state);
+        let changes = extract_changes(&state);
         assert_eq!(changes.len(), 1);
 
         let update = changes.accounts.get(&Address::ZERO).unwrap();
@@ -1031,7 +1047,7 @@ mod tests {
 
         state.insert(Address::ZERO, account);
 
-        let changes = extract_changes(state);
+        let changes = extract_changes(&state);
         assert!(changes.is_empty());
     }
 
@@ -1049,7 +1065,7 @@ mod tests {
 
         state.insert(Address::ZERO, account);
 
-        let changes = extract_changes(state);
+        let changes = extract_changes(&state);
         assert_eq!(changes.len(), 1);
 
         let update = changes.accounts.get(&Address::ZERO).unwrap();
@@ -1070,7 +1086,7 @@ mod tests {
 
         state.insert(Address::ZERO, account);
 
-        let changes = extract_changes(state);
+        let changes = extract_changes(&state);
         assert_eq!(changes.len(), 1);
 
         let update = changes.accounts.get(&Address::ZERO).unwrap();

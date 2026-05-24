@@ -117,14 +117,14 @@ mod tests {
     #[test]
     fn test_block_roundtrip_and_id_stable() {
         let txs = vec![Tx { bytes: Bytes::new() }, Tx { bytes: Bytes::from(vec![9, 9, 9]) }];
-        let block = Block {
-            parent: BlockId(B256::from([0xAAu8; 32])),
-            height: 7,
-            timestamp: 1_700_000_007,
-            prevrandao: B256::from([0x55u8; 32]),
-            state_root: StateRoot(B256::from([0xBBu8; 32])),
+        let block = Block::new(
+            BlockId(B256::from([0xAAu8; 32])),
+            7,
+            1_700_000_007,
+            B256::from([0x55u8; 32]),
+            StateRoot(B256::from([0xBBu8; 32])),
             txs,
-        };
+        );
         let encoded = block.encode();
         let decoded = Block::decode_cfg(encoded.clone(), &cfg()).expect("decode block");
         assert_eq!(block, decoded);

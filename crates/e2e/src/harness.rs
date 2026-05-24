@@ -727,7 +727,7 @@ impl<S> TestApplication<S> {
             .await
             .ok()?;
 
-        let block = Block { parent: parent.id(), height, timestamp, prevrandao, state_root, txs };
+        let block = Block::new(parent.id(), height, timestamp, prevrandao, state_root, txs);
 
         let merged_changes = parent_snapshot.state.merge_changes(outcome.changes.clone());
         let next_state = OverlayState::new(parent_snapshot.state.base(), merged_changes);

@@ -34,6 +34,11 @@ use tracing::{debug, error, info, trace, warn};
 /// giving up and nullifying the view.  Uses event-driven notification
 /// (via [`LedgerService::wait_for_snapshot`]) so the wake-up is immediate
 /// once the snapshot is inserted, with this timeout as the upper bound.
+///
+/// Under CPU contention (e.g. 23 threads on 0.75 cores), the finalization
+/// reporter may need more time to produce the parent snapshot.  100 ms
+/// provides ample budget; in the common case the Notify fires within the
+/// first few milliseconds.
 const SNAPSHOT_WAIT_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// Maximum number of unfinalized blocks a leader may be ahead of the last
@@ -41,12 +46,14 @@ const SNAPSHOT_WAIT_TIMEOUT: Duration = Duration::from_millis(100);
 /// prevents a single fast leader from racing too far ahead of finalization,
 /// which can cascade into snapshot-miss failures for other validators.
 ///
-/// A value of 8 was too tight after a node restart: the finalization pipeline
-/// lags while the node re-syncs, and with only 8 blocks of headroom every
-/// proposal gets skipped, preventing the node from ever catching up.  A
-/// value of 64 gives finalization plenty of room to drain without stalling
-/// proposals on healthy nodes.  At the current throughput ceiling of ~30
-/// blocks/s, a gap of 64 represents roughly 2 seconds of blocks.
+/// The previous value of 8 was too tight under CPU contention and after node
+/// restarts: transient finalization stalls (or the finalization pipeline
+/// lagging during re-sync) would trip the guard and force every leader to
+/// skip, producing a cascade of nullifications that could stall the entire
+/// network.  A value of 64 gives finalization plenty of room to drain
+/// without stalling proposals on healthy nodes.  At the current throughput
+/// ceiling of ~30 blocks/s, a gap of 64 represents roughly 2 seconds of
+/// blocks.
 const MAX_PROPOSAL_LAG: u64 = 64;
 
 fn unix_timestamp_secs<Env: Clock>(env: &Env) -> u64 {
@@ -197,6 +204,9 @@ where
                 Some(s) => {
                     let wait_elapsed = wait_start.elapsed();
                     if wait_elapsed.as_millis() > 1 {
+                        if let Some(ref m) = self.metrics {
+                            m.snapshot_poll_wait.observe(wait_elapsed.as_secs_f64());
+                        }
                         debug!(
                             parent_height = parent.height,
                             ?parent_digest,
@@ -207,6 +217,9 @@ where
                     s
                 }
                 None => {
+                    if let Some(ref m) = self.metrics {
+                        m.proposal_snapshot_misses.inc();
+                    }
                     warn!(
                         parent_height = parent.height,
                         ?parent_digest,
@@ -298,7 +311,7 @@ where
             };
         let root_elapsed = root_start.elapsed();
 
-        let block = Block { parent: parent.id(), height, timestamp, prevrandao, state_root, txs };
+        let block = Block::new(parent.id(), height, timestamp, prevrandao, state_root, txs);
 
         let block_digest = block.commitment();
 
@@ -616,6 +629,7 @@ where
         A: BlockProvider<Block = Self::Block>,
     {
         let node_state = self.node_state.clone();
+        let metrics = self.metrics.clone();
         let env = context.0;
         async move {
             let start = Instant::now();
@@ -630,6 +644,9 @@ where
             if let Some(ref state) = node_state {
                 let finalized = state.finalized_height();
                 if parent.height > finalized + MAX_PROPOSAL_LAG {
+                    if let Some(ref m) = metrics {
+                        m.proposal_lag_skips.inc();
+                    }
                     warn!(
                         parent_height = parent.height,
                         finalized_height = finalized,
