@@ -185,7 +185,12 @@ where
         ArchiveTrait::get(self, id).await
     }
 
-    async fn prune(&mut self, _: Height) -> Result<(), Self::Error> {
+    async fn prune(&mut self, min: Height) -> Result<(), Self::Error> {
+        tracing::debug!(
+            min_height = min.get(),
+            "certificate archive prune requested but not implemented \
+             (immutable archive does not support deletion)"
+        );
         Ok(())
     }
 
@@ -222,7 +227,12 @@ where
         ArchiveTrait::get(self, id).await
     }
 
-    async fn prune(&mut self, _: Height) -> Result<(), Self::Error> {
+    async fn prune(&mut self, min: Height) -> Result<(), Self::Error> {
+        tracing::debug!(
+            min_height = min.get(),
+            "block archive prune requested but not implemented \
+             (immutable archive does not support deletion)"
+        );
         Ok(())
     }
 

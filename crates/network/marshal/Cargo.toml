@@ -23,11 +23,11 @@ commonware-storage.workspace = true
 commonware-utils.workspace = true
 rand.workspace = true
 rand_core.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 bytes.workspace = true
 commonware-consensus = { workspace = true, features = ["mocks"] }
 commonware-cryptography = { workspace = true, features = ["mocks"] }
 commonware-macros.workspace = true
-tracing.workspace = true
 tracing-subscriber.workspace = true
