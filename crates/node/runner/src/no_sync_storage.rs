@@ -60,8 +60,27 @@ pub(crate) enum NoSyncBlob<B> {
     Persistent { blob: B, shadow: Arc<RwLock<Vec<u8>>>, checkpoint_interval: u64 },
 }
 
-fn is_durable_partition(partition: &str) -> bool {
-    partition.ends_with("-application-metadata")
+/// Returns `true` if this partition is known to contain only scratch data
+/// that can be reconstructed from finalized blocks.  Unknown partitions
+/// default to **durable** (written to disk) for safety -- the cost of an
+/// unnecessary fsync is latency, while the cost of accidentally ephemeral
+/// storage is silent permanent data loss.
+fn is_ephemeral_partition(partition: &str) -> bool {
+    // Consensus scratch partitions created by commonware simplex.
+    // These contain votes, views, journals, and certificates that are
+    // reconstructed from the finalized block archive on startup.
+    //
+    // Note: use `-finalization-` (with trailing dash) to avoid matching
+    // the finalization archive (`*-finalizations-by-height-*`), which
+    // must remain durable even though it is currently initialized with
+    // the raw context (not NoSyncStorage).
+    partition.contains("-cache-")
+        || partition.contains("-verified")
+        || partition.contains("-notarized")
+        || partition.contains("-notarization-")
+        || partition.contains("-finalization-")
+        || partition.contains("-journal")
+        || partition.contains("-views-")
 }
 
 impl<C> Spawner for NoSyncStorage<C>
@@ -234,7 +253,7 @@ where
         name: &[u8],
         versions: RangeInclusive<u16>,
     ) -> Result<(Self::Blob, u64, u16), Error> {
-        if is_durable_partition(partition) {
+        if !is_ephemeral_partition(partition) {
             let (blob, size, version) =
                 self.inner.open_versioned(partition, name, versions).await?;
             let shadow = if size == 0 {
@@ -270,7 +289,7 @@ where
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        if is_durable_partition(partition) {
+        if !is_ephemeral_partition(partition) {
             return self.inner.remove(partition, name).await;
         }
 
@@ -289,7 +308,7 @@ where
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
-        if is_durable_partition(partition) {
+        if !is_ephemeral_partition(partition) {
             return self.inner.scan(partition).await;
         }
 
@@ -409,7 +428,7 @@ where
                     application_metadata_height(&shadow)
                 };
                 if height.is_some_and(|height| {
-                    *checkpoint_interval <= 1 || height % *checkpoint_interval == 0
+                    *checkpoint_interval <= 1 || height.is_multiple_of(*checkpoint_interval)
                 }) {
                     blob.sync().await
                 } else {
@@ -421,11 +440,33 @@ where
 }
 
 fn application_metadata_height(data: &[u8]) -> Option<u64> {
-    // Commonware metadata encodes: version(u64), key(U64), value(Height), crc32.
-    // The marshal application metadata partition stores only the latest processed height.
-    let value_start = 16;
-    let value_end = value_start + 8;
-    (data.len() >= value_end + 4).then(|| {
-        u64::from_be_bytes(data[value_start..value_end].try_into().expect("slice length checked"))
-    })
+    // Commonware versioned blob metadata layout (28 bytes total):
+    //   bytes  0.. 8: version (u64, big-endian) -- format version, currently 0
+    //   bytes  8..16: key     (u64, big-endian) -- metadata key
+    //   bytes 16..24: value   (u64, big-endian) -- block height (what we need)
+    //   bytes 24..28: crc32   (u32, big-endian) -- CRC-32 over bytes 0..24
+    const EXPECTED_LEN: usize = 28;
+    if data.len() < EXPECTED_LEN {
+        return None;
+    }
+
+    // Validate the version field.  The current commonware versioned-blob
+    // format uses version 0.  Reject obviously bogus values (> 1024) as a
+    // corruption signal rather than hard-coding a single expected version,
+    // which gives commonware room for minor version bumps without breaking
+    // this check.
+    let version =
+        u64::from_be_bytes(data[0..8].try_into().expect("slice length checked by EXPECTED_LEN"));
+    if version > 1024 {
+        tracing::warn!(
+            version,
+            data_len = data.len(),
+            "application metadata has unexpected version; skipping checkpoint-interval sync decision"
+        );
+        return None;
+    }
+
+    let height =
+        u64::from_be_bytes(data[16..24].try_into().expect("slice length checked by EXPECTED_LEN"));
+    Some(height)
 }

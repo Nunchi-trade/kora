@@ -220,7 +220,7 @@ async fn handle_finalized_update<E, P>(
                 ns.set_finalized_height(block.height);
             }
             let persist_checkpoint =
-                checkpoint_interval <= 1 || block.height % checkpoint_interval == 0;
+                checkpoint_interval <= 1 || block.height.is_multiple_of(checkpoint_interval);
             let result = finalize_with_retry(
                 &state,
                 &context,
@@ -282,8 +282,25 @@ async fn acknowledge_checkpoint(
     checkpoint_interval: u64,
     ack: Exact,
 ) {
-    let _ = (pending_acks, height, checkpoint_interval);
-    ack.acknowledge();
+    let is_checkpoint = checkpoint_interval <= 1 || height.is_multiple_of(checkpoint_interval);
+    if is_checkpoint {
+        // Checkpoint boundary reached: acknowledge this block and all pending
+        // blocks from previous non-checkpoint heights.  This tells the marshal
+        // that all blocks up through this checkpoint are durably persisted
+        // (QMDB has been fsynced and the archive has been fsynced).
+        let pending = {
+            let mut guard = pending_acks.lock().expect("pending_acks mutex poisoned");
+            std::mem::take(&mut *guard)
+        };
+        for pending_ack in pending {
+            pending_ack.acknowledge();
+        }
+        ack.acknowledge();
+    } else {
+        // Between checkpoints: defer acknowledgment until the next boundary.
+        let mut guard = pending_acks.lock().expect("pending_acks mutex poisoned");
+        guard.push(ack);
+    }
 }
 
 /// Retry wrapper around [`finalize_block`] that retries transient failures
@@ -676,7 +693,6 @@ mod finalize_error_tests {
                 None,
                 None,
                 None,
-                None,
                 1,
                 Arc::new(Mutex::new(Vec::new())),
                 None,
@@ -929,6 +945,7 @@ mod finalize_success_tests {
                 None,
                 2,
                 pending_acks.clone(),
+                None,
                 Update::Block(block1, ack1),
             )
             .await;
@@ -961,6 +978,7 @@ mod finalize_success_tests {
                 None,
                 2,
                 pending_acks,
+                None,
                 Update::Block(block2, ack2),
             )
             .await;

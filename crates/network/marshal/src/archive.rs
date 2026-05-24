@@ -31,8 +31,14 @@ pub struct CheckpointedArchive<A> {
 
 impl<A> CheckpointedArchive<A> {
     /// Create a checkpointed archive around an existing archive.
+    ///
+    /// A `checkpoint_interval` of 0 is clamped to 1 to prevent
+    /// division-by-zero in [`should_sync`].  This matches the guards in
+    /// `NoSyncStorage::new()` (`.max(1)`) and
+    /// `FinalizedReporter::with_checkpoint_interval()` (`if 0 then 1`).
     pub const fn new(inner: A, checkpoint_interval: u64) -> Self {
-        Self { inner, checkpoint_interval, highest_dirty: None }
+        let interval = if checkpoint_interval == 0 { 1 } else { checkpoint_interval };
+        Self { inner, checkpoint_interval: interval, highest_dirty: None }
     }
 
     fn mark_dirty(&mut self, height: u64) {
@@ -47,7 +53,15 @@ impl<A> CheckpointedArchive<A> {
         match self.highest_dirty {
             Some(height) if self.checkpoint_interval <= 1 => self.is_contiguous_through(height),
             Some(height) => {
-                height % self.checkpoint_interval == 0 && self.is_contiguous_through(height)
+                // Compute the highest checkpoint boundary at or below the
+                // dirty height.  This handles out-of-order insertion: even if
+                // highest_dirty overshoots a boundary (e.g. 65 with interval
+                // 64), we recognise that the boundary at 64 has been reached
+                // and sync when the archive is contiguous through it.  The
+                // inner archive's sync() flushes ALL in-memory data, so
+                // blocks above the boundary are also persisted.
+                let boundary = (height / self.checkpoint_interval) * self.checkpoint_interval;
+                boundary > 0 && self.is_contiguous_through(boundary)
             }
             None => false,
         }
@@ -503,5 +517,40 @@ mod tests {
 
         archive.mark_dirty(64);
         assert!(!archive.should_sync());
+    }
+
+    #[test]
+    fn checkpointed_archive_syncs_when_dirty_past_boundary() {
+        // Simulate out-of-order: block 65 arrives, then 64.
+        // highest_dirty = 65, but the boundary at 64 should still trigger sync.
+        let inner = FakeArchive { ranges: vec![(1, 65)] };
+        let mut archive = CheckpointedArchive::new(inner, 64);
+
+        archive.mark_dirty(65);
+        // 65 is past the boundary at 64, and archive is contiguous through 64
+        assert!(archive.should_sync());
+    }
+
+    #[test]
+    fn checkpointed_archive_no_sync_before_first_boundary() {
+        let inner = FakeArchive { ranges: vec![(1, 63)] };
+        let mut archive = CheckpointedArchive::new(inner, 64);
+
+        archive.mark_dirty(63);
+        // 63 / 64 = 0, boundary = 0, which is not > 0
+        assert!(!archive.should_sync());
+    }
+
+    #[test]
+    fn checkpointed_archive_zero_interval_behaves_as_one() {
+        let inner = FakeArchive { ranges: vec![(1, 3)] };
+        let mut archive_zero = CheckpointedArchive::new(inner, 0);
+        archive_zero.mark_dirty(3);
+        assert!(archive_zero.should_sync());
+
+        let inner = FakeArchive { ranges: vec![(1, 3)] };
+        let mut archive_one = CheckpointedArchive::new(inner, 1);
+        archive_one.mark_dirty(3);
+        assert!(archive_one.should_sync());
     }
 }

@@ -342,7 +342,37 @@ async fn restore_checkpoint_and_replay_tail(
             Ok((restored_height, replayed_tail))
         }
         None => {
-            validate_commit_marker(data_dir, head);
+            if let Some(marker) = marker_digest {
+                // A commit marker exists on disk but does not match any
+                // block in the archive.  QMDB was last committed at a
+                // height we cannot identify, so creating a snapshot from
+                // the archive head would produce inconsistent state.
+                let head_digest = head.commitment();
+                error!(
+                    marker_digest = %hex::encode(marker.as_ref()),
+                    head_digest = %hex::encode(head_digest.as_ref()),
+                    archive_head_height = head.height,
+                    "commit marker does not match any archived block; \
+                     QMDB state is at an unknown height.  Refusing to \
+                     start with potentially inconsistent state.  \
+                     Re-sync from a trusted snapshot or wipe state."
+                );
+                anyhow::bail!(
+                    "commit marker {} does not match any archived block; \
+                     cannot safely determine QMDB state height \
+                     (archive head is at height {})",
+                    hex::encode(marker.as_ref()),
+                    head.height,
+                );
+            }
+            // No commit marker at all -- fresh node or upgrade from a
+            // pre-marker build.  Safe to trust the archive head.
+            info!(
+                archive_head_height = head.height,
+                "no commit marker found; restoring archive head as initial \
+                 QMDB state (expected for fresh nodes or first startup \
+                 after upgrade)"
+            );
             ledger.restore_persisted_snapshot(head).await;
             Ok((head.height, false))
         }
@@ -454,43 +484,6 @@ async fn prepopulate_snapshot_cache<FB>(
             head_height,
             "pre-populated snapshot cache with recent finalized blocks"
         );
-    }
-}
-
-/// Compare the on-disk commit marker against the archive head block.
-///
-/// This is a best-effort diagnostic check. A missing marker (fresh node or
-/// upgrade from a pre-marker build) is benign and logged at info level. A
-/// mismatch means QMDB may not contain the state corresponding to the
-/// archive head and is logged as a warning so operators can investigate.
-fn validate_commit_marker(data_dir: &Path, archive_head: &Block) {
-    let marker_digest = crate::commit_marker::read_commit_marker(data_dir);
-    let head_digest = archive_head.commitment();
-
-    match marker_digest {
-        None => {
-            info!(
-                archive_head_height = archive_head.height,
-                "no commit marker found; this is expected for fresh nodes or \
-                 first startup after upgrade"
-            );
-        }
-        Some(marker) if marker == head_digest => {
-            info!(
-                archive_head_height = archive_head.height,
-                "commit marker matches archive head; QMDB state is consistent"
-            );
-        }
-        Some(marker) => {
-            warn!(
-                archive_head_height = archive_head.height,
-                marker_digest = %hex::encode(marker.as_ref()),
-                head_digest = %hex::encode(head_digest.as_ref()),
-                "commit marker does not match archive head; QMDB may be behind \
-                 or inconsistent. The node will proceed but state may diverge. \
-                 Consider re-syncing from a trusted snapshot if issues arise."
-            );
-        }
     }
 }
 
