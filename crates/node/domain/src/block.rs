@@ -1,5 +1,7 @@
 //! Block types
 
+use std::sync::OnceLock;
+
 use alloy_evm::revm::primitives::{B256, keccak256};
 use bytes::{Buf, BufMut};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
@@ -16,8 +18,12 @@ pub struct BlockCfg {
     pub tx: TxCfg,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-/// Example block type agreed on by consensus (via its digest).
+/// Block type agreed on by consensus (via its digest).
+///
+/// The block identifier (keccak256 of the encoded block) is cached on first
+/// access via [`OnceLock`] to avoid redundant serialization and hashing on
+/// the hot path where `id()`, `digest()`, and `commitment()` are called
+/// multiple times per consensus round.
 pub struct Block {
     /// Identifier of the parent block.
     pub parent: BlockId,
@@ -31,12 +37,83 @@ pub struct Block {
     pub state_root: StateRoot,
     /// Transactions included in the block.
     pub txs: Vec<Tx>,
+
+    /// Cached block identifier, computed lazily on first call to [`Self::id`].
+    ///
+    /// Excluded from equality comparisons, debug output, and codec encoding.
+    cached_id: OnceLock<BlockId>,
 }
 
+impl Clone for Block {
+    fn clone(&self) -> Self {
+        Self {
+            parent: self.parent,
+            height: self.height,
+            timestamp: self.timestamp,
+            prevrandao: self.prevrandao,
+            state_root: self.state_root,
+            txs: self.txs.clone(),
+            // Propagate the cached ID if already computed.
+            cached_id: self.cached_id.get().map_or_else(OnceLock::new, |id| {
+                let lock = OnceLock::new();
+                let _ = lock.set(*id);
+                lock
+            }),
+        }
+    }
+}
+
+impl std::fmt::Debug for Block {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Block")
+            .field("parent", &self.parent)
+            .field("height", &self.height)
+            .field("timestamp", &self.timestamp)
+            .field("prevrandao", &self.prevrandao)
+            .field("state_root", &self.state_root)
+            .field("txs", &self.txs)
+            .finish()
+    }
+}
+
+impl PartialEq for Block {
+    fn eq(&self, other: &Self) -> bool {
+        self.parent == other.parent
+            && self.height == other.height
+            && self.timestamp == other.timestamp
+            && self.prevrandao == other.prevrandao
+            && self.state_root == other.state_root
+            && self.txs == other.txs
+    }
+}
+
+impl Eq for Block {}
+
 impl Block {
+    /// Construct a new block.
+    ///
+    /// Prefer this over struct-literal syntax; it properly initializes the
+    /// internal [`OnceLock`] cache (lazily populated on first call to
+    /// [`Self::id`]).
+    #[must_use]
+    pub const fn new(
+        parent: BlockId,
+        height: u64,
+        timestamp: u64,
+        prevrandao: B256,
+        state_root: StateRoot,
+        txs: Vec<Tx>,
+    ) -> Self {
+        Self { parent, height, timestamp, prevrandao, state_root, txs, cached_id: OnceLock::new() }
+    }
+
     /// Compute the block identifier from its encoded contents.
+    ///
+    /// The result is cached internally so that repeated calls (e.g. from
+    /// [`Digestible::digest`] and [`Committable::commitment`]) do not
+    /// re-serialize and re-hash the block.
     pub fn id(&self) -> BlockId {
-        BlockId(keccak256(self.encode()))
+        *self.cached_id.get_or_init(|| BlockId(keccak256(self.encode())))
     }
 
     /// Choose a block timestamp that is strictly greater than its parent.
@@ -124,7 +201,7 @@ impl Read for Block {
         let prevrandao = Idents::read_b256(buf)?;
         let state_root = StateRoot::read(buf)?;
         let txs = Vec::<Tx>::read_cfg(buf, &(RangeCfg::new(0..=cfg.max_txs), cfg.tx))?;
-        Ok(Self { parent, height, timestamp, prevrandao, state_root, txs })
+        Ok(Self::new(parent, height, timestamp, prevrandao, state_root, txs))
     }
 }
 
@@ -141,14 +218,14 @@ mod tests {
     }
 
     fn sample_block() -> Block {
-        Block {
-            parent: BlockId(B256::repeat_byte(0x01)),
-            height: 42,
-            timestamp: 1_700_000_042,
-            prevrandao: B256::repeat_byte(0xab),
-            state_root: StateRoot(B256::repeat_byte(0xcd)),
-            txs: vec![Tx::new(Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef]))],
-        }
+        Block::new(
+            BlockId(B256::repeat_byte(0x01)),
+            42,
+            1_700_000_042,
+            B256::repeat_byte(0xab),
+            StateRoot(B256::repeat_byte(0xcd)),
+            vec![Tx::new(Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef]))],
+        )
     }
 
     #[test]
@@ -214,14 +291,8 @@ mod tests {
 
     #[test]
     fn empty_block_roundtrip() {
-        let block = Block {
-            parent: BlockId(B256::ZERO),
-            height: 0,
-            timestamp: 0,
-            prevrandao: B256::ZERO,
-            state_root: StateRoot(B256::ZERO),
-            txs: vec![],
-        };
+        let block =
+            Block::new(BlockId(B256::ZERO), 0, 0, B256::ZERO, StateRoot(B256::ZERO), vec![]);
         let encoded = block.encode();
         let decoded = Block::decode_cfg(encoded, &default_block_cfg()).expect("decode");
         assert_eq!(block, decoded);

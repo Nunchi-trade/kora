@@ -327,7 +327,7 @@ where
             };
         let root_elapsed = root_start.elapsed();
 
-        let block = Block { parent: parent.id(), height, timestamp, prevrandao, state_root, txs };
+        let block = Block::new(parent.id(), height, timestamp, prevrandao, state_root, txs);
 
         let block_digest = block.commitment();
 

@@ -112,7 +112,7 @@ where
             .map_err(ConsensusError::StateDb)?;
         let state_root = StateRoot(state_root);
 
-        let block = Block { parent: parent.id(), height, timestamp, prevrandao, state_root, txs };
+        let block = Block::new(parent.id(), height, timestamp, prevrandao, state_root, txs);
         let tx_ids = self.tx_ids_from_block(&block);
         let snapshot = Snapshot::new(
             Some(parent_digest),
@@ -157,7 +157,7 @@ where
             self.state.compute_root(&merged_changes).await.map_err(ConsensusError::StateDb)?;
         let state_root = StateRoot(state_root);
 
-        let block = Block { parent: parent.id(), height, timestamp, prevrandao, state_root, txs };
+        let block = Block::new(parent.id(), height, timestamp, prevrandao, state_root, txs);
         let tx_ids = self.tx_ids_from_block(&block);
         let snapshot = Snapshot::new(
             Some(parent_digest),
@@ -405,14 +405,14 @@ mod tests {
     }
 
     fn parent_block() -> Block {
-        Block {
-            parent: kora_domain::BlockId(B256::ZERO),
-            height: 0,
-            timestamp: 0,
-            prevrandao: B256::ZERO,
-            state_root: StateRoot(B256::ZERO),
-            txs: Vec::new(),
-        }
+        Block::new(
+            kora_domain::BlockId(B256::ZERO),
+            0,
+            0,
+            B256::ZERO,
+            StateRoot(B256::ZERO),
+            Vec::new(),
+        )
     }
 
     #[test]
@@ -624,14 +624,14 @@ mod tests {
         let executor = MockExecutor;
 
         let tx = Tx::new(vec![9].into());
-        let parent = Block {
-            parent: kora_domain::BlockId(B256::ZERO),
-            height: 0,
-            timestamp: 0,
-            prevrandao: B256::ZERO,
-            state_root: StateRoot(B256::ZERO),
-            txs: vec![tx.clone()],
-        };
+        let parent = Block::new(
+            kora_domain::BlockId(B256::ZERO),
+            0,
+            0,
+            B256::ZERO,
+            StateRoot(B256::ZERO),
+            vec![tx.clone()],
+        );
         let parent_digest = parent.commitment();
         let parent_snapshot = Snapshot::new(
             None,

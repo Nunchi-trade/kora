@@ -229,14 +229,14 @@ impl LedgerView {
         .await?;
         let genesis_root = qmdb.root().await?;
 
-        let genesis_block = Block {
-            parent: BlockId(B256::ZERO),
-            height: 0,
-            timestamp: genesis_timestamp,
-            prevrandao: B256::ZERO,
-            state_root: genesis_root,
-            txs: Vec::new(),
-        };
+        let genesis_block = Block::new(
+            BlockId(B256::ZERO),
+            0,
+            genesis_timestamp,
+            B256::ZERO,
+            genesis_root,
+            Vec::new(),
+        );
         let genesis_digest = genesis_block.commitment();
         let state = OverlayState::new(qmdb.state(), QmdbChangeSet::default());
         let snapshots = InMemorySnapshotStore::new();
@@ -815,14 +815,7 @@ mod tests {
         let parent_digest = parent.commitment();
         let root =
             service.compute_root(parent_digest, &outcome.changes).await.expect("compute root");
-        let block = Block {
-            parent: parent.id(),
-            height,
-            timestamp,
-            prevrandao: PREVRANDAO,
-            state_root: root,
-            txs,
-        };
+        let block = Block::new(parent.id(), height, timestamp, PREVRANDAO, root, txs);
         let digest = block.commitment();
         let next_state = OverlayState::new(parent_snapshot.state.base(), merged_changes);
         service
