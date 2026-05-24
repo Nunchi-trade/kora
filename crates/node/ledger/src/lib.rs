@@ -7,7 +7,7 @@
 
 mod live_state;
 
-use std::{collections::BTreeSet, fmt, sync::Arc};
+use std::{collections::BTreeSet, fmt, sync::Arc, time::Duration};
 
 use alloy_primitives::{Address, B256, U256};
 use commonware_consensus::Block as _;
@@ -96,6 +96,9 @@ pub struct LedgerView {
     inner: Arc<Mutex<LedgerState>>,
     /// Genesis block stored so the automaton can replay from height 0.
     genesis_block: Block,
+    /// Notifier signalled whenever a new snapshot is inserted, allowing
+    /// waiters to be woken event-driven instead of polling with sleep.
+    snapshot_notify: Arc<::tokio::sync::Notify>,
 }
 
 impl fmt::Debug for LedgerView {
@@ -259,6 +262,7 @@ impl LedgerView {
                 qmdb,
             })),
             genesis_block,
+            snapshot_notify: Arc::new(::tokio::sync::Notify::new()),
         })
     }
 
@@ -352,6 +356,8 @@ impl LedgerView {
         let ids = tx_ids(txs);
         inner.snapshots.insert(digest, Snapshot::new(Some(parent), state, root, qmdb_changes, ids));
         inner.head = digest;
+        drop(inner);
+        self.snapshot_notify.notify_waiters();
     }
 
     /// Cache a snapshot that has already been constructed.
@@ -359,6 +365,8 @@ impl LedgerView {
         let mut inner = self.inner.lock().await;
         inner.snapshots.insert(digest, snapshot);
         inner.head = digest;
+        drop(inner);
+        self.snapshot_notify.notify_waiters();
     }
 
     /// Restore a finalized block as an already-persisted snapshot over the current QMDB state.
@@ -376,6 +384,39 @@ impl LedgerView {
         inner.snapshots.insert(digest, snapshot);
         inner.snapshots.mark_persisted(&[digest]);
         inner.head = digest;
+        drop(inner);
+        self.snapshot_notify.notify_waiters();
+    }
+
+    /// Wait for a parent snapshot to become available, with a timeout.
+    ///
+    /// Instead of polling with fixed sleep intervals, this method awaits the
+    /// internal [`Notify`](::tokio::sync::Notify) that fires whenever a new
+    /// snapshot is inserted. Falls back to the timeout if the snapshot never
+    /// arrives.
+    pub async fn wait_for_snapshot(
+        &self,
+        parent: ConsensusDigest,
+        timeout: Duration,
+    ) -> Option<LedgerSnapshot> {
+        let deadline = ::tokio::time::Instant::now() + timeout;
+        loop {
+            // Register the notification future BEFORE checking the snapshot.
+            // This eliminates the race window where `notify_waiters()` fires
+            // between the check and the wait, which would cause a lost
+            // wake-up and an unnecessary full-timeout delay.
+            let notified = self.snapshot_notify.notified();
+            if let Some(snap) = self.parent_snapshot(parent).await {
+                return Some(snap);
+            }
+            let remaining = deadline.saturating_duration_since(::tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            // Wait for any snapshot insertion, or the remaining timeout.
+            let _ = ::tokio::time::timeout(remaining, notified).await;
+        }
+        None
     }
 
     /// Fetch the components needed to build a proposal.
@@ -604,6 +645,18 @@ impl LedgerService {
     /// Fetch the snapshot of a parent digest.
     pub async fn parent_snapshot(&self, parent: ConsensusDigest) -> Option<LedgerSnapshot> {
         self.view.parent_snapshot(parent).await
+    }
+
+    /// Wait for a parent snapshot to become available, with a timeout.
+    ///
+    /// Uses event-driven notification rather than polling with sleep.
+    /// See [`LedgerView::wait_for_snapshot`] for details.
+    pub async fn wait_for_snapshot(
+        &self,
+        parent: ConsensusDigest,
+        timeout: Duration,
+    ) -> Option<LedgerSnapshot> {
+        self.view.wait_for_snapshot(parent, timeout).await
     }
 
     /// Insert a new snapshot.

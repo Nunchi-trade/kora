@@ -36,14 +36,11 @@ pub const DEFAULT_SIMPLEX_LEADER_TIMEOUT_SECS: u64 = 1;
 
 /// Default Simplex certification timeout in seconds.
 ///
-/// This bounds how long validators wait for enough votes to form a
-/// finality certificate after notarizing a block.  The previous value
-/// of 10 s meant that when a leader was dead or partitioned, the entire
-/// cluster would stall for 10 s per dead leader before moving on.
-/// Reducing to 5 s halves the wasted time per dead-leader rotation while
-/// still providing ample margin for BLS signature collection on healthy
-/// networks (typically < 20 ms).
-pub const DEFAULT_SIMPLEX_CERTIFICATION_TIMEOUT_SECS: u64 = 5;
+/// Healthy views complete in ~7ms, so 2 seconds provides a generous margin
+/// for stragglers while avoiding long stalls when certification fails.
+/// This matches the underlying simplex crate default
+/// ([`DEFAULT_NOTARIZATION_TIMEOUT`]).
+pub const DEFAULT_SIMPLEX_CERTIFICATION_TIMEOUT_SECS: u64 = 2;
 
 /// Default Simplex nullification retry timeout in seconds.
 ///

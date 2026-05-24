@@ -28,7 +28,7 @@ max_tx_bytes = 8388608
 replay_buffer_bytes = 16777216
 write_buffer_bytes = 16777216
 leader_timeout_secs = 1
-certification_timeout_secs = 10
+certification_timeout_secs = 2
 timeout_retry_secs = 2
 fetch_timeout_secs = 5
 activity_timeout_views = 20
@@ -41,7 +41,6 @@ bootstrap_peers = ["peer1:30303", "peer2:30303"]
 
 [execution]
 gas_limit = 250000000
-block_time = 2
 
 [rpc]
 http_addr = "0.0.0.0:8545"
