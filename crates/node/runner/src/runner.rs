@@ -367,7 +367,7 @@ async fn replay_finalized_block(
         .await
         .with_context(|| format!("failed to replay finalized block at height {}", block.height))?;
     let state_root = ledger
-        .compute_root_from_store(parent_digest, execution.outcome.changes.clone())
+        .compute_root_from_store(parent_digest, &execution.outcome.changes)
         .await
         .with_context(|| format!("failed to compute replay root at height {}", block.height))?;
     anyhow::ensure!(

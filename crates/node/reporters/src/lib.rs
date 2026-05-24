@@ -447,7 +447,7 @@ where
                     .map_err(|err| FinalizationError::ExecutionFailed(Box::new(err)))?;
 
             let state_root = state
-                .compute_root_from_store(parent_digest, execution.outcome.changes.clone())
+                .compute_root_from_store(parent_digest, &execution.outcome.changes)
                 .await
                 .map_err(FinalizationError::RootComputationFailed)?;
 
