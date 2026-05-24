@@ -823,8 +823,15 @@ impl NodeRunner for ProductionRunner {
         let page_cache = default_page_cache(&context);
         let block_cfg = block_codec_cfg(&config.consensus.block_codec);
         let partition_prefix = &self.partition_prefix;
+        // Use a single Rayon worker thread for BLS signature verification.
+        // Rayon's work-stealing scheduler busy-waits (sched_yield) when idle,
+        // and BLS batches are small enough (~6-10 msgs at 30 blocks/s) that
+        // parallelism across 2 threads provides negligible speedup.  With
+        // Docker CPU limits (0.75-1.2 cores), the second idle thread wastes
+        // ~0.21 cores of CPU in spin loops and inflates involuntary context
+        // switches by 100K+/5min.
         let strategy = context
-            .create_strategy(NZUsize!(2))
+            .create_strategy(NZUsize!(1))
             .map_err(|e| anyhow::anyhow!("failed to create signature strategy: {e}"))?;
         let checkpoint_interval = checkpoint_interval();
         info!(checkpoint_interval, "configured finalized archive and QMDB checkpoint interval");
