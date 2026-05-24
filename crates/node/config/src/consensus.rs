@@ -35,7 +35,12 @@ pub const DEFAULT_SIMPLEX_WRITE_BUFFER_BYTES: usize = 16 * 1024 * 1024;
 pub const DEFAULT_SIMPLEX_LEADER_TIMEOUT_SECS: u64 = 1;
 
 /// Default Simplex certification timeout in seconds.
-pub const DEFAULT_SIMPLEX_CERTIFICATION_TIMEOUT_SECS: u64 = 10;
+///
+/// Healthy views complete in ~7ms, so 2 seconds provides a generous margin
+/// for stragglers while avoiding 10-second stalls when certification fails.
+/// This matches the underlying simplex crate default
+/// ([`DEFAULT_NOTARIZATION_TIMEOUT`]).
+pub const DEFAULT_SIMPLEX_CERTIFICATION_TIMEOUT_SECS: u64 = 2;
 
 /// Default Simplex nullification retry timeout in seconds.
 pub const DEFAULT_SIMPLEX_TIMEOUT_RETRY_SECS: u64 = 2;

@@ -30,20 +30,23 @@ use kora_rpc::NodeState;
 use rand::Rng;
 use tracing::{debug, error, trace, warn};
 
-/// Maximum number of attempts to poll for a parent snapshot before giving up.
-///
-/// Each attempt sleeps for [`SNAPSHOT_POLL_INTERVAL`], so the total wait is at
-/// most `SNAPSHOT_POLL_ATTEMPTS * SNAPSHOT_POLL_INTERVAL` (50 ms by default).
-const SNAPSHOT_POLL_ATTEMPTS: u32 = 5;
-
-/// Duration to sleep between successive parent-snapshot poll attempts.
-const SNAPSHOT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+/// Maximum time to wait for a parent snapshot to become available before
+/// giving up and nullifying the view.  Uses event-driven notification
+/// (via [`LedgerService::wait_for_snapshot`]) so the wake-up is immediate
+/// once the snapshot is inserted, with this timeout as the upper bound.
+const SNAPSHOT_WAIT_TIMEOUT: Duration = Duration::from_millis(50);
 
 /// Maximum number of unfinalized blocks a leader may be ahead of the last
 /// finalized height before it voluntarily skips its proposal turn.  This
 /// prevents a single fast leader from racing too far ahead of finalization,
 /// which can cascade into snapshot-miss failures for other validators.
-const MAX_PROPOSAL_LAG: u64 = 8;
+///
+/// A value of 8 was too tight after a node restart: the finalization pipeline
+/// lags while the node re-syncs, and with only 8 blocks of headroom every
+/// proposal gets skipped, preventing the node from ever catching up.  A
+/// value of 32 gives finalization plenty of room to drain without stalling
+/// proposals on healthy nodes.
+const MAX_PROPOSAL_LAG: u64 = 32;
 
 fn unix_timestamp_secs<Env: Clock>(env: &Env) -> u64 {
     env.current().duration_since(UNIX_EPOCH).map(|duration| duration.as_secs()).unwrap_or(0)
@@ -153,30 +156,22 @@ where
         // Wait briefly for the parent snapshot to become available.
         //
         // Consensus can advance views faster than the execution layer
-        // produces snapshots.  Rather than immediately returning `None`
-        // (which nullifies the view), we poll for up to
-        // `SNAPSHOT_POLL_ATTEMPTS * SNAPSHOT_POLL_INTERVAL` (50 ms).
-        // In the common case the snapshot arrives within the first few
-        // milliseconds, converting what would have been a nullified view
-        // into a successful proposal.
+        // produces snapshots.  Rather than polling with sleep(), we use
+        // an event-driven wait: `wait_for_snapshot` blocks on a Notify
+        // that fires whenever any snapshot is inserted, so we wake up
+        // immediately when the snapshot arrives instead of sleeping
+        // through a fixed interval.
         let parent_snapshot = {
-            let mut snap = self.ledger.parent_snapshot(parent_digest).await;
-            let mut poll_count = 0u32;
-            let poll_start = Instant::now();
-            while snap.is_none() && poll_count < SNAPSHOT_POLL_ATTEMPTS {
-                tokio::time::sleep(SNAPSHOT_POLL_INTERVAL).await;
-                poll_count += 1;
-                snap = self.ledger.parent_snapshot(parent_digest).await;
-            }
-            match snap {
+            let wait_start = Instant::now();
+            match self.ledger.wait_for_snapshot(parent_digest, SNAPSHOT_WAIT_TIMEOUT).await {
                 Some(s) => {
-                    if poll_count > 0 {
+                    let wait_elapsed = wait_start.elapsed();
+                    if wait_elapsed.as_millis() > 1 {
                         debug!(
                             parent_height = parent.height,
                             ?parent_digest,
-                            poll_count,
-                            wait_ms = poll_start.elapsed().as_millis(),
-                            "build_block: parent snapshot arrived after polling"
+                            wait_ms = wait_elapsed.as_millis(),
+                            "build_block: parent snapshot arrived after waiting"
                         );
                     }
                     s
@@ -185,9 +180,8 @@ where
                     warn!(
                         parent_height = parent.height,
                         ?parent_digest,
-                        poll_count,
-                        wait_ms = poll_start.elapsed().as_millis(),
-                        "build_block: parent snapshot not found after polling — \
+                        wait_ms = wait_start.elapsed().as_millis(),
+                        "build_block: parent snapshot not found after waiting — \
                          node has not yet processed this parent block"
                     );
                     return None;
