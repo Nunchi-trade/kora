@@ -190,7 +190,9 @@ case "$MODE" in
         GOSSIP_FLAG=""
         if [[ "$TX_GOSSIP" == "true" ]]; then
             GOSSIP_FLAG="--tx-gossip"
-            log "Transaction gossip enabled"
+            log "Transaction gossip ENABLED"
+        else
+            log "Transaction gossip DISABLED (set TX_GOSSIP=true to enable)"
         fi
 
         exec /usr/local/bin/kora validator \

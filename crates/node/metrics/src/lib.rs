@@ -43,6 +43,16 @@ pub struct AppMetrics {
     pub finalization_failures: Counter,
     /// Total number of blocks successfully finalized.
     pub blocks_finalized: Counter,
+
+    // -- Transaction Gossip --
+    /// Total transactions broadcast to peers via gossip.
+    pub gossip_tx_broadcast: Counter,
+    /// Total transactions received from peers via gossip.
+    pub gossip_tx_received: Counter,
+    /// Total gossip broadcast failures (send errors).
+    pub gossip_tx_broadcast_failed: Counter,
+    /// Total gossip transactions that failed validation.
+    pub gossip_tx_invalid: Counter,
 }
 
 /// Label set for metrics that carry a `reason` dimension.
@@ -65,6 +75,10 @@ impl AppMetrics {
             block_txs_included: Gauge::default(),
             finalization_failures: Counter::default(),
             blocks_finalized: Counter::default(),
+            gossip_tx_broadcast: Counter::default(),
+            gossip_tx_received: Counter::default(),
+            gossip_tx_broadcast_failed: Counter::default(),
+            gossip_tx_invalid: Counter::default(),
         }
     }
 
@@ -115,6 +129,26 @@ impl AppMetrics {
             "kora_blocks_finalized",
             "Total blocks successfully finalized",
             self.blocks_finalized.clone(),
+        );
+        registry.register(
+            "kora_gossip_tx_broadcast",
+            "Total transactions broadcast to peers via gossip",
+            self.gossip_tx_broadcast.clone(),
+        );
+        registry.register(
+            "kora_gossip_tx_received",
+            "Total transactions received from peers via gossip",
+            self.gossip_tx_received.clone(),
+        );
+        registry.register(
+            "kora_gossip_tx_broadcast_failed",
+            "Total gossip broadcast failures",
+            self.gossip_tx_broadcast_failed.clone(),
+        );
+        registry.register(
+            "kora_gossip_tx_invalid",
+            "Total gossip transactions that failed validation",
+            self.gossip_tx_invalid.clone(),
         );
     }
 }
