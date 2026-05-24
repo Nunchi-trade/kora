@@ -46,6 +46,11 @@ impl BlockNumberOrTag {
     }
 }
 
+/// Keccak-256 hash of an empty RLP list, used as the canonical
+/// `sha3Uncles` value for post-merge blocks.
+pub(crate) const EMPTY_UNCLE_HASH: B256 =
+    alloy_primitives::b256!("1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347");
+
 /// Rich block representation for JSON-RPC responses.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -54,6 +59,9 @@ pub struct RpcBlock {
     pub hash: B256,
     /// Parent block hash.
     pub parent_hash: B256,
+    /// Hash of the uncle list (always empty-list hash post-merge).
+    #[serde(rename = "sha3Uncles")]
+    pub sha3_uncles: B256,
     /// Block number.
     pub number: U64,
     /// State root.
@@ -62,7 +70,7 @@ pub struct RpcBlock {
     pub transactions_root: B256,
     /// Receipts root.
     pub receipts_root: B256,
-    /// Logs bloom filter.
+    /// Logs bloom filter (256 bytes).
     pub logs_bloom: Bytes,
     /// Block timestamp.
     pub timestamp: U64,

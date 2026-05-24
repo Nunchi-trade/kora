@@ -5,6 +5,8 @@
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
+mod live_state;
+
 use std::{collections::BTreeSet, fmt, sync::Arc};
 
 use alloy_primitives::{Address, B256, U256};
@@ -24,6 +26,7 @@ use kora_qmdb::StateRoot as QmdbStateRoot;
 use kora_qmdb_ledger::{Error as QmdbError, QmdbChangeSet, QmdbConfig, QmdbLedger, QmdbState};
 use kora_traits::{StateDbError, StateDbRead};
 use kora_txpool::{PoolConfig, TransactionPool};
+pub use live_state::LiveState;
 use thiserror::Error;
 
 /// Snapshot type used by the ledger.

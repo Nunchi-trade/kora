@@ -33,7 +33,7 @@ use kora_consensus::BlockExecution;
 use kora_domain::{Block, BlockCfg, BootstrapConfig, ConsensusDigest, LedgerEvent, Tx, TxCfg};
 use kora_executor::{BlockContext, RevmExecutor};
 use kora_indexer::{BlockIndex, IndexedBlock};
-use kora_ledger::{LedgerService, LedgerView};
+use kora_ledger::{LedgerService, LedgerView, LiveState};
 use kora_marshal::{ArchiveInitializer, BroadcastInitializer, PeerInitializer};
 use kora_metrics::AppMetrics;
 use kora_reporters::{BlockContextProvider, FinalizedReporter, NodeStateReporter, SeedReporter};
@@ -167,6 +167,7 @@ fn seed_genesis_block_index(index: &BlockIndex, genesis: &Block, gas_limit: u64)
             gas_limit,
             gas_used: 0,
             base_fee_per_gas: Some(kora_config::INITIAL_BASE_FEE),
+            mix_hash: genesis.prevrandao,
             transaction_hashes: Vec::new(),
         },
         Vec::new(),
@@ -194,6 +195,7 @@ fn index_recovered_block(
         gas_limit: block_context.header.gas_limit,
         gas_used: 0,
         base_fee_per_gas: block_context.header.base_fee_per_gas,
+        mix_hash: block.prevrandao,
         transaction_hashes,
     };
     index.insert_block(indexed_block, Vec::new(), Vec::new());
@@ -1014,10 +1016,13 @@ impl NodeRunner for ProductionRunner {
                 node_state.set_finalized_height(last);
             }
 
-            let qmdb_state = state.qmdb_state().await;
+            // Use LiveState so RPC queries read from the latest in-memory
+            // overlay rather than the persisted QMDB checkpoint (which can lag
+            // up to 256 blocks behind head).
+            let live_state = LiveState::new(ledger.clone());
             let rpc_executor = Arc::new(RevmExecutor::new(self.chain_id));
             let indexed_provider =
-                kora_rpc::IndexedStateProvider::new(block_index.clone(), qmdb_state, rpc_executor);
+                kora_rpc::IndexedStateProvider::new(block_index.clone(), live_state, rpc_executor);
             let tx_ledger = ledger.clone();
             let chain_id = self.chain_id;
             let tx_pool = txpool.clone();

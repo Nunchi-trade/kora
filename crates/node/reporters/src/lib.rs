@@ -1016,6 +1016,7 @@ fn index_finalized_block(
         gas_limit: block_context.header.gas_limit,
         gas_used: outcome.gas_used,
         base_fee_per_gas: block_context.header.base_fee_per_gas,
+        mix_hash: block.prevrandao,
         transaction_hashes,
     };
 

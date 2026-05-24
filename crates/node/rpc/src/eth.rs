@@ -1457,6 +1457,7 @@ mod tests {
         RpcBlock {
             hash: block_hash,
             parent_hash: B256::ZERO,
+            sha3_uncles: B256::ZERO,
             number: U64::from(number),
             state_root: B256::ZERO,
             transactions_root: B256::ZERO,
@@ -1524,6 +1525,7 @@ mod tests {
         RpcBlock {
             hash: block_hash,
             parent_hash: B256::ZERO,
+            sha3_uncles: B256::ZERO,
             number: U64::from(number),
             state_root: B256::ZERO,
             transactions_root: B256::ZERO,
