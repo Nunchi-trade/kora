@@ -72,7 +72,7 @@ impl ActorInitializer {
     pub const DEFAULT_VALUE_WRITE_BUFFER: NonZeroUsize = NZUsize!(1024 * 1024);
 
     /// The default blocks per epoch.
-    pub const DEFAULT_BLOCKS_PER_EPOCH: NonZeroU64 = NZU64!(20);
+    pub const DEFAULT_BLOCKS_PER_EPOCH: NonZeroU64 = NZU64!(u64::MAX);
 
     /// The default partition prefix.
     pub const DEFAULT_PARTITION_PREFIX: &'static str = "marshal";
@@ -238,7 +238,7 @@ mod tests {
         assert_eq!(ActorInitializer::DEFAULT_REPLAY_BUFFER.get(), 8 * 1024 * 1024);
         assert_eq!(ActorInitializer::DEFAULT_KEY_WRITE_BUFFER.get(), 1024 * 1024);
         assert_eq!(ActorInitializer::DEFAULT_VALUE_WRITE_BUFFER.get(), 1024 * 1024);
-        assert_eq!(ActorInitializer::DEFAULT_BLOCKS_PER_EPOCH.get(), 20);
+        assert_eq!(ActorInitializer::DEFAULT_BLOCKS_PER_EPOCH.get(), u64::MAX);
         assert_eq!(ActorInitializer::DEFAULT_PARTITION_PREFIX, "marshal");
     }
 }
