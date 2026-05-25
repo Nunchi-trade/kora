@@ -96,6 +96,7 @@ services:
       - data_node2:/shared/node2
       - data_node3:/shared/node3
       - data_secondary0:/shared/secondary0
+      - startup_barrier:/barrier
 
   # Setup + trusted dealer DKG (for fast local dev)
   init-config:
