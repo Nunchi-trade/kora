@@ -242,6 +242,34 @@ async fn handle_finalized_update<E, P>(
                 }
             }
 
+            // If finalization permanently failed, the node's QMDB state has
+            // diverged from the consensus chain.  Continuing would produce
+            // incorrect state roots for all subsequent blocks, cause failed
+            // proposals when this node is leader, and vote against valid blocks
+            // from other validators.
+            //
+            // We deliberately do NOT acknowledge the checkpoint to the marshal
+            // so it does not garbage-collect data that was never persisted.
+            // Then we abort the process to prevent silent state divergence.
+            //
+            // See: https://github.com/Nunchi-trade/daeji/issues/269
+            if let Err(ref e) = result {
+                error!(
+                    block_height = block.height,
+                    error = %e,
+                    error_kind = e.metric_label(),
+                    "FATAL: finalization permanently failed -- \
+                     aborting to prevent state divergence. \
+                     The node must be restarted after investigating the root cause."
+                );
+                // Prune mempool before halting so a restart does not re-propose
+                // transactions from the finalized block.
+                state.prune_mempool(&block.txs).await;
+                // Allow a brief window for log buffers to flush.
+                ::tokio::time::sleep(Duration::from_millis(200)).await;
+                std::process::abort();
+            }
+
             if let Ok((Some(outcome), Some(block_context))) = result.as_ref() {
                 if let Some(index) = block_index.as_ref() {
                     index_finalized_block(index, &block, block_context, outcome);
@@ -257,20 +285,13 @@ async fn handle_finalized_update<E, P>(
 
             acknowledge_checkpoint(pending_acks, block.height, checkpoint_interval, ack).await;
 
-            // Always prune the mempool regardless of whether finalization succeeded.
-            // The block is consensus-finalized, so its transactions must never be
-            // re-proposed even if local execution or persistence failed.
+            // Prune the mempool -- the block is consensus-finalized, so its
+            // transactions must never be re-proposed.
             state.prune_mempool(&block.txs).await;
 
-            // After pruning included transactions, also evict any remaining
-            // transactions whose nonces are now stale relative to finalized
-            // state.  This catches transactions from senders whose nonces
-            // advanced in the finalized block but whose specific transactions
-            // were not the ones included (e.g. the same nonce was fulfilled
-            // by a different transaction).
-            if result.is_ok() {
-                state.prune_stale_nonces().await;
-            }
+            // Evict any remaining transactions whose nonces are now stale
+            // relative to finalized state.
+            state.prune_stale_nonces().await;
 
             publish_mempool_inclusions(mempool_broadcast.as_ref(), &block);
         }
@@ -600,11 +621,9 @@ mod finalize_error_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use alloy_consensus::Header;
-    use alloy_primitives::{Address, B256, Bytes, U256};
+    use alloy_primitives::{B256, Bytes};
     use commonware_runtime::Runner as _;
-    use commonware_utils::acknowledgement::{Acknowledgement as _, Exact};
-    use k256::ecdsa::SigningKey;
-    use kora_domain::{StateRoot, evm::Evm};
+    use kora_domain::StateRoot;
     use kora_executor::ExecutionError;
     use kora_ledger::LedgerView;
 
@@ -619,8 +638,8 @@ mod finalize_error_tests {
 
     /// A block executor that always returns an error.
     ///
-    /// Used to force `finalize_block` into an error path so the caller can
-    /// verify that pruning and acknowledgement still happen unconditionally.
+    /// Used to force `finalize_with_retry` into an error path so the caller
+    /// can verify that permanent failures are surfaced correctly.
     #[derive(Clone)]
     struct FailingExecutor;
 
@@ -651,18 +670,19 @@ mod finalize_error_tests {
         }
     }
 
-    /// Regression test: when finalization fails (e.g. executor failure),
-    /// `handle_finalized_update` must still prune the mempool and acknowledge
-    /// the update so the node does not stall.
+    /// Verify that `finalize_with_retry` returns an error when the executor
+    /// permanently fails, which causes `handle_finalized_update` to abort the
+    /// process (preventing silent state divergence).
     ///
-    /// This covers the bug where early-returns on error paths skipped pruning
-    /// and acknowledgement, leading to stale tx re-proposals and marshal
-    /// delivery stalls.
+    /// We cannot test `handle_finalized_update` end-to-end with a failing
+    /// executor because it calls `std::process::abort()` on permanent
+    /// finalization failure (see #269). Instead, we test the inner retry
+    /// logic directly and verify it surfaces the expected error.
     ///
     /// Note: with retry logic, execution failures are retried up to 3 times
     /// before the error is considered permanent.
     #[test]
-    fn prune_and_ack_still_run_when_finalization_fails() {
+    fn finalize_with_retry_returns_error_on_permanent_failure() {
         let runner = tokio::Runner::default();
         runner.start(|context| async move {
             // -- set up ledger with an empty genesis --
@@ -676,45 +696,31 @@ mod finalize_error_tests {
             let service = LedgerService::new(ledger);
             let genesis = service.genesis_block();
 
-            // -- insert a transaction into the mempool --
-            let sender_key = SigningKey::from_bytes(&[1u8; 32].into()).expect("valid key");
-            let to = Address::repeat_byte(0xab);
-            let tx = Evm::sign_eip1559_transfer(&sender_key, 1, to, U256::ZERO, 0, 21_000, 0, 0);
-            assert!(service.submit_tx(tx.clone()).await, "tx should be accepted into mempool");
-            let pool = service.txpool().await;
-            assert_eq!(pool.len(), 1, "mempool should contain the submitted tx");
-
             // -- build a block that references genesis as parent --
             // The block's own snapshot does NOT exist in the store, so
             // `finalize_block` will attempt execution (and our FailingExecutor
             // will cause it to return Err(FinalizationError::ExecutionFailed)).
-            let block = Block::new(genesis.id(), 1, 1, B256::ZERO, StateRoot(B256::ZERO), vec![tx]);
+            let block = Block::new(genesis.id(), 1, 1, B256::ZERO, StateRoot(B256::ZERO), vec![]);
 
-            // -- create an acknowledgement we can observe --
-            let (ack, waiter) = Exact::handle();
-
-            // -- invoke the handler --
-            handle_finalized_update(
-                service.clone(),
-                context,
-                FailingExecutor,
-                StubProvider,
+            // -- invoke finalize_with_retry directly --
+            let result = finalize_with_retry(
+                &service,
+                &context,
+                &FailingExecutor,
+                &StubProvider,
                 None,
-                None,
-                None,
-                None,
-                1,
-                Arc::new(Mutex::new(Vec::new())),
-                None,
-                Update::Block(block, ack),
+                &block,
+                true,
             )
             .await;
 
-            // -- assert: mempool was pruned --
-            assert_eq!(pool.len(), 0, "mempool must be pruned even when finalization fails");
-
-            // -- assert: acknowledgement was delivered --
-            waiter.await.expect("ack must be called even when finalization fails");
+            // -- assert: finalization failed with execution error --
+            assert!(result.is_err(), "finalize_with_retry must return Err on permanent failure");
+            let err = result.unwrap_err();
+            assert!(
+                matches!(err, FinalizationError::ExecutionFailed(_)),
+                "expected ExecutionFailed, got: {err:?}"
+            );
         });
     }
 }
