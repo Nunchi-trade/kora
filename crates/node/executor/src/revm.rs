@@ -463,6 +463,13 @@ impl<S: StateDb> BlockExecutor<S> for RevmExecutor {
             outcome.gas_used = cumulative_gas;
         }
 
+        // Check the side-channel flag for DatabaseCommit failures.
+        // REVM's DatabaseCommit::commit() is infallible, so QMDB write errors
+        // are recorded via an atomic flag on the state handle and checked here.
+        if state.take_commit_failure() {
+            return Err(ExecutionError::StateCommit);
+        }
+
         // --- post-execution hook ---
         let post_changes = self.post_execute(context, state, &outcome.receipts)?;
         outcome.changes.merge(post_changes);

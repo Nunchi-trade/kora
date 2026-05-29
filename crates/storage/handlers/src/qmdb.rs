@@ -1,6 +1,9 @@
 //! Thread-safe QMDB handle.
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use alloy_primitives::{Address, B256, U256};
 use async_trait::async_trait;
@@ -35,6 +38,13 @@ pub struct QmdbHandle<A, S, C> {
     inner: Arc<RwLock<QmdbStore<A, S, C>>>,
     root_provider: Option<Arc<RwLock<dyn RootProvider>>>,
     storage_access: Arc<Mutex<()>>,
+    /// Flag set when a [`revm::database_interface::DatabaseCommit::commit`] call fails.
+    ///
+    /// Because the REVM `DatabaseCommit` trait returns `()`, errors from the
+    /// underlying QMDB write cannot be propagated through the return type.
+    /// Instead, this flag is set so callers can check after execution and
+    /// surface the failure.
+    commit_failed: Arc<AtomicBool>,
 }
 
 impl<A, S, C> Clone for QmdbHandle<A, S, C> {
@@ -43,6 +53,7 @@ impl<A, S, C> Clone for QmdbHandle<A, S, C> {
             inner: Arc::clone(&self.inner),
             root_provider: self.root_provider.clone(),
             storage_access: Arc::clone(&self.storage_access),
+            commit_failed: Arc::clone(&self.commit_failed),
         }
     }
 }
@@ -55,6 +66,7 @@ impl<A, S, C> QmdbHandle<A, S, C> {
             inner: Arc::new(RwLock::new(QmdbStore::new(accounts, storage, code))),
             root_provider: None,
             storage_access: Arc::new(Mutex::new(())),
+            commit_failed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -65,6 +77,7 @@ impl<A, S, C> QmdbHandle<A, S, C> {
             inner: Arc::new(RwLock::new(store)),
             root_provider: None,
             storage_access: Arc::new(Mutex::new(())),
+            commit_failed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -83,6 +96,25 @@ impl<A, S, C> QmdbHandle<A, S, C> {
     /// Acquire the shared gate for operations that open or mutate backend partitions.
     pub async fn storage_access(&self) -> MutexGuard<'_, ()> {
         self.storage_access.lock().await
+    }
+
+    /// Returns `true` if a [`revm::database_interface::DatabaseCommit::commit`]
+    /// call has failed since the last call to this method, and clears the flag.
+    ///
+    /// This is the side-channel mechanism for propagating errors from the
+    /// infallible REVM `DatabaseCommit` trait. Callers should check this after
+    /// block execution and treat a `true` return as a fatal execution error.
+    pub fn take_commit_failure(&self) -> bool {
+        self.commit_failed.swap(false, Ordering::SeqCst)
+    }
+
+    /// Record that a [`revm::database_interface::DatabaseCommit::commit`] call
+    /// has failed.
+    ///
+    /// This is called from the `DatabaseCommit` implementation in `adapter.rs`
+    /// when a QMDB write error occurs during the infallible REVM commit.
+    pub(crate) fn mark_commit_failed(&self) {
+        self.commit_failed.store(true, Ordering::SeqCst);
     }
 
     /// Acquire read lock on the underlying store.

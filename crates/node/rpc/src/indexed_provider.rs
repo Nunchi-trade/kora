@@ -377,6 +377,9 @@ fn execution_error_to_rpc(err: kora_executor::ExecutionError) -> RpcError {
         }
         E::State(s) => state_error_to_rpc(s),
         E::CodeNotFound(h) => RpcError::StateError(format!("code not found: {h}")),
+        E::StateCommit => {
+            RpcError::Internal("QMDB commit failed during block execution".to_string())
+        }
     }
 }
 
