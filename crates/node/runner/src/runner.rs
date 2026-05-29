@@ -1146,7 +1146,8 @@ impl NodeRunner for ProductionRunner {
             )
             .with_tx_submit(tx_submit)
             .with_txpool(txpool.clone())
-            .with_peer_count(peer_count);
+            .with_peer_count(peer_count)
+            .with_rpc_requests_counter(app_metrics.rpc_requests_total.clone());
             if let Some(sender) = pending_tx_broadcast.clone() {
                 rpc = rpc.with_pending_tx_broadcast(sender);
             }

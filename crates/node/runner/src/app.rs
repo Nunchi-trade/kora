@@ -355,6 +355,7 @@ where
 
         if let Some(ref m) = self.metrics {
             m.block_build_time.observe(total_elapsed.as_secs_f64());
+            m.evm_execution_seconds.observe(exec_elapsed.as_secs_f64());
             m.block_txs_included.set(block.txs.len() as i64);
         }
 
@@ -640,6 +641,10 @@ where
                 recovered_height = self.recovered_height.load(Ordering::Relaxed),
                 "catch-up: first full-execution verification past recovery point"
             );
+        }
+
+        if let Some(ref m) = self.metrics {
+            m.evm_execution_seconds.observe(exec_elapsed.as_secs_f64());
         }
 
         let total_elapsed = start.elapsed();

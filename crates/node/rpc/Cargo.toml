@@ -38,6 +38,9 @@ thiserror.workspace = true
 # Tracing
 tracing.workspace = true
 
+# Metrics
+prometheus-client.workspace = true
+
 # Misc
 parking_lot = "0.12"
 

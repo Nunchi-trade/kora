@@ -27,6 +27,7 @@ use jsonrpsee::{
 };
 use kora_txpool::TransactionPool;
 use parking_lot::Mutex;
+use prometheus_client::metrics::counter::Counter;
 use tower::limit::ConcurrencyLimitLayer;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tracing::{error, info, warn};
@@ -271,6 +272,8 @@ struct RateLimitedRpcService<S> {
     per_conn_limiter: Option<PerConnectionRateLimiter>,
     /// Global rate limiter (backstop for aggregate throughput).
     global_limiter: Option<SharedRateLimiter>,
+    /// Optional counter incremented on every incoming RPC request.
+    rpc_requests_total: Option<Counter>,
 }
 
 /// Subscription method names that require WebSocket transport.
@@ -303,6 +306,10 @@ where
     type Future = Pin<Box<dyn Future<Output = MethodResponse> + Send + 'a>>;
 
     fn call(&self, request: RpcRequest<'a>) -> Self::Future {
+        if let Some(ref counter) = self.rpc_requests_total {
+            counter.inc();
+        }
+
         // --- Per-connection rate limit (primary) ---
         if let Some(ref limiter) = self.per_conn_limiter {
             let conn_id = request.extensions().get::<ConnectionId>().map(|id| id.0);
@@ -383,6 +390,8 @@ pub struct RpcServer<S: StateProvider = NoopStateProvider> {
     peer_count: u64,
     pending_tx_broadcast: Option<PendingTxEventSender>,
     mempool_broadcast: Option<MempoolEventSender>,
+    /// Prometheus counter incremented on every incoming JSON-RPC request.
+    rpc_requests_total: Option<Counter>,
 }
 
 impl<S: StateProvider> std::fmt::Debug for RpcServer<S> {
@@ -428,6 +437,7 @@ impl RpcServer<NoopStateProvider> {
             peer_count: 0,
             pending_tx_broadcast: None,
             mempool_broadcast: None,
+            rpc_requests_total: None,
         }
     }
 
@@ -448,6 +458,7 @@ impl RpcServer<NoopStateProvider> {
             peer_count: 0,
             pending_tx_broadcast: None,
             mempool_broadcast: None,
+            rpc_requests_total: None,
         }
     }
 }
@@ -475,6 +486,7 @@ impl<S: StateProvider + Clone + 'static> RpcServer<S> {
             peer_count: 0,
             pending_tx_broadcast: None,
             mempool_broadcast: None,
+            rpc_requests_total: None,
         }
     }
 
@@ -503,6 +515,20 @@ impl<S: StateProvider + Clone + 'static> RpcServer<S> {
     #[must_use]
     pub fn with_mempool_broadcast(mut self, mempool_broadcast: MempoolEventSender) -> Self {
         self.mempool_broadcast = Some(mempool_broadcast);
+        self
+    }
+
+    /// Attach a Prometheus counter for tracking total RPC requests.
+    #[must_use]
+    pub fn with_rpc_requests_counter(mut self, counter: Counter) -> Self {
+        self.rpc_requests_total = Some(counter);
+        self
+    }
+
+    /// Set CORS configuration.
+    #[must_use]
+    pub fn with_cors(mut self, cors_config: CorsConfig) -> Self {
+        self.cors_config = cors_config;
         self
     }
 
@@ -549,6 +575,7 @@ impl<S: StateProvider + Clone + 'static> RpcServer<S> {
             state_provider,
             cors_config: config.cors,
             rate_limit_config: config.rate_limit,
+            rpc_requests_total: None,
             max_connections: config.max_connections,
             max_subscriptions_per_connection: config.max_subscriptions_per_connection,
             peer_count: 0,
@@ -579,6 +606,8 @@ impl<S: StateProvider + Clone + 'static> RpcServer<S> {
         let pending_tx_broadcast = self.pending_tx_broadcast;
         let mempool_broadcast = self.mempool_broadcast;
 
+        let rpc_requests_total = self.rpc_requests_total;
+
         let http_handle = tokio::spawn(async move {
             let app = build_http_router(node_state, cors_layer, max_connections, http_rate_limiter);
 
@@ -603,6 +632,7 @@ impl<S: StateProvider + Clone + 'static> RpcServer<S> {
                     service,
                     per_conn_limiter: rpc_per_conn_limiter.clone(),
                     global_limiter: rpc_global_limiter.clone(),
+                    rpc_requests_total: rpc_requests_total.clone(),
                 });
 
             let server = match Server::builder()
@@ -733,6 +763,8 @@ pub struct JsonRpcServer<S: StateProvider = NoopStateProvider> {
     peer_count: u64,
     pending_tx_broadcast: Option<PendingTxEventSender>,
     mempool_broadcast: Option<MempoolEventSender>,
+    /// Prometheus counter incremented on every incoming JSON-RPC request.
+    rpc_requests_total: Option<Counter>,
 }
 
 impl<S: StateProvider> std::fmt::Debug for JsonRpcServer<S> {
@@ -766,6 +798,7 @@ impl JsonRpcServer<NoopStateProvider> {
             peer_count: 0,
             pending_tx_broadcast: None,
             mempool_broadcast: None,
+            rpc_requests_total: None,
         }
     }
 }
@@ -785,6 +818,7 @@ impl<S: StateProvider + Clone + 'static> JsonRpcServer<S> {
             peer_count: 0,
             pending_tx_broadcast: None,
             mempool_broadcast: None,
+            rpc_requests_total: None,
         }
     }
 
@@ -813,6 +847,13 @@ impl<S: StateProvider + Clone + 'static> JsonRpcServer<S> {
     #[must_use]
     pub fn with_mempool_broadcast(mut self, mempool_broadcast: MempoolEventSender) -> Self {
         self.mempool_broadcast = Some(mempool_broadcast);
+        self
+    }
+
+    /// Attach a Prometheus counter for tracking total RPC requests.
+    #[must_use]
+    pub fn with_rpc_requests_counter(mut self, counter: Counter) -> Self {
+        self.rpc_requests_total = Some(counter);
         self
     }
 
@@ -851,11 +892,13 @@ impl<S: StateProvider + Clone + 'static> JsonRpcServer<S> {
     pub async fn start(self) -> Result<ServerHandle, ServerError> {
         let rpc_global_limiter = SharedRateLimiter::new(self.rate_limit_config.clone());
         let rpc_per_conn_limiter = PerConnectionRateLimiter::new(self.rate_limit_config);
+        let rpc_requests_total = self.rpc_requests_total;
         let rpc_middleware =
             RpcServiceBuilder::new().layer_fn(move |service| RateLimitedRpcService {
                 service,
                 per_conn_limiter: rpc_per_conn_limiter.clone(),
                 global_limiter: rpc_global_limiter.clone(),
+                rpc_requests_total: rpc_requests_total.clone(),
             });
 
         let server = Server::builder()
@@ -1068,6 +1111,7 @@ mod tests {
             service: AlwaysOkRpcService,
             per_conn_limiter: per_conn,
             global_limiter: None,
+            rpc_requests_total: None,
         };
 
         let first = service.call(rpc_request_with_conn(1, 42)).await;
@@ -1089,6 +1133,7 @@ mod tests {
             service: AlwaysOkRpcService,
             per_conn_limiter: per_conn,
             global_limiter: None,
+            rpc_requests_total: None,
         };
 
         // Connection 1: exhaust its bucket.
@@ -1112,6 +1157,7 @@ mod tests {
             service: AlwaysOkRpcService,
             per_conn_limiter: None,
             global_limiter: global,
+            rpc_requests_total: None,
         };
 
         let first = service.call(rpc_request_with_conn(1, 1)).await;
@@ -1154,6 +1200,7 @@ mod tests {
             service: InternalErrorOnSubscriptionService,
             per_conn_limiter: None,
             global_limiter: None,
+            rpc_requests_total: None,
         };
 
         // eth_subscribe should be rewritten from -32603 to -32004.
@@ -1171,6 +1218,7 @@ mod tests {
             service: AlwaysOkRpcService,
             per_conn_limiter: None,
             global_limiter: None,
+            rpc_requests_total: None,
         };
 
         let sub_req = RpcRequest::new(Cow::Borrowed("eth_subscribe"), None, Id::Number(1));
@@ -1185,6 +1233,7 @@ mod tests {
             service: InternalErrorOnSubscriptionService,
             per_conn_limiter: None,
             global_limiter: None,
+            rpc_requests_total: None,
         };
 
         let req = rpc_request(1);

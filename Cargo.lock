@@ -3553,6 +3553,7 @@ dependencies = [
  "kora-traits",
  "kora-txpool",
  "parking_lot",
+ "prometheus-client",
  "serde",
  "serde_json",
  "sha3",
