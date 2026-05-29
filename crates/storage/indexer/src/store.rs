@@ -148,8 +148,9 @@ impl BlockIndex {
 
     /// Gets logs matching the given filter.
     pub fn get_logs(&self, filter: &LogFilter) -> Vec<IndexedLog> {
+        let head = self.head_block_number();
         let from_block = filter.from_block.unwrap_or(0);
-        let to_block = filter.to_block.unwrap_or_else(|| self.head_block_number());
+        let to_block = filter.to_block.unwrap_or(head).min(head);
 
         let mut result = Vec::new();
 

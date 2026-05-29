@@ -21,6 +21,13 @@ use crate::{
     },
 };
 
+/// Maximum block range allowed for a single `eth_getLogs` query.
+///
+/// Ranges exceeding this limit are rejected with an invalid-params error to
+/// prevent unbounded iteration from monopolising the RPC thread. The value is
+/// aligned with Infura's 10 000-block cap.
+const MAX_LOG_BLOCK_RANGE: u64 = 10_000;
+
 /// State provider that combines indexed block data with live state queries.
 ///
 /// Uses [`BlockIndex`] for block, transaction, and receipt lookups, delegates
@@ -181,18 +188,47 @@ impl<S: StateDbRead + Send + Sync + 'static> StateProvider for IndexedStateProvi
     }
 
     async fn get_logs(&self, filter: RpcLogFilter) -> Result<Vec<RpcLog>, RpcError> {
-        let from_block =
-            filter.from_block.as_ref().map(|b| self.resolve_block_number(b)).transpose()?;
-        let to_block =
-            filter.to_block.as_ref().map(|b| self.resolve_block_number(b)).transpose()?;
+        // EIP-234: blockHash is mutually exclusive with fromBlock/toBlock.
+        if filter.block_hash.is_some() && (filter.from_block.is_some() || filter.to_block.is_some())
+        {
+            return Err(RpcError::InvalidParams(
+                "blockHash is mutually exclusive with fromBlock/toBlock".into(),
+            ));
+        }
 
         let mut log_filter = LogFilter::new();
-        if let Some(from) = from_block {
-            log_filter = log_filter.from_block(from);
+
+        if let Some(block_hash) = &filter.block_hash {
+            // Single-block query by hash per EIP-234.
+            let block = self
+                .index
+                .get_block_by_hash(block_hash)
+                .ok_or_else(|| RpcError::InvalidParams("block not found".into()))?;
+            log_filter = log_filter.from_block(block.number).to_block(block.number);
+        } else {
+            let head = self.index.head_block_number();
+            let from_block =
+                filter.from_block.as_ref().map(|b| self.resolve_block_number(b)).transpose()?;
+            let to_block =
+                filter.to_block.as_ref().map(|b| self.resolve_block_number(b)).transpose()?;
+
+            let from = from_block.unwrap_or(0);
+            let to = to_block.unwrap_or(head).min(head);
+
+            if from > to {
+                return Err(RpcError::InvalidParams(
+                    "fromBlock must not be greater than toBlock".into(),
+                ));
+            }
+            if to.saturating_sub(from) > MAX_LOG_BLOCK_RANGE {
+                return Err(RpcError::InvalidParams(format!(
+                    "block range exceeds maximum of {MAX_LOG_BLOCK_RANGE}"
+                )));
+            }
+
+            log_filter = log_filter.from_block(from).to_block(to);
         }
-        if let Some(to) = to_block {
-            log_filter = log_filter.to_block(to);
-        }
+
         if let Some(addr_filter) = filter.address {
             log_filter = log_filter.address(addr_filter.into_vec());
         }
