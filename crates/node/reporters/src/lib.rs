@@ -1035,6 +1035,12 @@ fn index_finalized_block(
     let transaction_hashes = block.txs.iter().map(|tx| keccak256(&tx.bytes)).collect::<Vec<_>>();
     let tx_metadata = block.txs.iter().map(|tx| decode_tx_metadata(&tx.bytes)).collect::<Vec<_>>();
 
+    // Approximate block size: fixed header overhead + sum of raw transaction sizes.
+    // An Ethereum block header is ~508 bytes RLP-encoded; we use 508 as the
+    // constant and add the raw EIP-2718 envelope bytes for each transaction.
+    let tx_bytes_total: u64 = block.txs.iter().map(|tx| tx.bytes.len() as u64).sum();
+    let block_size = 508 + tx_bytes_total;
+
     // Compute the transactions trie root from the raw EIP-2718 encoded transactions.
     let tx_envelopes: Vec<TxEnvelope> = block
         .txs
@@ -1076,6 +1082,7 @@ fn index_finalized_block(
         gas_used: outcome.gas_used,
         base_fee_per_gas: block_context.header.base_fee_per_gas,
         mix_hash: block.prevrandao,
+        size: block_size,
         transaction_hashes,
     };
 

@@ -38,6 +38,8 @@ pub struct IndexedBlock {
     pub base_fee_per_gas: Option<u64>,
     /// Mix hash / prevrandao value for this block.
     pub mix_hash: B256,
+    /// Approximate block size in bytes (header overhead + sum of raw tx sizes).
+    pub size: u64,
     /// Hashes of transactions included in this block.
     pub transaction_hashes: Vec<B256>,
 }
