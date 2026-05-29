@@ -1256,6 +1256,9 @@ impl NodeRunner for ProductionRunner {
         app = app.with_metrics(app_metrics.clone());
         if let Some((height, _)) = recovered_head_height {
             app = app.with_recovered_height(height);
+            if let Some((state, _)) = &self.rpc_config {
+                state.set_recovered_height(height);
+            }
         }
         if let Some((state, _)) = &self.rpc_config {
             app = app.with_node_state(state.clone());

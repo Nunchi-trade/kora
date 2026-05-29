@@ -15,6 +15,11 @@ use serde::{Deserialize, Serialize};
 /// Default validator count used by tests and legacy callers.
 pub(crate) const DEFAULT_VALIDATOR_COUNT: u32 = 4;
 
+/// Number of blocks past the recovery point that must be fully verified
+/// before the node exits catch-up mode.  Mirrors the constant in
+/// `crates/node/runner/src/app.rs`.
+const CATCH_UP_THRESHOLD: u64 = 64;
+
 /// Network partition status derived from peer connectivity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -69,6 +74,11 @@ struct NodeStateInner {
     equivocation_count: AtomicU64,
     peer_count: AtomicU64,
     is_leader: RwLock<bool>,
+    /// Height of the HEAD block recovered from an archive at startup.
+    /// Zero means a fresh node (never recovered).
+    recovered_height: AtomicU64,
+    /// Highest block height that has been fully verified via execution.
+    last_verified_height: AtomicU64,
 }
 
 impl NodeState {
@@ -110,6 +120,8 @@ impl NodeState {
                 equivocation_count: AtomicU64::new(0),
                 peer_count: AtomicU64::new(0),
                 is_leader: RwLock::new(false),
+                recovered_height: AtomicU64::new(0),
+                last_verified_height: AtomicU64::new(0),
             }),
         }
     }
@@ -157,6 +169,44 @@ impl NodeState {
     /// Update peer count.
     pub fn set_peer_count(&self, count: u64) {
         self.inner.peer_count.store(count, Ordering::Relaxed);
+    }
+
+    /// Set the height of the HEAD block recovered from an archive at startup.
+    ///
+    /// This also initialises `last_verified_height` to the same value,
+    /// matching the semantics in `RevmApplication::with_recovered_height`.
+    pub fn set_recovered_height(&self, height: u64) {
+        self.inner.recovered_height.store(height, Ordering::Relaxed);
+        self.inner.last_verified_height.store(height, Ordering::Relaxed);
+    }
+
+    /// Return the recovered height (zero for fresh nodes).
+    pub fn recovered_height(&self) -> u64 {
+        self.inner.recovered_height.load(Ordering::Relaxed)
+    }
+
+    /// Advance the last verified height (monotonically increasing).
+    pub fn set_last_verified_height(&self, height: u64) {
+        self.inner.last_verified_height.fetch_max(height, Ordering::Relaxed);
+    }
+
+    /// Return the last verified height.
+    pub fn last_verified_height(&self) -> u64 {
+        self.inner.last_verified_height.load(Ordering::Relaxed)
+    }
+
+    /// Returns `true` when the node is catching up after recovery.
+    ///
+    /// A node is catching up when it was recovered from an archive
+    /// (`recovered_height > 0`) and full-execution verification has not
+    /// yet advanced past `recovered_height + CATCH_UP_THRESHOLD` (64).
+    pub fn is_catching_up(&self) -> bool {
+        let recovered = self.inner.recovered_height.load(Ordering::Relaxed);
+        if recovered == 0 {
+            return false;
+        }
+        let verified = self.inner.last_verified_height.load(Ordering::Relaxed);
+        verified < recovered.saturating_add(CATCH_UP_THRESHOLD)
     }
 
     /// Get current node status.
@@ -452,5 +502,54 @@ mod tests {
         state.set_peer_count(2);
         let status = state.status();
         assert_eq!(status.partition_status, PartitionStatus::Degraded);
+    }
+
+    // -- Sync status tests --
+
+    #[test]
+    fn fresh_node_not_catching_up() {
+        let state = NodeState::new(1, 0);
+        assert!(!state.is_catching_up());
+        assert_eq!(state.recovered_height(), 0);
+        assert_eq!(state.last_verified_height(), 0);
+    }
+
+    #[test]
+    fn recovered_node_is_catching_up() {
+        let state = NodeState::new(1, 0);
+        state.set_recovered_height(1000);
+        assert!(state.is_catching_up());
+        assert_eq!(state.recovered_height(), 1000);
+        assert_eq!(state.last_verified_height(), 1000);
+    }
+
+    #[test]
+    fn catching_up_ends_after_threshold() {
+        let state = NodeState::new(1, 0);
+        state.set_recovered_height(1000);
+        assert!(state.is_catching_up());
+
+        // Advance verified height to just below threshold
+        state.set_last_verified_height(1000 + CATCH_UP_THRESHOLD - 1);
+        assert!(state.is_catching_up());
+
+        // Advance verified height to exactly the threshold
+        state.set_last_verified_height(1000 + CATCH_UP_THRESHOLD);
+        assert!(!state.is_catching_up());
+    }
+
+    #[test]
+    fn last_verified_height_is_monotonic() {
+        let state = NodeState::new(1, 0);
+        state.set_last_verified_height(100);
+        assert_eq!(state.last_verified_height(), 100);
+
+        // Cannot regress
+        state.set_last_verified_height(50);
+        assert_eq!(state.last_verified_height(), 100);
+
+        // Can advance
+        state.set_last_verified_height(200);
+        assert_eq!(state.last_verified_height(), 200);
     }
 }

@@ -408,6 +408,9 @@ where
             // store), so the full-execution path is never reached for that
             // height, and `last_verified_height` never advances past it.
             self.last_verified_height.fetch_max(block.height, Ordering::Relaxed);
+            if let Some(ref state) = self.node_state {
+                state.set_last_verified_height(block.height);
+            }
             trace!(?digest, height = block.height, "block already verified");
             return true;
         }
@@ -567,6 +570,9 @@ where
         // height so that the catch-up window eventually closes once we
         // have verified blocks past the recovery point.
         let prev_verified = self.last_verified_height.fetch_max(block.height, Ordering::Relaxed);
+        if let Some(ref state) = self.node_state {
+            state.set_last_verified_height(block.height);
+        }
         if prev_verified < self.recovered_height.load(Ordering::Relaxed)
             && block.height >= self.recovered_height.load(Ordering::Relaxed)
         {
