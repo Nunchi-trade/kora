@@ -20,7 +20,7 @@ use axum::{
 use jsonrpsee::{
     core::server::MethodResponse,
     server::{
-        BatchRequestConfig, ConnectionId, Server, ServerHandle,
+        BatchRequestConfig, ConnectionId, PingConfig, Server, ServerHandle,
         middleware::rpc::{RpcServiceBuilder, RpcServiceT},
     },
     types::{ErrorObjectOwned, Id, Request as RpcRequest},
@@ -638,6 +638,7 @@ impl<S: StateProvider + Clone + 'static> RpcServer<S> {
             let server = match Server::builder()
                 .max_connections(max_connections)
                 .max_subscriptions_per_connection(max_subscriptions_per_connection)
+                .enable_ws_ping(PingConfig::new())
                 .set_batch_request_config(BatchRequestConfig::Limit(MAX_BATCH_SIZE))
                 .set_rpc_middleware(rpc_middleware)
                 .build(jsonrpc_addr)
@@ -907,6 +908,7 @@ impl<S: StateProvider + Clone + 'static> JsonRpcServer<S> {
         let server = Server::builder()
             .max_connections(self.max_connections)
             .max_subscriptions_per_connection(self.max_subscriptions_per_connection)
+            .enable_ws_ping(PingConfig::new())
             .set_batch_request_config(BatchRequestConfig::Limit(MAX_BATCH_SIZE))
             .set_rpc_middleware(rpc_middleware)
             .build(self.addr)
