@@ -6,6 +6,7 @@ use anyhow::Context as _;
 use commonware_consensus::{
     Reporters,
     marshal::{
+        Start,
         core::Mailbox,
         standard::{Inline, Standard},
     },
@@ -15,7 +16,7 @@ use commonware_consensus::{
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519};
 use commonware_p2p::{Manager, TrackedPeers};
 use commonware_parallel::Sequential;
-use commonware_runtime::{Metrics as _, Spawner, buffer::paged::CacheRef, tokio};
+use commonware_runtime::{Spawner, Supervisor as _, buffer::paged::CacheRef, tokio};
 use commonware_utils::{NZU64, NZUsize, acknowledgement::Exact, ordered::Set};
 use futures::StreamExt;
 use kora_domain::{Block, BlockCfg, BootstrapConfig, ConsensusDigest, LedgerEvent, Tx, TxCfg};
@@ -185,7 +186,7 @@ impl ProductionRunner {
 
             let transport = config
                 .network
-                .build_local_transport(validator_key, context.clone())
+                .build_local_transport(validator_key, context.child("transport"))
                 .map_err(|e| anyhow::anyhow!("failed to build transport: {}", e))?;
 
             let ctx =
@@ -212,7 +213,7 @@ impl NodeRunner for ProductionRunner {
         let validators = self.scheme.participants().clone();
         let secondary = Set::from_iter_dedup(self.secondary_peers.iter().cloned());
         let secondary_count = secondary.len();
-        transport.oracle.track(0, TrackedPeers::new(validators, secondary)).await;
+        transport.oracle.track(0, TrackedPeers::new(validators, secondary));
         info!(
             validators = self.scheme.participants().len(),
             secondary_peers = secondary_count,
@@ -223,7 +224,7 @@ impl NodeRunner for ProductionRunner {
         let block_cfg = block_codec_cfg();
 
         let state = LedgerView::init(
-            context.with_label("state"),
+            context.child("state"),
             format!("{}-qmdb", self.partition_prefix),
             self.bootstrap.genesis_alloc.clone(),
         )
@@ -233,7 +234,7 @@ impl NodeRunner for ProductionRunner {
         let block_index =
             self.rpc_config.as_ref().map(|_| Arc::new(kora_indexer::BlockIndex::new()));
         let ledger = LedgerService::new(state.clone());
-        spawn_ledger_observers(ledger.clone(), context.clone());
+        spawn_ledger_observers(ledger.clone(), context.child("ledger_observers"));
 
         if let Some((node_state, addr)) = &self.rpc_config {
             let qmdb_state = state.qmdb_state().await;
@@ -292,7 +293,7 @@ impl NodeRunner for ProductionRunner {
         let executor = RevmExecutor::new(self.chain_id);
         let context_provider = RevmContextProvider { gas_limit: self.gas_limit };
         let mut finalized_reporter =
-            FinalizedReporter::new(ledger.clone(), context.clone(), executor, context_provider);
+            FinalizedReporter::new(ledger.clone(), context.child("finalized_reporter"), executor, context_provider);
         if let Some(block_index) = block_index {
             finalized_reporter = finalized_reporter.with_block_index(block_index);
         }
@@ -300,7 +301,7 @@ impl NodeRunner for ProductionRunner {
         let scheme_provider = ConstantSchemeProvider::from(self.scheme.clone());
 
         let resolver = PeerInitializer::init::<_, _, _, Block, _, _, _>(
-            &context.with_label("resolver"),
+            context.child("resolver"),
             my_pk.clone(),
             transport.oracle.clone(),
             transport.oracle.clone(),
@@ -308,7 +309,7 @@ impl NodeRunner for ProductionRunner {
         );
 
         let (broadcast_engine, buffer) = BroadcastInitializer::init::<_, Peer, Block, _>(
-            context.with_label("broadcast"),
+            context.child("broadcast"),
             my_pk.clone(),
             transport.oracle.clone(),
             block_cfg,
@@ -318,7 +319,7 @@ impl NodeRunner for ProductionRunner {
         let partition_prefix = &self.partition_prefix;
         <ThresholdScheme as commonware_cryptography::certificate::Scheme>::certificate_codec_config_unbounded();
         let finalizations_by_height = ArchiveInitializer::init::<_, ConsensusDigest, CertArchive>(
-            context.with_label("finalizations_by_height"),
+            context.child("finalizations_by_height"),
             format!("{partition_prefix}-finalizations-by-height"),
             (),
         )
@@ -326,21 +327,25 @@ impl NodeRunner for ProductionRunner {
         .context("init finalizations archive")?;
 
         let finalized_blocks = ArchiveInitializer::init::<_, ConsensusDigest, Block>(
-            context.with_label("finalized_blocks"),
+            context.child("finalized_blocks"),
             format!("{partition_prefix}-finalized-blocks"),
             block_cfg,
         )
         .await
         .context("init blocks archive")?;
 
+        let genesis_block = ledger.genesis_block();
+        let genesis_digest = commonware_cryptography::Committable::commitment(&genesis_block);
+        let marshal_start = Start::Genesis(genesis_block.clone());
         let (actor, marshal_mailbox, _last_processed_height) =
             kora_marshal::ActorInitializer::init::<_, Block, _, _, _, Exact>(
-                context.clone(),
+                context.child("marshal"),
                 finalizations_by_height,
                 finalized_blocks,
                 scheme_provider,
                 page_cache.clone(),
                 block_cfg,
+                marshal_start,
             )
             .await;
         actor.start(finalized_reporter, buffer, resolver);
@@ -357,9 +362,9 @@ impl NodeRunner for ProductionRunner {
             app = app.with_node_state(state.clone());
         }
         let marshaled =
-            Inline::new(context.with_label("marshaled"), app, marshal_mailbox.clone(), epocher);
+            Inline::new(context.child("marshaled"), app, marshal_mailbox.clone(), epocher);
 
-        let seed_reporter = SeedReporter::<MinSig>::new(ledger.clone());
+        let seed_reporter = SeedReporter::<MinSig>::new(ledger.clone(), context.child("seed_reporter"));
         let node_state_reporter = self
             .rpc_config
             .as_ref()
@@ -373,7 +378,7 @@ impl NodeRunner for ProductionRunner {
         }
 
         let engine = simplex::Engine::new(
-            context.with_label("engine"),
+            context.child("engine"),
             simplex::Config {
                 scheme: self.scheme.clone(),
                 elector: Random,
@@ -383,8 +388,9 @@ impl NodeRunner for ProductionRunner {
                 reporter,
                 strategy: Sequential,
                 partition: self.partition_prefix.clone(),
-                mailbox_size: MAILBOX_SIZE,
+                mailbox_size: NZUsize!(MAILBOX_SIZE),
                 epoch: Epoch::zero(),
+                floor: simplex::Floor::Genesis(genesis_digest),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 leader_timeout: Duration::from_millis(500),
@@ -393,7 +399,7 @@ impl NodeRunner for ProductionRunner {
                 fetch_timeout: Duration::from_millis(500),
                 activity_timeout: ViewDelta::new(20),
                 skip_timeout: ViewDelta::new(10),
-                fetch_concurrent: 8,
+                fetch_concurrent: NZUsize!(8),
                 page_cache,
                 forwarding: simplex::ForwardingPolicy::Disabled,
             },

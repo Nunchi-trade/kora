@@ -89,7 +89,7 @@ pub(crate) fn run(args: DkgDealArgs) -> Result<()> {
 
     tracing::info!("Generating BLS threshold key shares");
     let (public_output, shares) =
-        dkg::deal::<MinSig, _, N3f1>(&mut rng, Mode::default(), participants_set)
+        dkg::feldman_desmedt::deal::<MinSig, _, N3f1>(&mut rng, Mode::default(), participants_set)
             .map_err(|e| eyre::eyre!("DKG deal failed: {:?}", e))?;
 
     let sharing = public_output.public();

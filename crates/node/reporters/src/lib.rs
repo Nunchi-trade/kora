@@ -18,7 +18,8 @@ use commonware_consensus::{
     },
 };
 use commonware_cryptography::{Committable as _, bls12381::primitives::variant::Variant};
-use commonware_runtime::{Spawner as _, tokio};
+use commonware_actor::Feedback;
+use commonware_runtime::{Spawner as _, Supervisor as _, tokio};
 use commonware_utils::acknowledgement::Acknowledgement as _;
 use kora_consensus::BlockExecution;
 use kora_domain::{Block, ConsensusDigest, PublicKey};
@@ -62,13 +63,24 @@ async fn seed_report_inner<V: Variant>(
     }
 }
 
-#[derive(Clone)]
 /// Tracks simplex activity to store seed hashes for future proposals.
 pub struct SeedReporter<V> {
     /// Ledger service that keeps per-digest seeds and snapshots.
     state: LedgerService,
+    /// Tokio context used to spawn the async seed work.
+    context: tokio::Context,
     /// Marker indicating the variant for the threshold scheme in use.
     _variant: PhantomData<V>,
+}
+
+impl<V> Clone for SeedReporter<V> {
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+            context: self.context.child("seed_clone"),
+            _variant: PhantomData,
+        }
+    }
 }
 
 impl<V> fmt::Debug for SeedReporter<V> {
@@ -79,8 +91,8 @@ impl<V> fmt::Debug for SeedReporter<V> {
 
 impl<V> SeedReporter<V> {
     /// Create a new seed reporter for the provided ledger service.
-    pub const fn new(state: LedgerService) -> Self {
-        Self { state, _variant: PhantomData }
+    pub const fn new(state: LedgerService, context: tokio::Context) -> Self {
+        Self { state, context, _variant: PhantomData }
     }
 
     fn hash_seed(seed: impl commonware_codec::Encode) -> B256 {
@@ -94,11 +106,12 @@ where
 {
     type Activity = Activity<Scheme<PublicKey, V>, ConsensusDigest>;
 
-    fn report(&mut self, activity: Self::Activity) -> impl std::future::Future<Output = ()> + Send {
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
         let state = self.state.clone();
-        async move {
+        self.context.child("seed").spawn(move |_| async move {
             seed_report_inner(state, activity).await;
-        }
+        });
+        Feedback::Ok
     }
 }
 
@@ -360,7 +373,6 @@ const fn effective_gas_price(envelope: &TxEnvelope) -> u128 {
     }
 }
 
-#[derive(Clone)]
 /// Persists finalized blocks.
 pub struct FinalizedReporter<E, P> {
     /// Ledger service used to verify blocks and persist snapshots.
@@ -373,6 +385,18 @@ pub struct FinalizedReporter<E, P> {
     provider: P,
     /// Optional RPC block index updated after finalized blocks are persisted.
     block_index: Option<Arc<BlockIndex>>,
+}
+
+impl<E: Clone, P: Clone> Clone for FinalizedReporter<E, P> {
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+            context: self.context.child("finalized_clone"),
+            executor: self.executor.clone(),
+            provider: self.provider.clone(),
+            block_index: self.block_index.clone(),
+        }
+    }
 }
 
 impl<E, P> fmt::Debug for FinalizedReporter<E, P> {
@@ -411,15 +435,16 @@ where
 {
     type Activity = Update<Block>;
 
-    fn report(&mut self, update: Self::Activity) -> impl std::future::Future<Output = ()> + Send {
+    fn report(&mut self, update: Self::Activity) -> Feedback {
         let state = self.state.clone();
-        let context = self.context.clone();
+        let context = self.context.child("finalized");
         let executor = self.executor.clone();
         let provider = self.provider.clone();
         let block_index = self.block_index.clone();
-        async move {
+        self.context.child("finalized_spawn").spawn(move |_| async move {
             handle_finalized_update(state, context, executor, provider, block_index, update).await;
-        }
+        });
+        Feedback::Ok
     }
 }
 
@@ -456,7 +481,7 @@ where
 {
     type Activity = Activity<S, ConsensusDigest>;
 
-    fn report(&mut self, activity: Self::Activity) -> impl std::future::Future<Output = ()> + Send {
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
         match &activity {
             Activity::Notarization(n) => {
                 self.state.set_view(n.proposal.round.view().get());
@@ -470,6 +495,6 @@ where
             }
             _ => {}
         }
-        async {}
+        Feedback::Ok
     }
 }

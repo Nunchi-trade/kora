@@ -1,5 +1,6 @@
 //! Kora node service implementation.
 
+use commonware_runtime::Supervisor as _;
 use std::sync::Arc;
 
 use commonware_cryptography::Signer;
@@ -111,7 +112,7 @@ impl LegacyNodeService {
         let mut transport = self
             .config
             .network
-            .build_local_transport(validator_key, context.clone())
+            .build_local_transport(validator_key, context.child("transport"))
             .map_err(|e| eyre::eyre!("failed to build transport: {}", e))?;
         tracing::info!("network transport started");
 
@@ -120,7 +121,7 @@ impl LegacyNodeService {
             let validator_set: commonware_utils::ordered::Set<_> = validators
                 .try_into()
                 .map_err(|_| eyre::eyre!("failed to convert validator set"))?;
-            transport.oracle.track(0, validator_set).await;
+            transport.oracle.track(0, validator_set);
             tracing::info!("registered validators with oracle");
         }
 

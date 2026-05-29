@@ -13,7 +13,8 @@ use commonware_utils::NZUsize;
 use kora_config::NodeConfig;
 use kora_service::TransportProvider;
 use kora_transport::{
-    CHANNEL_BACKFILL, CHANNEL_BLOCKS, CHANNEL_CERTS, CHANNEL_RESOLVER, CHANNEL_VOTES,
+    CHANNEL_BACKFILL, CHANNEL_BLOCKS, CHANNEL_CERTS, CHANNEL_RESOLVER,
+    CHANNEL_VOTES,
 };
 
 use crate::{
@@ -73,12 +74,12 @@ impl<P: PublicKey> SimControl<P> {
     }
 
     /// Updates the validator set for an epoch.
-    pub async fn update_validators(
+    pub fn update_validators(
         &self,
         epoch: u64,
         validators: commonware_utils::ordered::Set<P>,
     ) {
-        self.manager().track(epoch, validators).await;
+        self.manager().track(epoch, validators);
     }
 
     /// Returns a peer control handle for channel registration.

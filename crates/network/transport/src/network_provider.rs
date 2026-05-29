@@ -71,7 +71,7 @@ where
         let backlog = self.config.backlog;
 
         let (mut network, oracle) =
-            discovery::Network::new(context.with_label("network"), self.config.inner);
+            discovery::Network::new(context.child("network"), self.config.inner);
 
         let votes = network.register(CHANNEL_VOTES, self.quota, backlog);
         let certs = network.register(CHANNEL_CERTS, self.quota, backlog);

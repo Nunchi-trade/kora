@@ -5,6 +5,7 @@
 
 use std::num::{NonZeroU64, NonZeroUsize};
 
+use commonware_consensus::marshal::Start;
 use commonware_consensus::{
     Block,
     marshal::{
@@ -101,10 +102,11 @@ impl ActorInitializer {
         provider: P,
         page_cache: CacheRef,
         block_codec_config: B::Cfg,
+        start: Start<P::Scheme, B::Digest, B>,
     ) -> (
         Actor<E, Standard<B>, P, FC, FB, FixedEpocher, Sequential, A>,
         Mailbox<P::Scheme, Standard<B>>,
-        Height,
+        Option<Height>,
     )
     where
         E: BufferPooler + CryptoRngCore + Spawner + Metrics + Clock + Storage,
@@ -118,7 +120,7 @@ impl ActorInitializer {
             provider,
             epocher: FixedEpocher::new(Self::DEFAULT_BLOCKS_PER_EPOCH),
             partition_prefix: Self::DEFAULT_PARTITION_PREFIX.to_string(),
-            mailbox_size: Self::DEFAULT_MAILBOX_SIZE,
+            mailbox_size: NZUsize!(Self::DEFAULT_MAILBOX_SIZE),
             view_retention_timeout: Self::DEFAULT_VIEW_RETENTION_TIMEOUT,
             prunable_items_per_section: Self::DEFAULT_PRUNABLE_ITEMS_PER_SECTION,
             page_cache,
@@ -129,6 +131,7 @@ impl ActorInitializer {
             max_repair: Self::DEFAULT_MAX_REPAIR,
             max_pending_acks: NZUsize!(1024),
             strategy: Sequential,
+            start,
         };
 
         Actor::init(context, finalizations_by_height, finalized_blocks, config).await
@@ -147,10 +150,11 @@ impl ActorInitializer {
         page_cache: CacheRef,
         block_codec_config: B::Cfg,
         partition_prefix: impl Into<String>,
+        start: Start<P::Scheme, B::Digest, B>,
     ) -> (
         Actor<E, Standard<B>, P, FC, FB, FixedEpocher, Sequential, A>,
         Mailbox<P::Scheme, Standard<B>>,
-        Height,
+        Option<Height>,
     )
     where
         E: BufferPooler + CryptoRngCore + Spawner + Metrics + Clock + Storage,
@@ -164,7 +168,7 @@ impl ActorInitializer {
             provider,
             epocher: FixedEpocher::new(Self::DEFAULT_BLOCKS_PER_EPOCH),
             partition_prefix: partition_prefix.into(),
-            mailbox_size: Self::DEFAULT_MAILBOX_SIZE,
+            mailbox_size: NZUsize!(Self::DEFAULT_MAILBOX_SIZE),
             view_retention_timeout: Self::DEFAULT_VIEW_RETENTION_TIMEOUT,
             prunable_items_per_section: Self::DEFAULT_PRUNABLE_ITEMS_PER_SECTION,
             page_cache,
@@ -175,6 +179,7 @@ impl ActorInitializer {
             max_repair: Self::DEFAULT_MAX_REPAIR,
             max_pending_acks: NZUsize!(1024),
             strategy: Sequential,
+            start,
         };
 
         Actor::init(context, finalizations_by_height, finalized_blocks, config).await

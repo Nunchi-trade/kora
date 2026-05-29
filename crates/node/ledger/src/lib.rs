@@ -9,7 +9,7 @@ use std::{collections::BTreeSet, fmt, sync::Arc};
 
 use alloy_primitives::{Address, B256, U256};
 use commonware_cryptography::Committable as _;
-use commonware_runtime::{Metrics as _, tokio};
+use commonware_runtime::{Supervisor as _, tokio};
 use futures::{channel::mpsc::UnboundedReceiver, lock::Mutex};
 use kora_consensus::{
     ConsensusError, Mempool as _, SeedTracker as _, Snapshot, SnapshotStore as _,
@@ -92,7 +92,7 @@ impl LedgerView {
         config: QmdbConfig,
         genesis_alloc: Vec<(Address, U256)>,
     ) -> LedgerResult<Self> {
-        let qmdb = QmdbLedger::init(context.with_label("qmdb"), config, genesis_alloc).await?;
+        let qmdb = QmdbLedger::init(context.child("qmdb"), config, genesis_alloc).await?;
         let genesis_root = qmdb.root().await?;
 
         let genesis_block = Block {

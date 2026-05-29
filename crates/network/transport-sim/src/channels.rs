@@ -42,3 +42,15 @@ impl<P: PublicKey> fmt::Debug for SimMarshalChannels<P> {
         f.debug_struct("SimMarshalChannels").finish_non_exhaustive()
     }
 }
+
+/// Transaction gossip channel for simulated transport.
+pub struct SimTxGossipChannel<P: PublicKey> {
+    /// Transaction gossip channel.
+    pub channel: (Sender<P>, Receiver<P>),
+}
+
+impl<P: PublicKey> fmt::Debug for SimTxGossipChannel<P> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SimTxGossipChannel").finish_non_exhaustive()
+    }
+}

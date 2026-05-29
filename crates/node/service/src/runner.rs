@@ -5,6 +5,7 @@
 //! of this trait, allowing different execution environments (REVM, etc.)
 //! to provide their own wiring logic.
 
+use commonware_runtime::Supervisor as _;
 use std::sync::Arc;
 
 use commonware_runtime::tokio;
@@ -38,9 +39,9 @@ impl<T> NodeRunContext<T> {
         &self.context
     }
 
-    /// Get a clone of the runtime context.
-    pub fn context_owned(&self) -> tokio::Context {
-        self.context.clone()
+    /// Get a child of the runtime context with the given label.
+    pub fn context_owned(&self, label: &'static str) -> tokio::Context {
+        self.context.child(label)
     }
 
     /// Get the node configuration.

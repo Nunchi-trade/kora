@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use commonware_codec::ReadExt;
 use serde::{Deserialize, Serialize};
 
 use crate::{ConfigError, ConsensusConfig, ExecutionConfig, NetworkConfig, RpcConfig};
@@ -123,9 +124,8 @@ impl NodeConfig {
                 }
                 let mut seed = [0u8; 32];
                 seed.copy_from_slice(&key_bytes);
-                Ok(commonware_cryptography::ed25519::PrivateKey::from(
-                    ed25519_consensus::SigningKey::from(seed),
-                ))
+                Ok(commonware_cryptography::ed25519::PrivateKey::read(&mut &seed[..])
+                    .expect("32-byte seed is always a valid Ed25519 PrivateKey"))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // Generate new key
@@ -144,9 +144,8 @@ impl NodeConfig {
                 std::fs::write(&key_path, seed)
                     .map_err(|e| ConfigError::Write { path: key_path.clone(), source: e })?;
 
-                Ok(commonware_cryptography::ed25519::PrivateKey::from(
-                    ed25519_consensus::SigningKey::from(seed),
-                ))
+                Ok(commonware_cryptography::ed25519::PrivateKey::read(&mut &seed[..])
+                    .expect("32-byte seed is always a valid Ed25519 PrivateKey"))
             }
             Err(e) => Err(ConfigError::Read { path: key_path, source: e }),
         }

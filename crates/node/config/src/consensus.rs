@@ -93,7 +93,7 @@ mod tests {
 
     fn create_valid_public_key_bytes() -> Vec<u8> {
         let private_key =
-            ed25519::PrivateKey::from(ed25519_consensus::SigningKey::from([42u8; 32]));
+            ed25519::PrivateKey::read(&mut &[42u8; 32][..]).expect("32-byte seed is always a valid Ed25519 PrivateKey");
         let public_key = private_key.public_key();
         let mut bytes = Vec::new();
         public_key.write(&mut bytes);
@@ -202,7 +202,7 @@ mod tests {
     fn build_validator_set_multiple_keys() {
         let keys: Vec<_> = (1..=3u8)
             .map(|i| {
-                let pk = ed25519::PrivateKey::from(ed25519_consensus::SigningKey::from([i; 32]));
+                let pk = ed25519::PrivateKey::read(&mut &[i; 32][..]).expect("32-byte seed is always a valid Ed25519 PrivateKey");
                 let mut bytes = Vec::new();
                 pk.public_key().write(&mut bytes);
                 bytes

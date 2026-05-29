@@ -6,7 +6,7 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
 mod channels;
-pub use channels::{Receiver, Sender, SimMarshalChannels, SimSimplexChannels};
+pub use channels::{Receiver, Sender, SimMarshalChannels, SimSimplexChannels, SimTxGossipChannel};
 
 mod context;
 pub use context::SimContext;

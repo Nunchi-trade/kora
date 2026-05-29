@@ -6,6 +6,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use commonware_runtime::Supervisor as _;
 use commonware_runtime::{self, tokio};
 use governor::clock::{Clock as GovernorClock, ReasonablyRealtime};
 use prometheus_client::registry::Metric;
@@ -57,7 +58,7 @@ impl SimContext {
 
 impl Clone for SimContext {
     fn clone(&self) -> Self {
-        Self { inner: self.inner.clone(), force_base_addr: false, port_offset: self.port_offset }
+        Self { inner: self.inner.child("sim_clone"), force_base_addr: false, port_offset: self.port_offset }
     }
 }
 
@@ -88,45 +89,46 @@ impl commonware_runtime::Clock for SimContext {
     }
 }
 
-impl commonware_runtime::Metrics for SimContext {
-    fn label(&self) -> String {
-        self.inner.label()
+impl commonware_runtime::Supervisor for SimContext {
+    fn name(&self) -> commonware_runtime::Name {
+        self.inner.name()
     }
 
-    fn with_label(&self, label: &str) -> Self {
+    fn child(&self, label: &'static str) -> Self {
         Self {
-            inner: self.inner.with_label(label),
+            inner: self.inner.child(label),
             force_base_addr: false,
             port_offset: self.port_offset,
         }
     }
 
-    fn with_attribute(&self, key: &str, value: impl fmt::Display) -> Self {
+    fn with_attribute(self, key: &'static str, value: impl fmt::Display) -> Self {
         Self {
             inner: self.inner.with_attribute(key, value),
             force_base_addr: false,
             port_offset: self.port_offset,
         }
     }
+}
 
-    fn with_scope(&self) -> Self {
-        Self {
-            inner: self.inner.with_scope(),
-            force_base_addr: false,
-            port_offset: self.port_offset,
-        }
-    }
-
-    fn with_span(&self) -> Self {
+impl commonware_runtime::Tracing for SimContext {
+    fn with_span(self) -> Self {
         Self {
             inner: self.inner.with_span(),
             force_base_addr: false,
             port_offset: self.port_offset,
         }
     }
+}
 
-    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
-        self.inner.register(name, help, metric);
+impl commonware_runtime::Metrics for SimContext {
+    fn register<N: Into<String>, H: Into<String>, M: Metric>(
+        &self,
+        name: N,
+        help: H,
+        metric: M,
+    ) -> commonware_runtime::telemetry::metrics::Registered<M> {
+        self.inner.register(name, help, metric)
     }
 
     fn encode(&self) -> String {

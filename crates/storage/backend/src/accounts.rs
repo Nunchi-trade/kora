@@ -2,6 +2,7 @@
 
 use alloy_primitives::Address;
 use commonware_cryptography::sha256::Digest as QmdbDigest;
+use commonware_parallel::Sequential;
 use commonware_storage::{qmdb::any::VariableConfig, translator::EightCap};
 use kora_qmdb::{AccountEncoding, QmdbBatchable, QmdbGettable};
 
@@ -30,7 +31,7 @@ impl AccountStore {
     /// Initialize the account store.
     pub async fn init(
         context: Context,
-        config: VariableConfig<EightCap, ((), ())>,
+        config: VariableConfig<EightCap, ((), ()), Sequential>,
     ) -> Result<Self, BackendError> {
         let inner = AccountDb::init(context, config)
             .await

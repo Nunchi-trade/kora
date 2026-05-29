@@ -96,7 +96,7 @@ mod tests {
         let tx_id = TxId(B256::repeat_byte(0x42));
         events.publish(LedgerEvent::TransactionSubmitted(tx_id));
 
-        let received = receiver.try_next().expect("channel open").expect("should receive event");
+        let received = receiver.try_recv().expect("should receive event");
         if let LedgerEvent::TransactionSubmitted(id) = received {
             assert_eq!(id.0, B256::repeat_byte(0x42));
         } else {
@@ -113,8 +113,8 @@ mod tests {
         let tx_id = TxId(B256::repeat_byte(0x01));
         events.publish(LedgerEvent::TransactionSubmitted(tx_id));
 
-        let e1 = r1.try_next().expect("channel open").expect("r1 should receive");
-        let e2 = r2.try_next().expect("channel open").expect("r2 should receive");
+        let e1 = r1.try_recv().expect("r1 should receive");
+        let e2 = r2.try_recv().expect("r2 should receive");
 
         assert!(matches!(e1, LedgerEvent::TransactionSubmitted(_)));
         assert!(matches!(e2, LedgerEvent::TransactionSubmitted(_)));
