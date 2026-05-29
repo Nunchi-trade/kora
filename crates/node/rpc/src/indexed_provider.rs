@@ -414,7 +414,7 @@ fn call_request_to_params(req: CallRequest) -> CallParams {
 fn execution_error_to_rpc(err: kora_executor::ExecutionError) -> RpcError {
     use kora_executor::ExecutionError as E;
     match err {
-        E::Revert(data) => RpcError::ExecutionFailed(format!("execution reverted: {data}")),
+        E::Revert(data) => RpcError::ExecutionReverted(Some(data)),
         E::TxExecution(msg) | E::InvalidTx(msg) | E::TxDecode(msg) | E::BlockValidation(msg) => {
             RpcError::ExecutionFailed(msg)
         }
