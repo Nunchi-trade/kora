@@ -1,8 +1,13 @@
 //! State database adapter for REVM.
 //!
 //! Note: REVM's `DatabaseRef` trait is synchronous, so we bridge async StateDb traits into
-//! the sync REVM interface. When executing inside a Tokio runtime, we use `block_in_place`
-//! so async storage can continue making progress on runtime workers.
+//! the sync REVM interface.
+//!
+//! Callers are expected to run the entire EVM execution inside
+//! `tokio::task::spawn_blocking` so that async worker threads remain free for
+//! consensus, networking, and RPC.  Inside a `spawn_blocking` thread,
+//! `block_in_place` is a no-op (tokio 1.28+) and `Handle::block_on` drives
+//! the state DB futures without starving any async workers.
 
 use std::collections::HashMap;
 
@@ -14,6 +19,16 @@ use tokio::runtime::RuntimeFlavor;
 use crate::ExecutionError;
 
 /// Wrapper for blocking async operations in sync contexts.
+///
+/// When a tokio multi-thread runtime is available (the normal production
+/// case -- either from a `spawn_blocking` thread or an async worker),
+/// `block_in_place` + `handle.block_on` is used.  On a `spawn_blocking`
+/// thread (the expected production path), `block_in_place` is a no-op
+/// (tokio >= 1.28) and `handle.block_on` safely drives the future without
+/// starving async workers.
+///
+/// When no tokio runtime is present (e.g. synchronous unit tests), we fall
+/// back to `futures::executor::block_on`.
 fn block_on<F: std::future::Future>(f: F) -> F::Output {
     if let Ok(handle) = tokio::runtime::Handle::try_current()
         && handle.runtime_flavor() == RuntimeFlavor::MultiThread

@@ -81,6 +81,10 @@ where
     /// 3. Executes the batch against the parent state.
     /// 4. Computes the new state root from the execution outcome.
     /// 5. Constructs and returns the new block and its snapshot.
+    ///
+    /// NOTE: This synchronous method calls `executor.execute()` on the calling
+    /// thread.  It is only used in tests.  Production code should use
+    /// `build_proposal_async` which offloads execution to a blocking thread.
     pub fn build_proposal(
         &self,
         parent: &Block,
@@ -126,6 +130,9 @@ where
     }
 
     /// Async variant of [`Self::build_proposal`] that awaits state root computation.
+    ///
+    /// Offloads the synchronous EVM execution to a blocking thread via
+    /// [`tokio::task::spawn_blocking`] to avoid starving async worker threads.
     pub async fn build_proposal_async(
         &self,
         parent: &Block,
@@ -146,10 +153,14 @@ where
             .ok_or(ConsensusError::TimestampOverflow { parent_timestamp: parent.timestamp })?;
         let context = block_context(height, timestamp, prevrandao);
         let txs_bytes: Vec<Bytes> = txs.iter().map(|tx| tx.bytes.clone()).collect();
-        let outcome = self
-            .executor
-            .execute(&parent_snapshot.state, &context, &txs_bytes)
-            .map_err(|e| ConsensusError::Execution(e.to_string()))?;
+
+        let executor = self.executor.clone();
+        let state = parent_snapshot.state.clone();
+        let outcome =
+            tokio::task::spawn_blocking(move || executor.execute(&state, &context, &txs_bytes))
+                .await
+                .map_err(|e| ConsensusError::Execution(format!("spawn_blocking join error: {e}")))?
+                .map_err(|e| ConsensusError::Execution(e.to_string()))?;
 
         let merged_changes =
             self.snapshots.merged_changes(parent_digest, outcome.changes.clone())?;
