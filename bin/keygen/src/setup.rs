@@ -1,6 +1,6 @@
 //! Generates initial configuration for a Kora devnet.
 
-use std::{collections::BTreeMap, fs, path::PathBuf};
+use std::{collections::BTreeMap, fs, io::Write as _, path::PathBuf};
 
 use alloy_primitives::{Address, keccak256};
 use clap::Args;
@@ -118,7 +118,7 @@ pub(crate) fn run(args: SetupArgs) -> Result<()> {
             tracing::info!(node = i, "Generating new identity key");
             let mut seed = [0u8; 32];
             rand::rngs::OsRng.fill_bytes(&mut seed);
-            fs::write(&key_path, seed)?;
+            write_secret_file(&key_path, &seed)?;
             ed25519::PrivateKey::from(ed25519_consensus::SigningKey::from(seed))
         };
 
@@ -154,7 +154,7 @@ pub(crate) fn run(args: SetupArgs) -> Result<()> {
             tracing::info!(node = i, "Generating new secondary identity key");
             let mut seed = [0u8; 32];
             rand::rngs::OsRng.fill_bytes(&mut seed);
-            fs::write(&key_path, seed)?;
+            write_secret_file(&key_path, &seed)?;
             ed25519::PrivateKey::from(ed25519_consensus::SigningKey::from(seed))
         };
 
@@ -208,6 +208,19 @@ pub(crate) fn run(args: SetupArgs) -> Result<()> {
     tracing::info!("  Chain ID:      {}", args.chain_id);
 
     Ok(())
+}
+
+/// Write `data` to `path` with mode `0600` so key material is never world-readable.
+fn write_secret_file(path: &std::path::Path, data: &[u8]) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .wrap_err_with(|| format!("Failed to create secret file {}", path.display()))?;
+    f.write_all(data).wrap_err_with(|| format!("Failed to write secret file {}", path.display()))
 }
 
 #[cfg(test)]

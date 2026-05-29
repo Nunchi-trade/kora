@@ -140,9 +140,19 @@ impl NodeConfig {
                     })?;
                 }
 
-                // Write key to disk
-                std::fs::write(&key_path, seed)
-                    .map_err(|e| ConfigError::Write { path: key_path.clone(), source: e })?;
+                // Write key to disk with restrictive permissions (0600)
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    let mut f = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create(true)
+                        .truncate(true)
+                        .mode(0o600)
+                        .open(&key_path)
+                        .map_err(|e| ConfigError::Write { path: key_path.clone(), source: e })?;
+                    std::io::Write::write_all(&mut f, &seed)
+                        .map_err(|e| ConfigError::Write { path: key_path.clone(), source: e })?;
+                }
 
                 Ok(commonware_cryptography::ed25519::PrivateKey::from(
                     ed25519_consensus::SigningKey::from(seed),

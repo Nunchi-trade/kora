@@ -3,7 +3,7 @@
 //! Generates all BLS12-381 threshold shares using a single trusted dealer.
 //! This is NOT secure for production but allows testing the validator workflow.
 
-use std::{fs, path::PathBuf};
+use std::{fs, io::Write as _, path::PathBuf};
 
 use clap::Args;
 use commonware_codec::{ReadExt, Write as _};
@@ -129,7 +129,7 @@ pub(crate) fn run(args: DkgDealArgs) -> Result<()> {
 
         let share_json = ShareJson { index: share.index.get(), secret: hex::encode(&share_bytes) };
         let share_path = node_dir.join("share.key");
-        fs::write(&share_path, serde_json::to_string_pretty(&share_json)?)?;
+        write_secret_file(&share_path, serde_json::to_string_pretty(&share_json)?.as_bytes())?;
 
         tracing::info!(node = i, "Wrote DKG output and share");
     }
@@ -139,4 +139,17 @@ pub(crate) fn run(args: DkgDealArgs) -> Result<()> {
     tracing::info!("  Quorum (N3f1): {}", quorum);
 
     Ok(())
+}
+
+/// Write `data` to `path` with mode `0600` so key material is never world-readable.
+fn write_secret_file(path: &std::path::Path, data: &[u8]) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .wrap_err_with(|| format!("Failed to create secret file {}", path.display()))?;
+    f.write_all(data).wrap_err_with(|| format!("Failed to write secret file {}", path.display()))
 }

@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{io::Write as _, path::Path};
 
 use commonware_utils::{Faults, N3f1};
 use serde::{Deserialize, Serialize};
@@ -64,7 +64,7 @@ impl DkgOutput {
             ShareJson { index: self.share_index, secret: hex::encode(&self.share_secret) };
 
         let share_path = data_dir.join("share.key");
-        std::fs::write(&share_path, serde_json::to_string_pretty(&share_json)?)?;
+        write_secret_file(&share_path, serde_json::to_string_pretty(&share_json)?.as_bytes())?;
 
         Ok(())
     }
@@ -112,6 +112,19 @@ impl DkgOutput {
     pub fn exists(data_dir: &Path) -> bool {
         data_dir.join("output.json").exists() && data_dir.join("share.key").exists()
     }
+}
+
+/// Write `data` to `path` with mode `0600` so key material is never world-readable.
+fn write_secret_file(path: &Path, data: &[u8]) -> Result<(), DkgError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    f.write_all(data)?;
+    Ok(())
 }
 
 impl From<serde_json::Error> for DkgError {
