@@ -151,7 +151,7 @@ impl TestHarness {
         let sim_control = Arc::new(Mutex::new(sim_control));
 
         // Start all nodes
-        let bootstrap = setup.to_bootstrap();
+        let bootstrap = setup.to_bootstrap(config.chain_id);
         let (nodes, mut finalized_rx) = start_all_nodes(
             &context,
             &sim_control,

@@ -10,6 +10,8 @@ use crate::Tx;
 /// Bootstrap configuration for genesis state and initial transactions.
 #[derive(Clone, Debug)]
 pub struct BootstrapConfig {
+    /// Chain ID declared in the genesis file.
+    pub chain_id: u64,
     /// Initial account allocations (address, balance) for genesis.
     pub genesis_alloc: Vec<(Address, U256)>,
     /// Transactions to execute during bootstrap.
@@ -34,8 +36,12 @@ struct AllocationJson {
 impl BootstrapConfig {
     /// Create a new bootstrap configuration.
     #[must_use]
-    pub const fn new(genesis_alloc: Vec<(Address, U256)>, bootstrap_txs: Vec<Tx>) -> Self {
-        Self { genesis_alloc, bootstrap_txs, genesis_timestamp: 0 }
+    pub const fn new(
+        chain_id: u64,
+        genesis_alloc: Vec<(Address, U256)>,
+        bootstrap_txs: Vec<Tx>,
+    ) -> Self {
+        Self { chain_id, genesis_alloc, bootstrap_txs, genesis_timestamp: 0 }
     }
 
     /// Set the genesis block timestamp.
@@ -49,7 +55,7 @@ impl BootstrapConfig {
     pub fn load(genesis_path: &Path) -> Result<Self, BootstrapError> {
         let content = std::fs::read_to_string(genesis_path)?;
         let genesis: GenesisJson = serde_json::from_str(&content)?;
-        let GenesisJson { timestamp, allocations, .. } = genesis;
+        let GenesisJson { chain_id, timestamp, allocations } = genesis;
 
         let mut genesis_alloc = Vec::with_capacity(allocations.len());
         for alloc in allocations {
@@ -60,7 +66,12 @@ impl BootstrapConfig {
             genesis_alloc.push((address, balance));
         }
 
-        Ok(Self { genesis_alloc, bootstrap_txs: Vec::new(), genesis_timestamp: timestamp })
+        Ok(Self {
+            chain_id,
+            genesis_alloc,
+            bootstrap_txs: Vec::new(),
+            genesis_timestamp: timestamp,
+        })
     }
 }
 
@@ -115,7 +126,8 @@ mod tests {
 
     #[test]
     fn new_defaults_genesis_timestamp_to_zero() {
-        let bootstrap = BootstrapConfig::new(Vec::new(), Vec::new());
+        let bootstrap = BootstrapConfig::new(1337, Vec::new(), Vec::new());
+        assert_eq!(bootstrap.chain_id, 1337);
         assert_eq!(bootstrap.genesis_timestamp, 0);
     }
 
@@ -137,6 +149,7 @@ mod tests {
         let bootstrap = BootstrapConfig::load(&path).expect("load genesis");
         fs::remove_file(path).expect("remove genesis");
 
+        assert_eq!(bootstrap.chain_id, 1337);
         assert_eq!(bootstrap.genesis_timestamp, 1_700_000_000);
         assert_eq!(bootstrap.genesis_alloc.len(), 1);
     }

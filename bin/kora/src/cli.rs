@@ -189,6 +189,14 @@ impl Cli {
             .map_err(|e| eyre::eyre!("Failed to load genesis: {}", e))?;
         tracing::info!(allocations = bootstrap.genesis_alloc.len(), "Loaded genesis configuration");
 
+        if bootstrap.chain_id != config.chain_id {
+            return Err(eyre::eyre!(
+                "genesis.json chain_id ({}) does not match node chain_id ({})",
+                bootstrap.chain_id,
+                config.chain_id
+            ));
+        }
+
         let rpc_addr: std::net::SocketAddr = config.rpc.http_addr.parse().map_err(|err| {
             eyre::eyre!("invalid rpc.http_addr '{}': {}", config.rpc.http_addr, err)
         })?;

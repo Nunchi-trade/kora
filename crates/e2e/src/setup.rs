@@ -212,7 +212,7 @@ impl TestSetup {
     }
 
     /// Convert to bootstrap config.
-    pub fn to_bootstrap(&self) -> BootstrapConfig {
-        BootstrapConfig::new(self.genesis_alloc.clone(), self.bootstrap_txs.clone())
+    pub fn to_bootstrap(&self, chain_id: u64) -> BootstrapConfig {
+        BootstrapConfig::new(chain_id, self.genesis_alloc.clone(), self.bootstrap_txs.clone())
     }
 }
