@@ -276,9 +276,15 @@ impl Cli {
         tracing::warn!("Secondary node is in follower mode - read-only RPC not yet implemented");
 
         let runtime_dir = runtime_storage_directory(&config.data_dir);
-        tracing::info!(runtime_dir = %runtime_dir.display(), "Starting Commonware runtime");
+        tracing::info!(
+            runtime_dir = %runtime_dir.display(),
+            worker_threads = config.worker_threads,
+            "Starting Commonware runtime"
+        );
         let executor = commonware_runtime::tokio::Runner::new(
-            commonware_runtime::tokio::Config::default().with_storage_directory(runtime_dir),
+            commonware_runtime::tokio::Config::default()
+                .with_storage_directory(runtime_dir)
+                .with_worker_threads(config.worker_threads),
         );
         executor.start(|context| async move {
             let mut transport = config

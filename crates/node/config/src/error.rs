@@ -55,6 +55,10 @@ pub enum ConfigError {
     /// Failed to parse participant public key.
     #[error("invalid participant public key bytes")]
     InvalidParticipantKey,
+
+    /// Invalid configuration value.
+    #[error("invalid config value: {0}")]
+    InvalidValue(String),
 }
 
 #[cfg(test)]
@@ -147,5 +151,11 @@ mod tests {
         let debug = format!("{:?}", err);
         assert!(debug.contains("InvalidKeyLength"));
         assert!(debug.contains("24"));
+    }
+
+    #[test]
+    fn test_invalid_value_display() {
+        let err = ConfigError::InvalidValue("worker_threads must be >= 1".to_string());
+        assert_eq!(err.to_string(), "invalid config value: worker_threads must be >= 1");
     }
 }

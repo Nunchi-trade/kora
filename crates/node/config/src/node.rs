@@ -12,6 +12,9 @@ pub const DEFAULT_CHAIN_ID: u64 = 1;
 /// Default data directory.
 pub const DEFAULT_DATA_DIR: &str = "/var/lib/kora";
 
+/// Default cap for worker threads.
+pub const DEFAULT_WORKER_THREADS_CAP: usize = 8;
+
 /// Complete node configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NodeConfig {
@@ -22,6 +25,13 @@ pub struct NodeConfig {
     /// Data directory for persistent storage.
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
+
+    /// Number of tokio async worker threads for the commonware runtime.
+    ///
+    /// Defaults to the number of available CPU cores, capped at 8.
+    /// Set explicitly in config to override.
+    #[serde(default = "default_worker_threads")]
+    pub worker_threads: usize,
 
     /// Consensus configuration.
     #[serde(default)]
@@ -45,6 +55,7 @@ impl Default for NodeConfig {
         Self {
             chain_id: DEFAULT_CHAIN_ID,
             data_dir: PathBuf::from(DEFAULT_DATA_DIR),
+            worker_threads: default_worker_threads(),
             consensus: ConsensusConfig::default(),
             network: NetworkConfig::default(),
             execution: ExecutionConfig::default(),
@@ -54,12 +65,22 @@ impl Default for NodeConfig {
 }
 
 impl NodeConfig {
+    /// Validate configuration values.
+    ///
+    /// Returns an error if any value is out of range.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.worker_threads == 0 {
+            return Err(ConfigError::InvalidValue("worker_threads must be >= 1".to_string()));
+        }
+        Ok(())
+    }
+
     /// Load configuration from a file path, auto-detecting format by extension.
     ///
     /// If the path is `None`, returns the default configuration.
     /// Supported extensions: `.json` for JSON, all others default to TOML.
     pub fn load(path: Option<&Path>) -> Result<Self, ConfigError> {
-        path.map_or_else(
+        let config = path.map_or_else(
             || Ok(Self::default()),
             |p| {
                 let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("toml");
@@ -68,7 +89,9 @@ impl NodeConfig {
                     _ => Self::from_toml_file(p),
                 }
             },
-        )
+        )?;
+        config.validate()?;
+        Ok(config)
     }
 
     /// Load configuration from a TOML file.
@@ -179,6 +202,12 @@ fn default_data_dir() -> PathBuf {
     PathBuf::from(DEFAULT_DATA_DIR)
 }
 
+fn default_worker_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get().min(DEFAULT_WORKER_THREADS_CAP))
+        .unwrap_or(4)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,6 +217,38 @@ mod tests {
         let config = NodeConfig::default();
         assert_eq!(config.chain_id, DEFAULT_CHAIN_ID);
         assert_eq!(config.data_dir, PathBuf::from(DEFAULT_DATA_DIR));
+        assert!(config.worker_threads >= 1);
+        assert!(config.worker_threads <= DEFAULT_WORKER_THREADS_CAP);
+    }
+
+    #[test]
+    fn test_worker_threads_default_from_toml() {
+        // A TOML config without worker_threads should get the default.
+        let config = NodeConfig::from_toml("chain_id = 1\n").unwrap();
+        assert!(config.worker_threads >= 1);
+        assert!(config.worker_threads <= DEFAULT_WORKER_THREADS_CAP);
+    }
+
+    #[test]
+    fn test_worker_threads_explicit() {
+        let config = NodeConfig::from_toml("worker_threads = 6\n").unwrap();
+        assert_eq!(config.worker_threads, 6);
+    }
+
+    #[test]
+    fn test_worker_threads_zero_rejected() {
+        let config = NodeConfig::from_toml("worker_threads = 0\n").unwrap();
+        let err = config.validate();
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("worker_threads"));
+    }
+
+    #[test]
+    fn test_load_rejects_zero_worker_threads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "worker_threads = 0\n").unwrap();
+        assert!(NodeConfig::load(Some(&path)).is_err());
     }
 
     #[test]

@@ -793,9 +793,16 @@ impl ProductionRunner {
         use kora_transport::NetworkConfigExt;
 
         let runtime_dir = runtime_storage_directory(&config.data_dir);
-        info!(runtime_dir = %runtime_dir.display(), "Starting Commonware runtime");
-        let executor =
-            cw_tokio::Runner::new(cw_tokio::Config::default().with_storage_directory(runtime_dir));
+        info!(
+            runtime_dir = %runtime_dir.display(),
+            worker_threads = config.worker_threads,
+            "Starting Commonware runtime"
+        );
+        let executor = cw_tokio::Runner::new(
+            cw_tokio::Config::default()
+                .with_storage_directory(runtime_dir)
+                .with_worker_threads(config.worker_threads),
+        );
         executor.start(|context| async move {
             let validator_key = config
                 .validator_key()
