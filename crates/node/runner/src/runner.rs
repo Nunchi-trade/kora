@@ -709,8 +709,11 @@ fn spawn_task_watchdog(context: &cw_tokio::Context, name: &'static str, handle: 
                 "panicked (Error::Exited)"
             }
             Err(commonware_runtime::Error::Closed) => {
-                warn!(task = name, "critical task terminated because the runtime context was shut down");
-                "runtime context closed"
+                // Runtime context was shut down (e.g. SIGTERM). This is normal
+                // shutdown -- do NOT abort, just let the process exit cleanly so
+                // any in-progress cleanup (QMDB flush, log drain) can complete.
+                info!(task = name, "task stopped (runtime context closed during shutdown)");
+                return;
             }
             Err(ref e) => {
                 error!(task = name, error = %e, error_debug = ?e, "critical task failed with unexpected error");
@@ -825,7 +828,15 @@ impl ProductionRunner {
                 _ = tokio::signal::ctrl_c() => {},
                 _ = sigterm.recv() => {},
             }
-            info!("Received shutdown signal, stopping...");
+            info!("Received shutdown signal, initiating graceful shutdown...");
+
+            // Allow a brief window for in-flight QMDB commits and log drains
+            // to complete before the runtime drops all task contexts. The
+            // watchdog no longer calls abort() on `Error::Closed`, so these
+            // tasks will terminate cleanly when their contexts are dropped.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+
+            info!("Graceful shutdown complete");
             Ok::<(), RunnerError>(())
         })
     }
@@ -1132,7 +1143,11 @@ impl NodeRunner for ProductionRunner {
             if let Some(sender) = mempool_broadcast.clone() {
                 rpc = rpc.with_mempool_broadcast(sender);
             }
-            drop(rpc.start());
+            // Keep the RPC handle alive so the HTTP and JSON-RPC tasks are not
+            // cancelled immediately.  The handle is dropped when `run()` returns
+            // (i.e. after the signal handler completes), which cleanly stops the
+            // RPC servers during shutdown.
+            let _rpc_handle = rpc.start();
             info!(addr = %addr, "RPC server started with live state provider");
 
             spawn_partition_monitor(node_state.clone(), context.clone());
