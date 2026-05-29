@@ -335,6 +335,7 @@ mod tests {
             gas_used: 21_000,
             base_fee_per_gas: Some(1_000_000_000),
             mix_hash: B256::ZERO,
+            logs_bloom: Bloom::ZERO,
             size: 508,
             transaction_hashes: vec![],
         }
