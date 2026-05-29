@@ -14,7 +14,8 @@ use std::{
 };
 
 use alloy_consensus::{
-    Transaction as _, TxEnvelope,
+    ReceiptEnvelope, ReceiptWithBloom, Transaction as _, TxEnvelope,
+    proofs::{calculate_receipt_root, calculate_transaction_root},
     transaction::{SignerRecoverable as _, to_eip155_value},
 };
 use alloy_eips::eip2718::Decodable2718 as _;
@@ -1013,11 +1014,42 @@ fn index_finalized_block(
     let transaction_hashes = block.txs.iter().map(|tx| keccak256(&tx.bytes)).collect::<Vec<_>>();
     let tx_metadata = block.txs.iter().map(|tx| decode_tx_metadata(&tx.bytes)).collect::<Vec<_>>();
 
+    // Compute the transactions trie root from the raw EIP-2718 encoded transactions.
+    let tx_envelopes: Vec<TxEnvelope> = block
+        .txs
+        .iter()
+        .filter_map(|tx| TxEnvelope::decode_2718(&mut tx.bytes.as_ref()).ok())
+        .collect();
+    let transactions_root = calculate_transaction_root(&tx_envelopes);
+
+    // Compute the receipts trie root from the execution receipts.
+    let receipt_envelopes: Vec<ReceiptEnvelope> = outcome
+        .receipts
+        .iter()
+        .zip(tx_metadata.iter())
+        .filter_map(|(receipt, metadata)| {
+            let metadata = metadata.as_ref()?;
+            let bloom = logs_bloom(receipt.logs());
+            let rwb = ReceiptWithBloom::new(receipt.receipt.clone(), bloom);
+            Some(match metadata.tx_type {
+                0 => ReceiptEnvelope::Legacy(rwb),
+                1 => ReceiptEnvelope::Eip2930(rwb),
+                2 => ReceiptEnvelope::Eip1559(rwb),
+                3 => ReceiptEnvelope::Eip4844(rwb),
+                4 => ReceiptEnvelope::Eip7702(rwb),
+                _ => ReceiptEnvelope::Legacy(rwb),
+            })
+        })
+        .collect();
+    let receipts_root = calculate_receipt_root(&receipt_envelopes);
+
     let indexed_block = IndexedBlock {
         hash: block_hash,
         number: block.height,
         parent_hash: block.parent.0,
         state_root: block.state_root.0,
+        transactions_root,
+        receipts_root,
         timestamp: block.timestamp,
         gas_limit: block_context.header.gas_limit,
         gas_used: outcome.gas_used,

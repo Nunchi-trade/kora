@@ -281,8 +281,8 @@ impl<S> IndexedStateProvider<S> {
             sha3_uncles: EMPTY_UNCLE_HASH,
             number: U64::from(block.number),
             state_root: block.state_root,
-            transactions_root: B256::ZERO,
-            receipts_root: B256::ZERO,
+            transactions_root: block.transactions_root,
+            receipts_root: block.receipts_root,
             // EIP-1474: logsBloom must be a 256-byte (512 hex char) value.
             // An empty `Bytes` breaks client-side deserializers that expect
             // a fixed-size bloom.
@@ -512,6 +512,8 @@ mod tests {
             number,
             parent_hash: B256::ZERO,
             state_root: B256::ZERO,
+            transactions_root: B256::ZERO,
+            receipts_root: B256::ZERO,
             timestamp: 1000 + number,
             gas_limit: 30_000_000,
             gas_used: 21_000,

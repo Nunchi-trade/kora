@@ -32,7 +32,7 @@ use futures::StreamExt;
 use kora_consensus::BlockExecution;
 use kora_domain::{Block, BlockCfg, BootstrapConfig, ConsensusDigest, LedgerEvent, Tx, TxCfg};
 use kora_executor::{BlockContext, RevmExecutor};
-use kora_indexer::{BlockIndex, IndexedBlock};
+use kora_indexer::{BlockIndex, EMPTY_ROOT_HASH, IndexedBlock};
 use kora_ledger::{LedgerService, LedgerView, LiveState};
 use kora_marshal::{ArchiveInitializer, BroadcastInitializer, PeerInitializer};
 use kora_metrics::AppMetrics;
@@ -163,6 +163,8 @@ fn seed_genesis_block_index(index: &BlockIndex, genesis: &Block, gas_limit: u64)
             number: 0,
             parent_hash: genesis.parent.0,
             state_root: genesis.state_root.0,
+            transactions_root: EMPTY_ROOT_HASH,
+            receipts_root: EMPTY_ROOT_HASH,
             timestamp: genesis.timestamp,
             gas_limit,
             gas_used: 0,
@@ -191,6 +193,8 @@ fn index_recovered_block(
         number: block.height,
         parent_hash: block.parent.0,
         state_root: block.state_root.0,
+        transactions_root: EMPTY_ROOT_HASH,
+        receipts_root: EMPTY_ROOT_HASH,
         timestamp: block_context.header.timestamp,
         gas_limit: block_context.header.gas_limit,
         gas_used: 0,
