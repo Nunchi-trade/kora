@@ -284,6 +284,11 @@ async fn handle_finalized_update<E, P>(
             if let Ok((Some(outcome), Some(block_context))) = result.as_ref() {
                 if let Some(index) = block_index.as_ref() {
                     index_finalized_block(index, &block, block_context, outcome);
+                    // Prune old blocks to bound memory usage (see issue #262).
+                    let min_height = block.height.saturating_sub(BlockIndex::MAX_RETAINED_BLOCKS);
+                    if min_height > 0 {
+                        index.prune_before(min_height);
+                    }
                 }
 
                 // Record selfdestructed addresses for future GC.

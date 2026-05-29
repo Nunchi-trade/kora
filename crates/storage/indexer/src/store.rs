@@ -32,6 +32,13 @@ impl Default for BlockIndex {
 }
 
 impl BlockIndex {
+    /// Maximum number of blocks to retain in the index.
+    ///
+    /// 10,000 blocks at 33 blocks/s is roughly 5 minutes of history.
+    /// This must exceed 256 so the EVM `BLOCKHASH` opcode (served by
+    /// [`Self::recent_block_hashes`]) always has a full window available.
+    pub const MAX_RETAINED_BLOCKS: u64 = 10_000;
+
     /// Creates a new empty block index.
     #[must_use]
     pub fn new() -> Self {
@@ -103,6 +110,67 @@ impl BlockIndex {
                 Err(c) => current = c,
             }
         }
+    }
+
+    /// Removes all index entries for blocks with `number < min_block_number`.
+    ///
+    /// This bounds memory by evicting blocks, transactions, receipts, and logs
+    /// that are older than the retention window. Lock ordering matches
+    /// [`Self::insert_block`] (block-level maps first, then tx-level maps) to
+    /// avoid deadlocks.
+    pub fn prune_before(&self, min_block_number: u64) {
+        // Phase 1: collect block numbers, hashes, and tx hashes to prune
+        // under short-lived read locks.
+        let hashes_to_remove: Vec<(u64, B256)> = {
+            let by_number = self.blocks_by_number.read();
+            by_number
+                .iter()
+                .filter(|(num, _)| **num < min_block_number)
+                .map(|(num, hash)| (*num, *hash))
+                .collect()
+        };
+
+        if hashes_to_remove.is_empty() {
+            return;
+        }
+
+        let tx_hashes: Vec<B256> = {
+            let by_hash = self.blocks_by_hash.read();
+            hashes_to_remove
+                .iter()
+                .filter_map(|(_, h)| by_hash.get(h))
+                .flat_map(|b| b.transaction_hashes.iter().copied())
+                .collect()
+        };
+
+        // Phase 2: remove block-level entries under write locks.
+        {
+            let mut by_number = self.blocks_by_number.write();
+            let mut by_hash = self.blocks_by_hash.write();
+            let mut logs = self.logs_by_block.write();
+            for &(num, hash) in &hashes_to_remove {
+                by_number.remove(&num);
+                by_hash.remove(&hash);
+                logs.remove(&hash);
+            }
+        }
+
+        // Phase 3: remove transaction-level entries under write locks.
+        {
+            let mut txs = self.transactions.write();
+            let mut rcpts = self.receipts.write();
+            for h in &tx_hashes {
+                txs.remove(h);
+                rcpts.remove(h);
+            }
+        }
+
+        debug!(
+            min_block_number,
+            pruned_blocks = hashes_to_remove.len(),
+            pruned_txs = tx_hashes.len(),
+            "pruned old index entries",
+        );
     }
 
     /// Gets a block by its hash.
@@ -511,5 +579,88 @@ mod tests {
         assert!(hashes.contains_key(&1));
         assert!(hashes.contains_key(&2));
         assert!(!hashes.contains_key(&3));
+    }
+
+    #[test]
+    fn test_prune_before_removes_old_blocks() {
+        let index = BlockIndex::new();
+
+        // Insert blocks 1..=5, each with one tx and one receipt.
+        for i in 1..=5u64 {
+            let block_hash = B256::repeat_byte(i as u8);
+            let tx_hash = B256::repeat_byte((100 + i) as u8);
+            let mut block = create_test_block(i, block_hash);
+            block.transaction_hashes = vec![tx_hash];
+            let tx = create_test_tx(tx_hash, block_hash, i);
+            let receipt = create_test_receipt(tx_hash, block_hash, i);
+            index.insert_block(block, vec![tx], vec![receipt]);
+        }
+
+        assert_eq!(index.block_count(), 5);
+        assert_eq!(index.transaction_count(), 5);
+        assert_eq!(index.receipt_count(), 5);
+
+        // Prune everything below block 3 (removes blocks 1, 2).
+        index.prune_before(3);
+
+        assert_eq!(index.block_count(), 3);
+        assert_eq!(index.transaction_count(), 3);
+        assert_eq!(index.receipt_count(), 3);
+
+        // Blocks 1 and 2 are gone.
+        assert!(index.get_block_by_number(1).is_none());
+        assert!(index.get_block_by_number(2).is_none());
+
+        // Block 3, 4, 5 remain.
+        assert!(index.get_block_by_number(3).is_some());
+        assert!(index.get_block_by_number(4).is_some());
+        assert!(index.get_block_by_number(5).is_some());
+
+        // Head block unchanged.
+        assert_eq!(index.head_block_number(), 5);
+
+        // Pruned tx hashes are gone.
+        assert!(index.get_transaction(&B256::repeat_byte(101)).is_none());
+        assert!(index.get_transaction(&B256::repeat_byte(102)).is_none());
+
+        // Retained tx hashes still present.
+        assert!(index.get_transaction(&B256::repeat_byte(103)).is_some());
+    }
+
+    #[test]
+    fn test_prune_before_noop_when_nothing_to_prune() {
+        let index = BlockIndex::new();
+
+        index.insert_block(create_test_block(5, B256::repeat_byte(5)), vec![], vec![]);
+
+        // min_block_number <= all stored blocks: should be a no-op.
+        index.prune_before(1);
+        assert_eq!(index.block_count(), 1);
+
+        // min_block_number = 0: also a no-op.
+        index.prune_before(0);
+        assert_eq!(index.block_count(), 1);
+    }
+
+    #[test]
+    fn test_prune_preserves_recent_block_hashes_window() {
+        let index = BlockIndex::new();
+
+        // Insert 300 blocks (more than the 256 BLOCKHASH window).
+        for i in 0..300u64 {
+            index.insert_block(
+                create_test_block(i, B256::repeat_byte((i % 256) as u8)),
+                vec![],
+                vec![],
+            );
+        }
+
+        // Prune old blocks, keeping only 270+ (simulates a retention window).
+        index.prune_before(270);
+
+        // recent_block_hashes(300) looks back 256 blocks (44..300).
+        // Only blocks 270..300 remain, so we should get exactly 30 entries.
+        let hashes = index.recent_block_hashes(300);
+        assert_eq!(hashes.len(), 30);
     }
 }
