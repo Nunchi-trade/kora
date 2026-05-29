@@ -2,7 +2,10 @@ use std::{
     collections::{BTreeMap, HashSet},
     ffi::OsString,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -84,7 +87,8 @@ type CertArchive = Finalization<ThresholdScheme, ConsensusDigest>;
 type MarshalMailbox = Mailbox<ThresholdScheme, Standard<Block>>;
 type NodeStateRptr = NodeStateReporter<ThresholdScheme>;
 
-/// A no-op [`Blocker`] that never permanently bans peers.
+/// A [`Blocker`] that suppresses peer bans during catch-up but delegates to
+/// the real oracle blocker during normal operation.
 ///
 /// When a restarted node catches up, the resolver's `verify_block()` may return
 /// `false` because parent state snapshots are missing (not because the peer sent
@@ -92,31 +96,48 @@ type NodeStateRptr = NodeStateReporter<ThresholdScheme>;
 /// that peer, and in a 4-validator cluster all 3 peers get blocked within
 /// milliseconds, making catch-up impossible.
 ///
-/// This struct implements [`Blocker`] with an empty `block()` method so that
-/// the resolver and simplex engine never permanently ban peers for transient
-/// verification failures. The P2P oracle still handles peer *discovery* and
-/// *tracking*; only the punitive blocking path is disabled.
+/// `GraduatedBlocker` solves this by checking a shared `catching_up` flag:
+/// - **During catch-up** (`catching_up = true`): block requests are logged at
+///   `warn` level but suppressed, allowing the resolver to retry with other
+///   peers.
+/// - **During normal operation** (`catching_up = false`): block requests are
+///   forwarded to the underlying oracle, which disconnects the peer and
+///   prevents future connections.
 ///
-/// This is a Kora-side workaround. The ideal upstream fix would add
-/// retry/back-off semantics to the resolver so it can distinguish transient
-/// failures from genuinely Byzantine behaviour.
+/// The `catching_up` flag is set to `true` when the node is recovering from a
+/// restart (i.e., `recovered_head_height` is `Some`) and cleared to `false`
+/// for fresh genesis starts. A future improvement should wire a "backfill
+/// complete" signal from the resolver to clear this flag once historical block
+/// sync finishes.
 #[derive(Clone, Debug)]
-struct NoOpBlocker<P> {
-    _marker: std::marker::PhantomData<P>,
+struct GraduatedBlocker<P: commonware_cryptography::PublicKey> {
+    oracle: commonware_p2p::authenticated::discovery::Oracle<P>,
+    catching_up: Arc<AtomicBool>,
 }
 
-impl<P> NoOpBlocker<P> {
-    const fn new() -> Self {
-        Self { _marker: std::marker::PhantomData }
+impl<P: commonware_cryptography::PublicKey> GraduatedBlocker<P> {
+    const fn new(
+        oracle: commonware_p2p::authenticated::discovery::Oracle<P>,
+        catching_up: Arc<AtomicBool>,
+    ) -> Self {
+        Self { oracle, catching_up }
     }
 }
 
-impl<P: commonware_cryptography::PublicKey> Blocker for NoOpBlocker<P> {
+impl<P: commonware_cryptography::PublicKey> Blocker for GraduatedBlocker<P> {
     type PublicKey = P;
 
     fn block(&mut self, peer: Self::PublicKey) -> impl std::future::Future<Output = ()> + Send {
-        warn!(?peer, "NoOpBlocker: ignoring block request for peer (catch-up safe)");
-        async {}
+        let catching_up = self.catching_up.load(Ordering::Relaxed);
+        let mut oracle = self.oracle.clone();
+        async move {
+            if catching_up {
+                warn!(?peer, "GraduatedBlocker: suppressing block request during catch-up");
+            } else {
+                warn!(?peer, "GraduatedBlocker: blocking Byzantine peer via oracle");
+                oracle.block(peer).await;
+            }
+        }
     }
 }
 
@@ -1186,11 +1207,19 @@ impl NodeRunner for ProductionRunner {
 
         let scheme_provider = ConstantSchemeProvider::from(self.scheme.clone());
 
+        // Suppress resolver peer-bans during catch-up to avoid blocking peers
+        // that serve historical data which fails local verification due to
+        // missing parent snapshots. The simplex engine uses the real oracle
+        // blocker unconditionally since it only bans for genuine equivocation.
+        let resolver_catching_up = Arc::new(AtomicBool::new(recovered_head_height.is_some()));
+        let resolver_blocker =
+            GraduatedBlocker::new(transport.oracle.clone(), resolver_catching_up);
+
         let resolver = PeerInitializer::init::<_, _, _, Block, _, _, _>(
             &context.with_label("resolver"),
             my_pk.clone(),
             transport.oracle.clone(),
-            NoOpBlocker::<Peer>::new(),
+            resolver_blocker,
             transport.marshal.backfill,
         );
 
@@ -1258,7 +1287,7 @@ impl NodeRunner for ProductionRunner {
             simplex::Config {
                 scheme: self.scheme.clone(),
                 elector: Random,
-                blocker: NoOpBlocker::<Peer>::new(),
+                blocker: transport.oracle.clone(),
                 automaton: marshaled.clone(),
                 relay: marshaled,
                 reporter,
