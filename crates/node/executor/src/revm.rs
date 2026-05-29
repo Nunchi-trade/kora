@@ -716,10 +716,11 @@ fn extract_changes(state: &EvmState) -> ChangeSet {
             continue;
         }
 
-        // Extract storage changes
+        // Extract storage changes (skip read-only SLOAD slots)
         let storage: BTreeMap<U256, U256> = account
             .storage
             .iter()
+            .filter(|(_, v)| v.is_changed())
             .map(|(k, v): (&U256, &EvmStorageSlot)| (*k, v.present_value()))
             .collect();
 

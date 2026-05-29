@@ -221,8 +221,12 @@ where
                 continue;
             }
 
-            let storage: BTreeMap<U256, U256> =
-                account.storage.iter().map(|(k, v)| (*k, v.present_value())).collect();
+            let storage: BTreeMap<U256, U256> = account
+                .storage
+                .iter()
+                .filter(|(_, v)| v.is_changed())
+                .map(|(k, v)| (*k, v.present_value()))
+                .collect();
 
             let code = account.info.code.as_ref().map(|c| c.bytes().to_vec());
 
