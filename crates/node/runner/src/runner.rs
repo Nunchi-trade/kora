@@ -543,6 +543,7 @@ impl From<ThresholdScheme> for ConstantSchemeProvider {
 #[derive(Clone, Debug)]
 struct RevmContextProvider {
     gas_limit: u64,
+    fee_recipient: Address,
     block_index: Arc<BlockIndex>,
 }
 
@@ -559,7 +560,7 @@ impl BlockContextProvider for RevmContextProvider {
             number: block.height,
             timestamp: block.timestamp,
             gas_limit: self.gas_limit,
-            beneficiary: Address::ZERO,
+            beneficiary: self.fee_recipient,
             base_fee_per_gas: Some(kora_config::INITIAL_BASE_FEE),
             ..Default::default()
         };
@@ -1038,7 +1039,9 @@ impl NodeRunner for ProductionRunner {
             (None, None)
         };
 
-        let context_provider = RevmContextProvider { gas_limit, block_index: block_index.clone() };
+        let fee_recipient = config.execution.fee_recipient.unwrap_or(Address::ZERO);
+        let context_provider =
+            RevmContextProvider { gas_limit, fee_recipient, block_index: block_index.clone() };
         let recovered_head_height = recover_finalized_state(
             &ledger,
             &block_index,
@@ -1083,8 +1086,12 @@ impl NodeRunner for ProductionRunner {
             // up to 256 blocks behind head).
             let live_state = LiveState::new(ledger.clone());
             let rpc_executor = Arc::new(RevmExecutor::new(self.chain_id));
-            let indexed_provider =
-                kora_rpc::IndexedStateProvider::new(block_index.clone(), live_state, rpc_executor);
+            let indexed_provider = kora_rpc::IndexedStateProvider::new(
+                block_index.clone(),
+                live_state,
+                rpc_executor,
+                fee_recipient,
+            );
             let tx_ledger = ledger.clone();
             let chain_id = self.chain_id;
             let tx_pool = txpool.clone();
@@ -1274,6 +1281,7 @@ impl NodeRunner for ProductionRunner {
             executor,
             block_cfg.max_txs,
             gas_limit,
+            fee_recipient,
         );
         app = app.with_metrics(app_metrics.clone());
         if let Some((height, _)) = recovered_head_height {

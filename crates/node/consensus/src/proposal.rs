@@ -12,12 +12,17 @@ use tracing::warn;
 
 use crate::{ConsensusError, Digest, Mempool, Snapshot, SnapshotStore, TxId};
 
-fn block_context(height: u64, timestamp: u64, prevrandao: B256) -> BlockContext {
+fn block_context(
+    height: u64,
+    timestamp: u64,
+    prevrandao: B256,
+    fee_recipient: Address,
+) -> BlockContext {
     let header = Header {
         number: height,
         timestamp,
         gas_limit: kora_config::DEFAULT_GAS_LIMIT,
-        beneficiary: Address::ZERO,
+        beneficiary: fee_recipient,
         base_fee_per_gas: Some(kora_config::INITIAL_BASE_FEE),
         ..Default::default()
     };
@@ -40,6 +45,8 @@ pub struct ProposalBuilder<S, M, SS, E> {
     executor: E,
     /// Maximum transactions per block.
     max_txs: usize,
+    /// Address that receives priority fees (tips).
+    fee_recipient: Address,
 }
 
 impl<S, M, SS, E> ProposalBuilder<S, M, SS, E>
@@ -61,7 +68,23 @@ where
     /// * `snapshots` - Snapshot store for parent state lookup.
     /// * `executor` - Block executor for transaction execution.
     pub const fn new(state: S, mempool: M, snapshots: SS, executor: E) -> Self {
-        Self { state, mempool, snapshots, executor, max_txs: Self::DEFAULT_MAX_TXS }
+        Self {
+            state,
+            mempool,
+            snapshots,
+            executor,
+            max_txs: Self::DEFAULT_MAX_TXS,
+            fee_recipient: Address::ZERO,
+        }
+    }
+
+    /// Set the fee recipient address.
+    ///
+    /// Defaults to [`Address::ZERO`] (burns priority fees).
+    #[must_use]
+    pub const fn with_fee_recipient(mut self, fee_recipient: Address) -> Self {
+        self.fee_recipient = fee_recipient;
+        self
     }
 
     /// Set the maximum number of transactions per block.
@@ -103,7 +126,7 @@ where
         let height = parent.height + 1;
         let timestamp = Block::next_timestamp(now_secs, parent.timestamp)
             .ok_or(ConsensusError::TimestampOverflow { parent_timestamp: parent.timestamp })?;
-        let context = block_context(height, timestamp, prevrandao);
+        let context = block_context(height, timestamp, prevrandao, self.fee_recipient);
         let txs_bytes: Vec<Bytes> = txs.iter().map(|tx| tx.bytes.clone()).collect();
         let outcome = self
             .executor
@@ -151,7 +174,7 @@ where
         let height = parent.height + 1;
         let timestamp = Block::next_timestamp(now_secs, parent.timestamp)
             .ok_or(ConsensusError::TimestampOverflow { parent_timestamp: parent.timestamp })?;
-        let context = block_context(height, timestamp, prevrandao);
+        let context = block_context(height, timestamp, prevrandao, self.fee_recipient);
         let txs_bytes: Vec<Bytes> = txs.iter().map(|tx| tx.bytes.clone()).collect();
 
         let executor = self.executor.clone();

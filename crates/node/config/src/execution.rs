@@ -1,5 +1,6 @@
 //! Execution configuration.
 
+use alloy_primitives::Address;
 use serde::{Deserialize, Serialize};
 
 /// Default gas limit per block.
@@ -19,16 +20,54 @@ pub struct ExecutionConfig {
     /// Maximum gas per block.
     #[serde(default = "default_gas_limit")]
     pub gas_limit: u64,
+
+    /// Address that receives priority fees (tips) from transactions.
+    ///
+    /// When set, this address is used as the `beneficiary` in the block
+    /// header, causing EIP-1559 priority fees to be credited to it.
+    /// When `None` (the default), `Address::ZERO` is used, which
+    /// effectively burns all priority fees.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_address",
+        deserialize_with = "deserialize_optional_address"
+    )]
+    pub fee_recipient: Option<Address>,
 }
 
 impl Default for ExecutionConfig {
     fn default() -> Self {
-        Self { gas_limit: DEFAULT_GAS_LIMIT }
+        Self { gas_limit: DEFAULT_GAS_LIMIT, fee_recipient: None }
     }
 }
 
 const fn default_gas_limit() -> u64 {
     DEFAULT_GAS_LIMIT
+}
+
+fn serialize_optional_address<S>(addr: &Option<Address>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match addr {
+        Some(a) => serializer.serialize_str(&format!("{a:#x}")),
+        None => serializer.serialize_none(),
+    }
+}
+
+fn deserialize_optional_address<'de, D>(deserializer: D) -> Result<Option<Address>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    opt.map_or_else(
+        || Ok(None),
+        |s| {
+            let s = s.trim();
+            s.parse::<Address>().map(Some).map_err(serde::de::Error::custom)
+        },
+    )
 }
 
 #[cfg(test)]
@@ -39,11 +78,12 @@ mod tests {
     fn test_default_execution_config() {
         let config = ExecutionConfig::default();
         assert_eq!(config.gas_limit, DEFAULT_GAS_LIMIT);
+        assert_eq!(config.fee_recipient, None);
     }
 
     #[test]
     fn test_execution_config_serde_roundtrip() {
-        let config = ExecutionConfig { gas_limit: 300_000_000 };
+        let config = ExecutionConfig { gas_limit: 300_000_000, fee_recipient: None };
         let serialized = serde_json::to_string(&config).expect("serialize");
         let deserialized: ExecutionConfig = serde_json::from_str(&serialized).expect("deserialize");
         assert_eq!(config, deserialized);
@@ -51,7 +91,7 @@ mod tests {
 
     #[test]
     fn test_execution_config_toml_roundtrip() {
-        let config = ExecutionConfig { gas_limit: 150_000_000 };
+        let config = ExecutionConfig { gas_limit: 150_000_000, fee_recipient: None };
         let serialized = toml::to_string(&config).expect("serialize toml");
         let deserialized: ExecutionConfig = toml::from_str(&serialized).expect("deserialize toml");
         assert_eq!(config, deserialized);
@@ -61,6 +101,7 @@ mod tests {
     fn test_execution_config_serde_defaults() {
         let config: ExecutionConfig = serde_json::from_str("{}").expect("deserialize");
         assert_eq!(config.gas_limit, DEFAULT_GAS_LIMIT);
+        assert_eq!(config.fee_recipient, None);
     }
 
     #[test]
@@ -68,6 +109,7 @@ mod tests {
         let config: ExecutionConfig =
             serde_json::from_str(r#"{"gas_limit": 10000000}"#).expect("deserialize");
         assert_eq!(config.gas_limit, 10_000_000);
+        assert_eq!(config.fee_recipient, None);
     }
 
     #[test]
@@ -77,8 +119,34 @@ mod tests {
 
     #[test]
     fn test_execution_config_clone_and_eq() {
-        let config = ExecutionConfig { gas_limit: 999 };
+        let config = ExecutionConfig { gas_limit: 999, fee_recipient: None };
         assert_eq!(config, config.clone());
         assert_ne!(config, ExecutionConfig::default());
+    }
+
+    #[test]
+    fn test_fee_recipient_json_roundtrip() {
+        let addr = "0xdead000000000000000000000000000000000001".parse::<Address>().unwrap();
+        let config = ExecutionConfig { gas_limit: DEFAULT_GAS_LIMIT, fee_recipient: Some(addr) };
+        let serialized = serde_json::to_string(&config).expect("serialize");
+        assert!(serialized.contains("0xdead"));
+        let deserialized: ExecutionConfig = serde_json::from_str(&serialized).expect("deserialize");
+        assert_eq!(config, deserialized);
+    }
+
+    #[test]
+    fn test_fee_recipient_toml_roundtrip() {
+        let addr = "0xdead000000000000000000000000000000000001".parse::<Address>().unwrap();
+        let config = ExecutionConfig { gas_limit: DEFAULT_GAS_LIMIT, fee_recipient: Some(addr) };
+        let serialized = toml::to_string(&config).expect("serialize toml");
+        let deserialized: ExecutionConfig = toml::from_str(&serialized).expect("deserialize toml");
+        assert_eq!(config, deserialized);
+    }
+
+    #[test]
+    fn test_fee_recipient_none_omitted_from_json() {
+        let config = ExecutionConfig::default();
+        let serialized = serde_json::to_string(&config).expect("serialize");
+        assert!(!serialized.contains("fee_recipient"));
     }
 }
