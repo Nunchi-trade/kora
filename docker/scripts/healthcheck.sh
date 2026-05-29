@@ -4,7 +4,8 @@
 # Modes (set via HEALTHCHECK_MODE env var):
 #   dkg   - DKG ceremony completed (share.key + output.json exist)
 #   p2p   - P2P port is listening
-#   ready - RPC responsive AND chain is making progress (stall detection)
+#   ready - RPC responsive AND chain is making progress AND consensus
+#           participation is verified via kora_nodeStatus
 #
 # Stall detection (ready mode):
 #   On each invocation, the script fetches eth_blockNumber and compares it
@@ -17,15 +18,30 @@
 #   A grace period of HEALTHCHECK_GRACE_BLOCKS=0 means any single stalled
 #   check increments the counter.  Default threshold is 6 consecutive stalls
 #   (at 30s interval = 3 minutes of no progress before unhealthy).
+#
+# Consensus participation check (ready mode):
+#   After the block-number stall check, queries kora_nodeStatus to verify:
+#   1. The node has sufficient peers for BFT quorum (partitionStatus != "partitioned")
+#   2. The node's finalized block count is advancing (not just serving stale RPC data)
+#   These checks detect nodes that appear alive via RPC but are disconnected
+#   from consensus — a blind spot in the original eth_blockNumber-only check.
+#
+#   The finalized-count stall check uses the same threshold as the block-number
+#   check so that both signals trigger unhealthy at the same pace.
 set -e
 
 MODE="${HEALTHCHECK_MODE:-p2p}"
 STALL_THRESHOLD="${HEALTHCHECK_STALL_THRESHOLD:-6}"
 RPC_TIMEOUT="${HEALTHCHECK_RPC_TIMEOUT:-8}"
+# Minimum peers required for health. Default 0 disables the absolute floor;
+# quorum is still enforced via partitionStatus from kora_nodeStatus.
+MIN_PEERS="${HEALTHCHECK_MIN_PEERS:-0}"
 
 # Persistent state files (on tmpfs, survives across checks but not restarts)
 BLOCK_FILE="/tmp/healthcheck_block"
 STALL_FILE="/tmp/healthcheck_stall_count"
+FINALIZED_FILE="/tmp/healthcheck_finalized"
+FINALIZED_STALL_FILE="/tmp/healthcheck_finalized_stall"
 
 case "$MODE" in
     dkg)
@@ -77,6 +93,67 @@ case "$MODE" in
         if [[ "$STALL_COUNT" -ge "$STALL_THRESHOLD" ]]; then
             echo "UNHEALTHY: chain stalled at block $BLOCK_DEC for $STALL_COUNT consecutive checks" >&2
             exit 1
+        fi
+
+        # Step 4: Consensus participation — query kora_nodeStatus.
+        # This is a soft check: if the RPC method is unavailable (e.g. older
+        # binary, secondary node), we skip gracefully and rely on the
+        # eth_blockNumber stall check above.
+        STATUS=$(curl -sf --max-time "$RPC_TIMEOUT" -X POST http://localhost:8545 \
+            -H 'Content-Type: application/json' \
+            -d '{"jsonrpc":"2.0","method":"kora_nodeStatus","params":[],"id":2}' 2>/dev/null) || true
+
+        if [[ -n "$STATUS" ]]; then
+            # Parse fields from the kora_nodeStatus response.
+            # jq exits 0 even on null, so we check for empty strings.
+            PARTITION=$(echo "$STATUS" | jq -r '.result.partitionStatus // empty' 2>/dev/null) || true
+            PEER_COUNT=$(echo "$STATUS" | jq -r '.result.peerCount // empty' 2>/dev/null) || true
+            FINALIZED_COUNT=$(echo "$STATUS" | jq -r '.result.finalizedCount // empty' 2>/dev/null) || true
+
+            # 4a: Reject if the node is network-partitioned (below BFT quorum).
+            # A partitioned node cannot participate in consensus and will
+            # inevitably stall, but the block-number check takes 3 minutes
+            # to detect this. The partition check catches it immediately.
+            if [[ "$PARTITION" == "partitioned" ]]; then
+                echo "UNHEALTHY: node is network-partitioned (insufficient peers for BFT quorum)" >&2
+                exit 1
+            fi
+
+            # 4b: Optional absolute peer floor (disabled by default).
+            if [[ -n "$PEER_COUNT" && "$MIN_PEERS" -gt 0 ]]; then
+                if [[ "$PEER_COUNT" -lt "$MIN_PEERS" ]]; then
+                    echo "UNHEALTHY: only $PEER_COUNT peers connected (minimum: $MIN_PEERS)" >&2
+                    exit 1
+                fi
+            fi
+
+            # 4c: Finalized-count stall detection.
+            # Similar to the block-number stall check, but tracks the node's
+            # own finalized_count from the consensus engine. A node that is
+            # RPC-responsive but not finalizing blocks (e.g. disconnected from
+            # consensus, serving stale data) will fail this check.
+            if [[ -n "$FINALIZED_COUNT" ]]; then
+                PREV_FINALIZED=0
+                FIN_STALL=0
+                [[ -f "$FINALIZED_FILE" ]] && PREV_FINALIZED=$(cat "$FINALIZED_FILE" 2>/dev/null) || true
+                [[ -f "$FINALIZED_STALL_FILE" ]] && FIN_STALL=$(cat "$FINALIZED_STALL_FILE" 2>/dev/null) || true
+                PREV_FINALIZED=${PREV_FINALIZED:-0}
+                FIN_STALL=${FIN_STALL:-0}
+
+                if [[ "$FINALIZED_COUNT" -gt "$PREV_FINALIZED" ]]; then
+                    FIN_STALL=0
+                else
+                    FIN_STALL=$((FIN_STALL + 1))
+                fi
+
+                echo "$FINALIZED_COUNT" > "$FINALIZED_FILE"
+                echo "$FIN_STALL" > "$FINALIZED_STALL_FILE"
+
+                if [[ "$FIN_STALL" -ge "$STALL_THRESHOLD" ]]; then
+                    echo "UNHEALTHY: consensus stalled — finalized count stuck at $FINALIZED_COUNT for $FIN_STALL consecutive checks" >&2
+                    exit 1
+                fi
+            fi
         fi
         ;;
     *)
