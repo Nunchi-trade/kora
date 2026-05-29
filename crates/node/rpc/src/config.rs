@@ -19,6 +19,9 @@ pub struct RpcServerConfig {
     pub max_connections: u32,
     /// Maximum number of WebSocket subscriptions per connection.
     pub max_subscriptions_per_connection: u32,
+    /// Maximum number of calls allowed in a single JSON-RPC batch request.
+    /// `0` disables batch requests entirely.
+    pub max_batch_size: u32,
 }
 
 impl RpcServerConfig {
@@ -32,6 +35,7 @@ impl RpcServerConfig {
             rate_limit: RateLimitConfig::default(),
             max_connections: 100,
             max_subscriptions_per_connection: 32,
+            max_batch_size: 100,
         }
     }
 
@@ -82,6 +86,14 @@ impl RpcServerConfig {
         self.max_subscriptions_per_connection = max_subscriptions_per_connection;
         self
     }
+
+    /// Set the maximum number of calls in a single batch request.
+    /// `0` disables batch requests entirely.
+    #[must_use]
+    pub const fn with_max_batch_size(mut self, max_batch_size: u32) -> Self {
+        self.max_batch_size = max_batch_size;
+        self
+    }
 }
 
 impl Default for RpcServerConfig {
@@ -94,6 +106,7 @@ impl Default for RpcServerConfig {
             rate_limit: RateLimitConfig::default(),
             max_connections: 100,
             max_subscriptions_per_connection: 32,
+            max_batch_size: 100,
         }
     }
 }
@@ -192,6 +205,7 @@ mod tests {
         assert_eq!(config.chain_id, 1);
         assert_eq!(config.max_connections, 100);
         assert_eq!(config.max_subscriptions_per_connection, 32);
+        assert_eq!(config.max_batch_size, 100);
     }
 
     #[test]
@@ -250,18 +264,26 @@ mod tests {
     }
 
     #[test]
+    fn rpc_server_config_with_max_batch_size() {
+        let config = RpcServerConfig::default().with_max_batch_size(50);
+        assert_eq!(config.max_batch_size, 50);
+    }
+
+    #[test]
     fn rpc_server_config_chained_builder() {
         let config = RpcServerConfig::default()
             .with_cors_origins(vec!["*".to_string()])
             .with_rate_limit_burst(1000, 1500)
             .with_max_connections(50)
-            .with_max_subscriptions_per_connection(24);
+            .with_max_subscriptions_per_connection(24)
+            .with_max_batch_size(200);
 
         assert_eq!(config.cors.allowed_origins, vec!["*"]);
         assert_eq!(config.rate_limit.requests_per_second, 1000);
         assert_eq!(config.rate_limit.burst_size, 1500);
         assert_eq!(config.max_connections, 50);
         assert_eq!(config.max_subscriptions_per_connection, 24);
+        assert_eq!(config.max_batch_size, 200);
     }
 
     #[test]
