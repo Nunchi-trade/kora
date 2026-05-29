@@ -508,6 +508,7 @@ async fn replay_finalized_block(
         gas_used: execution.outcome.gas_used,
         base_fee_per_gas: block_context.header.base_fee_per_gas,
         mix_hash: block.prevrandao,
+        logs_bloom: alloy_primitives::Bloom::ZERO,
         size: 508 + tx_bytes_total,
         transaction_hashes: block.txs.iter().map(|tx| keccak256(&tx.bytes)).collect(),
     };
