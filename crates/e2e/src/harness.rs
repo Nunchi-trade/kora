@@ -607,20 +607,21 @@ async fn verify_state_convergence(
             }
         };
 
-        let node_seed = node.query_seed(head).await.ok_or_else(|| {
-            HarnessError::MissingState(format!("node {} missing seed", node.index))
-        })?;
-
-        seed = match seed {
-            None => Some(node_seed),
-            Some(prev) if prev == node_seed => Some(prev),
-            Some(prev) => {
-                return Err(HarnessError::StateDivergence {
-                    digest: head,
-                    message: format!("seed mismatch: {:?} vs {:?}", prev, node_seed),
-                });
-            }
-        };
+        // SeedReporter only fires on nodes that independently construct the
+        // finalization certificate, so not all nodes will have seeds. Only
+        // verify consistency across nodes that do have them.
+        if let Some(node_seed) = node.query_seed(head).await {
+            seed = match seed {
+                None => Some(node_seed),
+                Some(prev) if prev == node_seed => Some(prev),
+                Some(prev) => {
+                    return Err(HarnessError::StateDivergence {
+                        digest: head,
+                        message: format!("seed mismatch: {:?} vs {:?}", prev, node_seed),
+                    });
+                }
+            };
+        }
     }
 
     let state_root =
