@@ -29,7 +29,7 @@ pub fn threshold_schemes(
 
     let mut rng = StdRng::seed_from_u64(seed);
     let (output, shares) =
-        dkg::deal::<MinSig, _, N3f1>(&mut rng, Mode::default(), participants.clone())
+        dkg::feldman_desmedt::deal::<MinSig, _, N3f1>(&mut rng, Mode::default(), participants.clone())
             .context("dkg deal failed")?;
 
     let mut schemes = Vec::with_capacity(n);

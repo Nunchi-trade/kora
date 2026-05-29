@@ -3,6 +3,7 @@
 use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 
 use commonware_codec::Codec;
+use commonware_runtime::Supervisor;
 use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner, Storage, buffer::paged::CacheRef};
 use commonware_storage::archive::immutable::{Archive, Config};
 use commonware_utils::{NZU16, NZU64, NZUsize, sequence::Array};
@@ -65,7 +66,7 @@ impl ArchiveInitializer {
         codec_config: V::Cfg,
     ) -> Result<Archive<E, K, V>, commonware_storage::archive::Error>
     where
-        E: BufferPooler + Spawner + Storage + Metrics + Clock + Clone,
+        E: BufferPooler + Spawner + Storage + Metrics + Clock + Supervisor,
         K: Array,
         V: Codec + Send + Sync,
     {
@@ -104,7 +105,7 @@ impl ArchiveInitializer {
         codec_config: V::Cfg,
     ) -> Result<Archive<E, K, V>, commonware_storage::archive::Error>
     where
-        E: BufferPooler + Spawner + Storage + Metrics + Clock + Clone,
+        E: BufferPooler + Spawner + Storage + Metrics + Clock + Supervisor,
         K: Array,
         V: Codec + Send + Sync,
     {
@@ -119,7 +120,7 @@ impl ArchiveInitializer {
         codec_config: V::Cfg,
     ) -> Result<Archive<E, K, V>, commonware_storage::archive::Error>
     where
-        E: BufferPooler + Spawner + Storage + Metrics + Clock + Clone,
+        E: BufferPooler + Spawner + Storage + Metrics + Clock + Supervisor,
         K: Array,
         V: Codec + Send + Sync,
     {

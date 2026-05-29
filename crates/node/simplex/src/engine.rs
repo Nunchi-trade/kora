@@ -37,6 +37,7 @@ impl DefaultEngine {
     pub fn init<E, S, B, D, A, R, F, VS, VR, CS, CR, RS, RR>(
         context: E,
         partition: impl Into<String>,
+        floor: simplex::Floor<S, D>,
         scheme: S,
         blocker: B,
         automaton: A,
@@ -64,7 +65,7 @@ impl DefaultEngine {
     {
         let page_cache = DefaultPool::init(&context);
         let config: simplex::Config<S, Random, B, D, A, R, F, Sequential> =
-            DefaultConfig::init(partition, page_cache, scheme, blocker, automaton, relay, reporter);
+            DefaultConfig::init(partition, page_cache, floor, scheme, blocker, automaton, relay, reporter);
         let engine = simplex::Engine::new(context, config);
         engine.start(vote_network, certificate_network, resolver_network)
     }

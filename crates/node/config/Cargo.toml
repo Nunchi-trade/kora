@@ -22,7 +22,6 @@ thiserror.workspace = true
 # Cryptography
 commonware-codec.workspace = true
 commonware-cryptography.workspace = true
-ed25519-consensus = "2"
 rand.workspace = true
 
 # Misc

@@ -75,7 +75,7 @@ impl<C: Signer> TransportConfig<C> {
 
         // Create network and oracle
         let (mut network, oracle) =
-            discovery::Network::new(context.with_label("network"), self.inner);
+            discovery::Network::new(context.child("network"), self.inner);
 
         // Register simplex channels
         let votes = network.register(CHANNEL_VOTES, quota, backlog);

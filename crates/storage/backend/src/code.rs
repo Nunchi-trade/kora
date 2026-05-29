@@ -2,6 +2,7 @@
 
 use alloy_primitives::B256;
 use commonware_cryptography::sha256::Digest as QmdbDigest;
+use commonware_parallel::Sequential;
 use commonware_storage::{qmdb::any::VariableConfig, translator::EightCap};
 use kora_qmdb::{QmdbBatchable, QmdbGettable};
 
@@ -29,7 +30,7 @@ impl CodeStore {
     /// Initialize the code store.
     pub async fn init(
         context: Context,
-        config: VariableConfig<EightCap, ((), (commonware_codec::RangeCfg<usize>, ()))>,
+        config: VariableConfig<EightCap, ((), (commonware_codec::RangeCfg<usize>, ())), Sequential>,
     ) -> Result<Self, BackendError> {
         let inner = CodeDb::init(context, config)
             .await

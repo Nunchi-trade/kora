@@ -68,6 +68,7 @@ impl DefaultConfig {
     pub fn init<S, B, D, A, R, F>(
         partition: impl Into<String>,
         page_cache: CacheRef,
+        floor: simplex::Floor<S, D>,
         scheme: S,
         blocker: B,
         automaton: A,
@@ -92,7 +93,8 @@ impl DefaultConfig {
             reporter,
             strategy: Sequential,
             partition: partition.into(),
-            mailbox_size: DEFAULT_MAILBOX_SIZE,
+            floor,
+            mailbox_size: NZUsize!(DEFAULT_MAILBOX_SIZE),
             epoch: Epoch::zero(),
             replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
@@ -102,7 +104,7 @@ impl DefaultConfig {
             fetch_timeout: DEFAULT_FETCH_TIMEOUT,
             activity_timeout: DEFAULT_ACTIVITY_TIMEOUT,
             skip_timeout: DEFAULT_SKIP_TIMEOUT,
-            fetch_concurrent: DEFAULT_FETCH_CONCURRENT,
+            fetch_concurrent: NZUsize!(DEFAULT_FETCH_CONCURRENT),
             page_cache,
             forwarding: ForwardingPolicy::Disabled,
         }

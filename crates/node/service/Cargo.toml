@@ -17,6 +17,7 @@ kora-transport = { path = "../../network/transport" }
 
 # Commonware
 commonware-consensus.workspace = true
+commonware-actor.workspace = true
 commonware-cryptography.workspace = true
 commonware-p2p.workspace = true
 commonware-runtime.workspace = true

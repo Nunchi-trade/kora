@@ -1,11 +1,11 @@
 //! Contains the [`PeerInitializer`] which initializes the p2p resolver.
 
-use std::time::Duration;
+use std::{num::NonZeroUsize, time::Duration};
 
 use commonware_consensus::{
     Block,
     marshal::resolver::{
-        handler::{Message, Request},
+        handler::{Annotation, Key, Receiver as HandlerReceiver},
         p2p::Config,
     },
 };
@@ -13,14 +13,15 @@ use commonware_cryptography::{Digestible, PublicKey};
 use commonware_p2p::{Blocker, Provider, Receiver, Sender};
 use commonware_resolver::p2p;
 use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner};
-use commonware_utils::channel::mpsc;
+use commonware_utils::NZUsize;
 use rand::Rng;
 
 /// Receiver for inbound resolver messages.
-pub type ResolverReceiver<B> = mpsc::Receiver<Message<<B as Digestible>::Digest>>;
+pub type ResolverReceiver<B> = HandlerReceiver<<B as Digestible>::Digest>;
 
 /// Mailbox used to submit resolver requests.
-pub type ResolverMailbox<B, P> = p2p::Mailbox<Request<<B as Digestible>::Digest>, P>;
+pub type ResolverMailbox<B, P> =
+    p2p::Mailbox<Key<<B as Digestible>::Digest>, P, Annotation>;
 
 /// Resolver channels returned by peer initialization.
 pub type ResolverChannels<B, P> = (ResolverReceiver<B>, ResolverMailbox<B, P>);
@@ -31,7 +32,7 @@ pub struct PeerInitializer;
 
 impl PeerInitializer {
     /// The default mailbox size.
-    pub const DEFAULT_MAILBOX_SIZE: usize = 1024;
+    pub const DEFAULT_MAILBOX_SIZE: NonZeroUsize = NZUsize!(1024);
 
     /// The default initial delay.
     pub const DEFAULT_INITIAL_DELAY: Duration = Duration::from_millis(200);
@@ -43,16 +44,16 @@ impl PeerInitializer {
     pub const DEFAULT_FETCH_RETRY_TIMEOUT: Duration = Duration::from_millis(100);
 
     /// Whether there are priority requests.
-    pub const PRIORITY_REQUESTS: bool = false;
+    pub const PRIORITY_REQUESTS: bool = true;
 
     /// Whether there are priority responses.
-    pub const PRIORITY_RESPONSES: bool = false;
+    pub const PRIORITY_RESPONSES: bool = true;
 }
 
 impl PeerInitializer {
     /// Initializes the p2p resolver.
     pub fn init<E, C, Bl, B, S, R, P>(
-        ctx: &E,
+        ctx: E,
         public_key: P,
         peer_provider: C,
         blocker: Bl,
@@ -88,11 +89,11 @@ mod tests {
 
     #[test]
     fn test_defaults() {
-        assert_eq!(PeerInitializer::DEFAULT_MAILBOX_SIZE, 1024);
+        assert_eq!(PeerInitializer::DEFAULT_MAILBOX_SIZE.get(), 1024);
         assert_eq!(PeerInitializer::DEFAULT_INITIAL_DELAY, Duration::from_millis(200));
         assert_eq!(PeerInitializer::DEFAULT_TIMEOUT, Duration::from_millis(200));
         assert_eq!(PeerInitializer::DEFAULT_FETCH_RETRY_TIMEOUT, Duration::from_millis(100));
-        assert!(!PeerInitializer::PRIORITY_REQUESTS);
-        assert!(!PeerInitializer::PRIORITY_RESPONSES);
+        assert!(PeerInitializer::PRIORITY_REQUESTS);
+        assert!(PeerInitializer::PRIORITY_RESPONSES);
     }
 }

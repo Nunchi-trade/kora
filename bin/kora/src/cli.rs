@@ -6,6 +6,7 @@ use kora_domain::BootstrapConfig;
 use kora_rpc::NodeState;
 use kora_runner::{ProductionRunner, load_threshold_scheme};
 use kora_service::LegacyNodeService;
+use commonware_runtime::Supervisor as _;
 
 #[derive(Parser, Debug)]
 #[command(name = "kora")]
@@ -205,7 +206,7 @@ impl Cli {
         executor.start(|context| async move {
             let mut transport = config
                 .network
-                .build_local_transport(identity_key, context.clone())
+                .build_local_transport(identity_key, context.child("transport"))
                 .map_err(|e| eyre::eyre!("failed to build transport: {}", e))?;
 
             transport
@@ -216,8 +217,7 @@ impl Cli {
                         Set::from_iter_dedup(peers.participants),
                         Set::from_iter_dedup(peers.secondary_participants),
                     ),
-                )
-                .await;
+                );
 
             tracing::info!("secondary peer joined network");
             futures::future::pending::<()>().await;

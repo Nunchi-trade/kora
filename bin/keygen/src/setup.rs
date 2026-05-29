@@ -1,5 +1,6 @@
 //! Generates initial configuration for a Kora devnet.
 
+use commonware_codec::ReadExt;
 use std::{collections::BTreeMap, fs, path::PathBuf};
 
 use clap::Args;
@@ -84,13 +85,13 @@ pub(crate) fn run(args: SetupArgs) -> Result<()> {
             let bytes = fs::read(&key_path)?;
             let mut seed = [0u8; 32];
             seed.copy_from_slice(&bytes);
-            ed25519::PrivateKey::from(ed25519_consensus::SigningKey::from(seed))
+            ed25519::PrivateKey::read(&mut &seed[..]).expect("32-byte seed is always a valid Ed25519 PrivateKey")
         } else {
             tracing::info!(node = i, "Generating new identity key");
             let mut seed = [0u8; 32];
             rand::rngs::OsRng.fill_bytes(&mut seed);
             fs::write(&key_path, seed)?;
-            ed25519::PrivateKey::from(ed25519_consensus::SigningKey::from(seed))
+            ed25519::PrivateKey::read(&mut &seed[..]).expect("32-byte seed is always a valid Ed25519 PrivateKey")
         };
 
         let public_key = key.public_key();
@@ -120,13 +121,13 @@ pub(crate) fn run(args: SetupArgs) -> Result<()> {
             let bytes = fs::read(&key_path)?;
             let mut seed = [0u8; 32];
             seed.copy_from_slice(&bytes);
-            ed25519::PrivateKey::from(ed25519_consensus::SigningKey::from(seed))
+            ed25519::PrivateKey::read(&mut &seed[..]).expect("32-byte seed is always a valid Ed25519 PrivateKey")
         } else {
             tracing::info!(node = i, "Generating new secondary identity key");
             let mut seed = [0u8; 32];
             rand::rngs::OsRng.fill_bytes(&mut seed);
             fs::write(&key_path, seed)?;
-            ed25519::PrivateKey::from(ed25519_consensus::SigningKey::from(seed))
+            ed25519::PrivateKey::read(&mut &seed[..]).expect("32-byte seed is always a valid Ed25519 PrivateKey")
         };
 
         let public_key = key.public_key();
