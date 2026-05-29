@@ -57,6 +57,6 @@ mod tests {
     fn test_defaults() {
         assert_eq!(BroadcastInitializer::DEFAULT_MAILBOX_SIZE, 1024);
         assert_eq!(BroadcastInitializer::DEFAULT_DEQUE_SIZE, 256);
-        assert!(BroadcastInitializer::DEFAULT_PRIORITY);
+        const { assert!(BroadcastInitializer::DEFAULT_PRIORITY) };
     }
 }

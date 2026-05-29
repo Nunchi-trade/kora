@@ -7,7 +7,6 @@ use crate::{TestConfig, TestHarness, TestSetup};
 
 /// Test a simple ETH transfer between two accounts.
 #[test]
-#[ignore = "flaky when run in parallel - run with --test-threads=1"]
 fn test_simple_transfer() {
     let config = TestConfig::default().with_validators(4).with_max_blocks(3);
     let setup = TestSetup::simple_transfer(config.chain_id);
@@ -19,7 +18,6 @@ fn test_simple_transfer() {
 
 /// Test multiple independent transfers in a single block.
 #[test]
-#[ignore = "flaky when run in parallel - run with --test-threads=1"]
 fn test_multiple_transfers_single_block() {
     let config = TestConfig::default().with_validators(4).with_max_blocks(3);
     let setup = TestSetup::multi_transfer(config.chain_id, 5);
@@ -31,7 +29,6 @@ fn test_multiple_transfers_single_block() {
 
 /// Test multiple transactions from the same sender with sequential nonces.
 #[test]
-#[ignore = "flaky when run in parallel - run with --test-threads=1"]
 fn test_sequential_nonces() {
     let config = TestConfig::default().with_validators(4).with_max_blocks(3);
     let setup = TestSetup::sequential_nonces(config.chain_id, 3);
@@ -43,7 +40,6 @@ fn test_sequential_nonces() {
 
 /// Test that larger transfer counts work correctly.
 #[test]
-#[ignore = "flaky when run in parallel - run with --test-threads=1"]
 fn test_many_transfers() {
     let config = TestConfig::default().with_validators(4).with_max_blocks(5);
     let setup = TestSetup::multi_transfer(config.chain_id, 10);
@@ -55,7 +51,6 @@ fn test_many_transfers() {
 
 /// Test that state is correctly accumulated across multiple blocks.
 #[test]
-#[ignore = "flaky when run in parallel - run with --test-threads=1"]
 fn test_state_accumulation() {
     // This test uses sequential nonces to ensure state accumulates correctly
     let config = TestConfig::default().with_validators(4).with_max_blocks(5);
@@ -66,20 +61,45 @@ fn test_state_accumulation() {
     assert_eq!(outcome.blocks_finalized, 5);
 }
 
-/// Test with different chain IDs.
+fn run_chain_id(chain_id: u64) {
+    let mut config = TestConfig::default().with_validators(4).with_max_blocks(2);
+    config.chain_id = chain_id;
+    let setup = TestSetup::simple_transfer(chain_id);
+
+    let outcome = TestHarness::run(config, setup)
+        .unwrap_or_else(|e| panic!("chain_id {chain_id} failed: {e}"));
+
+    assert_eq!(outcome.blocks_finalized, 2);
+}
+
+/// Test execution with chain ID 1.
 #[test]
-#[ignore = "flaky when run in parallel - run with --test-threads=1"]
-fn test_different_chain_ids() {
-    for chain_id in [1, 5, 1337, 31337, 42161] {
-        let mut config = TestConfig::default().with_validators(4).with_max_blocks(2);
-        config.chain_id = chain_id;
-        let setup = TestSetup::simple_transfer(chain_id);
+fn test_chain_id_1() {
+    run_chain_id(1);
+}
 
-        let outcome = TestHarness::run(config, setup)
-            .unwrap_or_else(|e| panic!("chain_id {chain_id} failed: {e}"));
+/// Test execution with chain ID 5.
+#[test]
+fn test_chain_id_5() {
+    run_chain_id(5);
+}
 
-        assert_eq!(outcome.blocks_finalized, 2);
-    }
+/// Test execution with chain ID 1337.
+#[test]
+fn test_chain_id_1337() {
+    run_chain_id(1337);
+}
+
+/// Test execution with chain ID 31337.
+#[test]
+fn test_chain_id_31337() {
+    run_chain_id(31337);
+}
+
+/// Test execution with chain ID 42161.
+#[test]
+fn test_chain_id_42161() {
+    run_chain_id(42161);
 }
 
 /// Test that gas limits are respected.
@@ -96,7 +116,6 @@ fn test_gas_limit_enforcement() {
 
 /// Test maximum transactions per block.
 #[test]
-#[ignore = "flaky when run in parallel - run with --test-threads=1"]
 fn test_max_transactions_per_block() {
     let config = TestConfig::default().with_validators(4).with_max_blocks(3);
     // BLOCK_CODEC_MAX_TXS is 64, so test with fewer
@@ -109,7 +128,6 @@ fn test_max_transactions_per_block() {
 
 /// Test that execution is deterministic across validators.
 #[test]
-#[ignore = "flaky when run in parallel - run with --test-threads=1"]
 fn test_deterministic_execution() {
     let config = TestConfig::default()
         .with_validators(4)

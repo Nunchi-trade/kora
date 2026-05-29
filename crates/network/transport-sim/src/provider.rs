@@ -197,7 +197,7 @@ impl<P: PublicKey> fmt::Debug for SimTransportProvider<P> {
 
 impl<P: PublicKey> SimTransportProvider<P> {
     /// Create a new provider for a specific peer.
-    pub fn new(oracle: Arc<Mutex<SimControl<P>>>, peer_id: P) -> Self {
+    pub const fn new(oracle: Arc<Mutex<SimControl<P>>>, peer_id: P) -> Self {
         Self { oracle, peer_id }
     }
 }

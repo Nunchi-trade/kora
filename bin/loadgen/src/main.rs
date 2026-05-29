@@ -158,6 +158,7 @@ fn address_from_key(key: &SigningKey) -> Address {
     Address::from_slice(&hash[12..])
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sign_eip1559_transfer(
     key: &SigningKey,
     chain_id: u64,
@@ -226,7 +227,7 @@ struct RpcClient {
 }
 
 impl RpcClient {
-    fn new(url: String, client: reqwest::Client) -> Self {
+    const fn new(url: String, client: reqwest::Client) -> Self {
         Self { client, url }
     }
 
@@ -487,16 +488,16 @@ async fn main() -> Result<()> {
                 let mut sent = 0u64;
                 while sent < count {
                     // Check deadline before each transaction
-                    if let Some(dl) = deadline {
-                        if Instant::now() >= dl {
-                            warn!(
-                                account = %account.address,
-                                completed = sent,
-                                target = count,
-                                "timeout reached, stopping account"
-                            );
-                            break;
-                        }
+                    if let Some(dl) = deadline
+                        && Instant::now() >= dl
+                    {
+                        warn!(
+                            account = %account.address,
+                            completed = sent,
+                            target = count,
+                            "timeout reached, stopping account"
+                        );
+                        break;
                     }
 
                     let nonce = account.next_nonce();

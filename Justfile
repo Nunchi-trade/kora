@@ -3,14 +3,22 @@ default:
     @just --list
 
 # Run the full CI suite
-ci: fmt clippy test deny
+ci: fmt build-all-locked clippy test test-e2e test-doc deny
 
 # Run all checks
-check: fmt clippy test
+check: fmt build-all-locked clippy test test-e2e test-doc
 
-# Run tests
+# Run non-e2e tests
 test:
-    cargo nextest run --workspace --all-features
+    cargo nextest run --workspace --all-features --exclude kora-e2e --no-tests=pass
+
+# Run e2e tests serially
+test-e2e:
+    cargo nextest run -p kora-e2e --all-features --run-ignored all -j1 --no-tests=fail
+
+# Run doc tests
+test-doc:
+    cargo test --workspace --all-features --doc
 
 # Build in release mode
 build:
@@ -18,7 +26,11 @@ build:
 
 # Build all targets
 build-all:
-    cargo build --all-targets
+    cargo build --workspace --all-targets
+
+# Build all targets with the checked-in lockfile
+build-all-locked:
+    cargo build --workspace --all-targets --locked
 
 # Check formatting
 fmt:

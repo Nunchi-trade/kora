@@ -14,7 +14,7 @@ use rand::{RngCore, rngs::OsRng};
 const PORT_BASE_MIN: u16 = 40_000;
 const PORT_BASE_MAX: u16 = 65_535 - 1_024;
 
-fn remap_socket(socket: SocketAddr, port_offset: u16) -> SocketAddr {
+const fn remap_socket(socket: SocketAddr, port_offset: u16) -> SocketAddr {
     let port = socket.port();
     if port >= 1024 {
         return socket;
@@ -153,7 +153,7 @@ impl commonware_runtime::Spawner for SimContext {
     {
         let port_offset = self.port_offset;
         self.inner.spawn(move |context| {
-            let context = SimContext { inner: context, force_base_addr: false, port_offset };
+            let context = Self { inner: context, force_base_addr: false, port_offset };
             f(context)
         })
     }

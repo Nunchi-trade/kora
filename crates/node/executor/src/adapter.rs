@@ -115,40 +115,24 @@ mod tests {
     struct NoopState;
 
     impl StateDbRead for NoopState {
-        fn nonce(
-            &self,
-            _: &Address,
-        ) -> impl std::future::Future<Output = Result<u64, StateDbError>> + Send {
-            async { Ok(0) }
+        async fn nonce(&self, _: &Address) -> Result<u64, StateDbError> {
+            Ok(0)
         }
 
-        fn balance(
-            &self,
-            _: &Address,
-        ) -> impl std::future::Future<Output = Result<U256, StateDbError>> + Send {
-            async { Ok(U256::ZERO) }
+        async fn balance(&self, _: &Address) -> Result<U256, StateDbError> {
+            Ok(U256::ZERO)
         }
 
-        fn code_hash(
-            &self,
-            _: &Address,
-        ) -> impl std::future::Future<Output = Result<B256, StateDbError>> + Send {
-            async { Ok(B256::ZERO) }
+        async fn code_hash(&self, _: &Address) -> Result<B256, StateDbError> {
+            Ok(B256::ZERO)
         }
 
-        fn code(
-            &self,
-            _: &B256,
-        ) -> impl std::future::Future<Output = Result<Bytes, StateDbError>> + Send {
-            async { Ok(Bytes::new()) }
+        async fn code(&self, _: &B256) -> Result<Bytes, StateDbError> {
+            Ok(Bytes::new())
         }
 
-        fn storage(
-            &self,
-            _: &Address,
-            _: &U256,
-        ) -> impl std::future::Future<Output = Result<U256, StateDbError>> + Send {
-            async { Ok(U256::ZERO) }
+        async fn storage(&self, _: &Address, _: &U256) -> Result<U256, StateDbError> {
+            Ok(U256::ZERO)
         }
     }
 

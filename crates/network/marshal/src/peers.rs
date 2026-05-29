@@ -92,7 +92,7 @@ mod tests {
         assert_eq!(PeerInitializer::DEFAULT_INITIAL_DELAY, Duration::from_millis(200));
         assert_eq!(PeerInitializer::DEFAULT_TIMEOUT, Duration::from_millis(200));
         assert_eq!(PeerInitializer::DEFAULT_FETCH_RETRY_TIMEOUT, Duration::from_millis(100));
-        assert!(PeerInitializer::PRIORITY_REQUESTS);
-        assert!(PeerInitializer::PRIORITY_RESPONSES);
+        const { assert!(PeerInitializer::PRIORITY_REQUESTS) };
+        const { assert!(PeerInitializer::PRIORITY_RESPONSES) };
     }
 }

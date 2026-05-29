@@ -19,7 +19,6 @@ fn test_four_validators_reach_consensus() {
 
 /// Test that a 7-validator network can finalize blocks (larger quorum).
 #[test]
-#[ignore = "requires investigation - larger quorums time out"]
 fn test_seven_validators_reach_consensus() {
     let config = TestConfig::default()
         .with_validators(7)
@@ -75,7 +74,6 @@ fn test_sequential_block_production() {
 
 /// Test with different random seeds for reproducibility.
 #[test]
-#[ignore = "flaky when run in parallel - run with --test-threads=1"]
 fn test_deterministic_with_seed() {
     let config = TestConfig::default().with_validators(4).with_max_blocks(3).with_seed(42);
     let setup = TestSetup::simple_transfer(config.chain_id);
@@ -100,7 +98,6 @@ fn test_empty_blocks() {
 
 /// Test minimum viable network (4 validators, threshold 3).
 #[test]
-#[ignore = "flaky when run in parallel - run with --test-threads=1"]
 fn test_minimum_quorum() {
     // 4 validators with threshold 3 is the minimum for BFT
     let config = TestConfig::default().with_validators(4).with_max_blocks(3);
@@ -114,7 +111,6 @@ fn test_minimum_quorum() {
 
 /// Test that transactions affect balances correctly after finalization.
 #[test]
-#[ignore = "flaky when run in parallel - run with --test-threads=1"]
 fn test_balance_updates_after_finalization() {
     let config = TestConfig::default().with_validators(4).with_max_blocks(3);
     let setup = TestSetup::simple_transfer(config.chain_id);
