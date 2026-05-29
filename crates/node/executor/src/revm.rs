@@ -218,6 +218,9 @@ impl RevmExecutor {
         let ctx = ctx
             .modify_cfg_chained(|cfg| {
                 cfg.chain_id = self.config.chain_id;
+                cfg.disable_nonce_check = true;
+                cfg.disable_balance_check = true;
+                cfg.disable_base_fee = true;
             })
             .modify_block_chained(|blk: &mut BlockEnv| {
                 blk.number = U256::from(context.header.number);

@@ -95,7 +95,7 @@ alloy-eips = "1.0"
 alloy-rlp = "0.3"
 
 # Execution
-revm = { version = "38.0.0", default-features = false }
+revm = { version = "38.0.0", default-features = false, features = ["optional_balance_check", "optional_no_base_fee"] }
 alloy-evm = { version = "0.34.0", default-features = false }
 
 # Async
