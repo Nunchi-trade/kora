@@ -606,6 +606,7 @@ impl<S: StateProvider + Clone + 'static> RpcServer<S> {
         let tx_submit = self.tx_submit;
         let txpool = self.txpool;
         let cors_layer = build_cors_layer(&self.cors_config);
+        let jsonrpc_cors_layer = build_cors_layer(&self.cors_config);
         let http_rate_limiter = SharedRateLimiter::new(self.rate_limit_config.clone());
         let rpc_global_limiter = SharedRateLimiter::new(self.rate_limit_config.clone());
         let rpc_per_conn_limiter = PerConnectionRateLimiter::new(self.rate_limit_config);
@@ -649,6 +650,7 @@ impl<S: StateProvider + Clone + 'static> RpcServer<S> {
             let server = match Server::builder()
                 .max_connections(max_connections)
                 .max_subscriptions_per_connection(max_subscriptions_per_connection)
+                .set_http_middleware(tower_04::ServiceBuilder::new().layer(jsonrpc_cors_layer))
                 .enable_ws_ping(PingConfig::new())
                 .set_batch_request_config(BatchRequestConfig::Limit(max_batch_size))
                 .set_rpc_middleware(rpc_middleware)
@@ -772,6 +774,7 @@ pub struct JsonRpcServer<S: StateProvider = NoopStateProvider> {
     tx_submit: Option<TxSubmitCallback>,
     txpool: Option<TransactionPool>,
     state_provider: S,
+    cors_config: CorsConfig,
     rate_limit_config: RateLimitConfig,
     max_connections: u32,
     max_subscriptions_per_connection: u32,
@@ -809,6 +812,7 @@ impl JsonRpcServer<NoopStateProvider> {
             tx_submit: None,
             txpool: None,
             state_provider: NoopStateProvider,
+            cors_config: CorsConfig::default(),
             rate_limit_config: RateLimitConfig::default(),
             max_connections: 100,
             max_subscriptions_per_connection: 32,
@@ -830,6 +834,7 @@ impl<S: StateProvider + Clone + 'static> JsonRpcServer<S> {
             tx_submit: None,
             txpool: None,
             state_provider,
+            cors_config: CorsConfig::default(),
             rate_limit_config: RateLimitConfig::default(),
             max_connections: 100,
             max_subscriptions_per_connection: 32,
@@ -866,6 +871,13 @@ impl<S: StateProvider + Clone + 'static> JsonRpcServer<S> {
     #[must_use]
     pub fn with_mempool_broadcast(mut self, mempool_broadcast: MempoolEventSender) -> Self {
         self.mempool_broadcast = Some(mempool_broadcast);
+        self
+    }
+
+    /// Set CORS configuration.
+    #[must_use]
+    pub fn with_cors(mut self, cors_config: CorsConfig) -> Self {
+        self.cors_config = cors_config;
         self
     }
 
@@ -917,6 +929,7 @@ impl<S: StateProvider + Clone + 'static> JsonRpcServer<S> {
 
     /// Start the JSON-RPC server.
     pub async fn start(self) -> Result<ServerHandle, ServerError> {
+        let cors_layer = build_cors_layer(&self.cors_config);
         let rpc_global_limiter = SharedRateLimiter::new(self.rate_limit_config.clone());
         let rpc_per_conn_limiter = PerConnectionRateLimiter::new(self.rate_limit_config);
         let rpc_requests_total = self.rpc_requests_total;
@@ -931,6 +944,7 @@ impl<S: StateProvider + Clone + 'static> JsonRpcServer<S> {
         let server = Server::builder()
             .max_connections(self.max_connections)
             .max_subscriptions_per_connection(self.max_subscriptions_per_connection)
+            .set_http_middleware(tower_04::ServiceBuilder::new().layer(cors_layer))
             .enable_ws_ping(PingConfig::new())
             .set_batch_request_config(BatchRequestConfig::Limit(self.max_batch_size))
             .set_rpc_middleware(rpc_middleware)

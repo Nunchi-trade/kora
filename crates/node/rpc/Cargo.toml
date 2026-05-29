@@ -15,6 +15,9 @@ workspace = true
 axum.workspace = true
 tower = { version = "0.5", features = ["limit", "util"] }
 tower-http = { version = "0.6", features = ["cors"] }
+# jsonrpsee 0.24 depends on tower 0.4; its `set_http_middleware` expects
+# tower 0.4's `ServiceBuilder`, so we keep a renamed 0.4 dependency.
+tower_04 = { package = "tower", version = "0.4" }
 
 # JSON-RPC
 jsonrpsee = { version = "0.24", features = ["server", "macros"] }

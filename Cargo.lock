@@ -3559,6 +3559,7 @@ dependencies = [
  "sha3",
  "thiserror 2.0.18",
  "tokio",
+ "tower 0.4.13",
  "tower 0.5.3",
  "tower-http",
  "tracing",
