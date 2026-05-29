@@ -1,7 +1,7 @@
 //! REVM-based consensus application implementation.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -21,12 +21,13 @@ use commonware_runtime::{Clock, Metrics, Spawner};
 use futures::StreamExt;
 use kora_consensus::{BlockExecution, SnapshotStore, components::InMemorySnapshotStore};
 use kora_domain::{Block, ConsensusDigest};
-use kora_executor::{BlockContext, BlockExecutor};
+use kora_executor::{BaseFeeParams, BlockContext, BlockExecutor, calculate_base_fee};
 use kora_ledger::LedgerService;
 use kora_metrics::AppMetrics;
 use kora_overlay::OverlayState;
 use kora_qmdb_ledger::QmdbState;
 use kora_rpc::NodeState;
+use parking_lot::RwLock;
 use rand::Rng;
 use tracing::{debug, error, info, trace, warn};
 
@@ -112,6 +113,12 @@ pub struct RevmApplication<S, E> {
     /// previously processed blocks (including certificate-trusted ones).
     /// Used to determine when the catch-up window should close.
     last_verified_height: Arc<AtomicU64>,
+    /// Per-block `(gas_used, base_fee_per_gas)` cache, keyed by consensus
+    /// digest.  Populated when a block is built or verified so that the
+    /// *next* block can compute its EIP-1559 base fee from the parent's
+    /// gas usage.  Entries are small (32 + 16 bytes) and the map is bounded
+    /// by the number of unfinalized blocks.
+    block_fees: Arc<RwLock<HashMap<ConsensusDigest, (u64, u64)>>>,
     _scheme: std::marker::PhantomData<S>,
 }
 
@@ -124,6 +131,7 @@ impl<S, E> std::fmt::Debug for RevmApplication<S, E> {
             .field("metrics", &self.metrics.is_some())
             .field("recovered_height", &self.recovered_height.load(Ordering::Relaxed))
             .field("last_verified_height", &self.last_verified_height.load(Ordering::Relaxed))
+            .field("block_fees_cached", &self.block_fees.read().len())
             .finish_non_exhaustive()
     }
 }
@@ -150,6 +158,7 @@ where
             metrics: None,
             recovered_height: Arc::new(AtomicU64::new(0)),
             last_verified_height: Arc::new(AtomicU64::new(0)),
+            block_fees: Arc::new(RwLock::new(HashMap::new())),
             _scheme: std::marker::PhantomData,
         }
     }
@@ -184,13 +193,57 @@ where
         self
     }
 
-    fn block_context(&self, height: u64, timestamp: u64, prevrandao: B256) -> BlockContext {
+    /// Seed the block-fee cache with entries from the block index so that
+    /// the first blocks after a restart can derive a correct EIP-1559 base
+    /// fee.  Without this, `compute_base_fee` would fall back to
+    /// `INITIAL_BASE_FEE` for any parent whose fee data was not in the
+    /// in-memory cache.
+    ///
+    /// `entries` should contain `(digest, gas_used, base_fee_per_gas)` for
+    /// recent blocks (at minimum the HEAD block).
+    pub fn seed_block_fees(&self, entries: &[(ConsensusDigest, u64, u64)]) {
+        let mut fees = self.block_fees.write();
+        for &(digest, gas_used, base_fee) in entries {
+            fees.insert(digest, (gas_used, base_fee));
+        }
+    }
+
+    /// Compute the base fee for a new block from the parent's gas usage
+    /// (EIP-1559).  Falls back to [`kora_config::INITIAL_BASE_FEE`] when the
+    /// parent's fee data is not cached (genesis or catch-up).
+    fn compute_base_fee(&self, parent_digest: ConsensusDigest) -> u64 {
+        let fees = self.block_fees.read();
+        match fees.get(&parent_digest) {
+            Some(&(parent_gas_used, parent_base_fee)) => calculate_base_fee(
+                parent_base_fee,
+                parent_gas_used,
+                self.gas_limit,
+                &BaseFeeParams::DEFAULT,
+            ),
+            None => kora_config::INITIAL_BASE_FEE,
+        }
+    }
+
+    /// Record a block's gas usage and base fee so that the next block can
+    /// derive its own base fee via [`Self::compute_base_fee`].
+    fn record_block_fees(&self, digest: ConsensusDigest, gas_used: u64, base_fee: u64) {
+        self.block_fees.write().insert(digest, (gas_used, base_fee));
+    }
+
+    fn block_context(
+        &self,
+        height: u64,
+        timestamp: u64,
+        prevrandao: B256,
+        parent_digest: ConsensusDigest,
+    ) -> BlockContext {
+        let base_fee = self.compute_base_fee(parent_digest);
         let header = Header {
             number: height,
             timestamp,
             gas_limit: self.gas_limit,
             beneficiary: self.fee_recipient,
-            base_fee_per_gas: Some(kora_config::INITIAL_BASE_FEE),
+            base_fee_per_gas: Some(base_fee),
             ..Default::default()
         };
         BlockContext::new(header, B256::ZERO, prevrandao)
@@ -287,7 +340,8 @@ where
 
         let prevrandao = self.get_prevrandao(parent_digest).await;
         let height = parent.height + 1;
-        let context = self.block_context(height, timestamp, prevrandao);
+        let context = self.block_context(height, timestamp, prevrandao, parent_digest);
+        let base_fee = context.header.base_fee_per_gas.unwrap_or(kora_config::INITIAL_BASE_FEE);
         let txs_bytes: Vec<Bytes> = txs.iter().map(|tx| tx.bytes.clone()).collect();
 
         let exec_start = Instant::now();
@@ -350,6 +404,9 @@ where
         let block = Block::new(parent.id(), height, timestamp, prevrandao, state_root, txs);
 
         let block_digest = block.commitment();
+
+        // Cache gas usage so that the next block can derive its base fee.
+        self.record_block_fees(block_digest, outcome.gas_used, base_fee);
 
         let total_elapsed = start.elapsed();
 
@@ -528,7 +585,9 @@ where
         };
         let snapshot_elapsed = start.elapsed();
 
-        let context = self.block_context(block.height, block.timestamp, block.prevrandao);
+        let context =
+            self.block_context(block.height, block.timestamp, block.prevrandao, parent_digest);
+        let base_fee = context.header.base_fee_per_gas.unwrap_or(kora_config::INITIAL_BASE_FEE);
         let exec_start = Instant::now();
         let execution =
             match BlockExecution::execute(&parent_snapshot, &self.executor, &context, &block.txs)
@@ -611,6 +670,9 @@ where
             );
             return false;
         }
+
+        // Cache gas usage so the next block can derive its base fee.
+        self.record_block_fees(digest, execution.outcome.gas_used, base_fee);
 
         let merged_changes = parent_snapshot.state.merge_changes(execution.outcome.changes.clone());
         let next_state = OverlayState::new(parent_snapshot.state.base(), merged_changes);
@@ -707,7 +769,14 @@ where
     type Block = Block;
 
     fn genesis(&mut self) -> impl std::future::Future<Output = Self::Block> + Send {
-        async move { self.ledger.genesis_block() }
+        async move {
+            let genesis = self.ledger.genesis_block();
+            // Seed the genesis block's fee data so that block 1 can derive
+            // its base fee from the parent (genesis) gas usage.
+            let genesis_digest = genesis.commitment();
+            self.record_block_fees(genesis_digest, 0, kora_config::INITIAL_BASE_FEE);
+            genesis
+        }
     }
 
     fn propose<A>(
