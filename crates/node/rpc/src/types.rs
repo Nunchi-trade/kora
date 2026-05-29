@@ -51,6 +51,11 @@ impl BlockNumberOrTag {
 pub(crate) const EMPTY_UNCLE_HASH: B256 =
     alloy_primitives::b256!("1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347");
 
+/// Keccak-256 hash of the RLP encoding of an empty trie (`keccak256(0x80)`),
+/// used as the `withdrawalsRoot` for blocks with no beacon-chain withdrawals.
+pub(crate) const EMPTY_WITHDRAWALS_ROOT: B256 =
+    alloy_primitives::b256!("56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421");
+
 /// Rich block representation for JSON-RPC responses.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -99,6 +104,10 @@ pub struct RpcBlock {
     pub size: U64,
     /// Transactions (hashes or full objects).
     pub transactions: BlockTransactions,
+    /// Withdrawals list (always empty -- Kora has no beacon chain).
+    pub withdrawals: Vec<()>,
+    /// Withdrawals trie root (empty trie root when no withdrawals).
+    pub withdrawals_root: B256,
 }
 
 /// Transactions in a block response.

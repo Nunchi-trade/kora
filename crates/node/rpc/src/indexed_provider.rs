@@ -16,8 +16,9 @@ use crate::{
     error::RpcError,
     state_provider::StateProvider,
     types::{
-        BlockNumberOrTag, BlockTag, BlockTransactions, CallRequest, EMPTY_UNCLE_HASH, RpcBlock,
-        RpcLog, RpcLogFilter, RpcTransaction, RpcTransactionReceipt,
+        BlockNumberOrTag, BlockTag, BlockTransactions, CallRequest, EMPTY_UNCLE_HASH,
+        EMPTY_WITHDRAWALS_ROOT, RpcBlock, RpcLog, RpcLogFilter, RpcTransaction,
+        RpcTransactionReceipt,
     },
 };
 
@@ -336,6 +337,8 @@ impl<S> IndexedStateProvider<S> {
             uncles: vec![],
             size: U64::ZERO,
             transactions,
+            withdrawals: vec![],
+            withdrawals_root: EMPTY_WITHDRAWALS_ROOT,
         }
     }
 
