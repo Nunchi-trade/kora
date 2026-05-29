@@ -15,6 +15,7 @@ use revm::{
     },
     context_interface::{
         ContextSetters,
+        block::BlobExcessGasAndPrice,
         transaction::{AccessList, AccessListItem},
     },
     database::State,
@@ -230,6 +231,12 @@ impl RevmExecutor {
                 blk.gas_limit = context.header.gas_limit;
                 blk.basefee = context.header.base_fee_per_gas.unwrap_or_default();
                 blk.prevrandao = Some(context.prevrandao);
+                if let Some(blob_base_fee) = context.blob_base_fee {
+                    blk.blob_excess_gas_and_price = Some(BlobExcessGasAndPrice {
+                        excess_blob_gas: 0,
+                        blob_gasprice: blob_base_fee,
+                    });
+                }
             });
 
         let mut evm = ctx.build_mainnet();
@@ -391,6 +398,12 @@ impl<S: StateDb> BlockExecutor<S> for RevmExecutor {
                     blk.gas_limit = context.header.gas_limit;
                     blk.basefee = context.header.base_fee_per_gas.unwrap_or_default();
                     blk.prevrandao = Some(context.prevrandao);
+                    if let Some(blob_base_fee) = context.blob_base_fee {
+                        blk.blob_excess_gas_and_price = Some(BlobExcessGasAndPrice {
+                            excess_blob_gas: 0,
+                            blob_gasprice: blob_base_fee,
+                        });
+                    }
                 });
 
             let mut evm = ctx.build_mainnet();
