@@ -251,6 +251,12 @@ async fn handle_finalized_update<E, P>(
                 } else {
                     m.finalization_failures.inc();
                 }
+
+                // Update snapshot store depth gauges so operators can detect
+                // when the persistence pipeline falls behind block production.
+                let (total, unpersisted) = state.snapshot_store_stats().await;
+                m.snapshot_store_total.set(total as i64);
+                m.unpersisted_snapshot_depth.set(unpersisted as i64);
             }
 
             // If finalization permanently failed, the node's QMDB state has

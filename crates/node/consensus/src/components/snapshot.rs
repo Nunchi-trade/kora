@@ -86,6 +86,17 @@ impl<S> InMemorySnapshotStore<S> {
     pub fn persisted_count(&self) -> usize {
         self.persisted.read().len()
     }
+
+    /// Return the number of snapshots that have not yet been persisted.
+    ///
+    /// This is the count of entries in the snapshot map whose digest is not
+    /// in the persisted set.  A rising value under steady-state operation
+    /// indicates the persistence pipeline is falling behind block production.
+    pub fn unpersisted_count(&self) -> usize {
+        let snapshots = self.snapshots.read();
+        let persisted = self.persisted.read();
+        snapshots.keys().filter(|d| !persisted.contains(d)).count()
+    }
 }
 
 impl<S> InMemorySnapshotStore<S> {
@@ -536,5 +547,32 @@ mod tests {
         assert_eq!(store.persisted_count(), 1);
         // Eviction with only 1 persisted and limit 1 should evict nothing.
         assert_eq!(store.evict_persisted(), 0);
+    }
+
+    #[test]
+    fn unpersisted_count_tracks_correctly() {
+        let store = InMemorySnapshotStore::<MockStateDb>::with_max_persisted_retained(4);
+
+        let d1 = make_digest(0x01);
+        let d2 = make_digest(0x02);
+        let d3 = make_digest(0x03);
+
+        // Empty store has zero unpersisted.
+        assert_eq!(store.unpersisted_count(), 0);
+
+        // Insert three snapshots -- all unpersisted.
+        store.insert(d1, make_snapshot(None));
+        store.insert(d2, make_snapshot(Some(d1)));
+        store.insert(d3, make_snapshot(Some(d2)));
+        assert_eq!(store.unpersisted_count(), 3);
+        assert_eq!(store.len(), 3);
+
+        // Persist d1 -- two unpersisted remain.
+        store.mark_persisted(&[d1]);
+        assert_eq!(store.unpersisted_count(), 2);
+
+        // Persist all -- zero unpersisted.
+        store.mark_persisted(&[d2, d3]);
+        assert_eq!(store.unpersisted_count(), 0);
     }
 }

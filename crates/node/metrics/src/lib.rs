@@ -66,6 +66,17 @@ pub struct AppMetrics {
     /// Total number of blocks successfully finalized.
     pub blocks_finalized: Counter,
 
+    // -- Snapshot Store --
+    /// Number of snapshots that have not yet been persisted to QMDB.
+    ///
+    /// A rising value under steady-state operation indicates the persistence
+    /// pipeline is falling behind block production, which leads to unbounded
+    /// memory growth and increasingly expensive chain walks.
+    pub unpersisted_snapshot_depth: Gauge,
+    /// Total number of snapshots currently held in the in-memory store
+    /// (both persisted and unpersisted).
+    pub snapshot_store_total: Gauge,
+
     // -- Transaction Gossip --
     /// Total transactions broadcast to peers via gossip.
     pub gossip_tx_broadcast: Counter,
@@ -113,6 +124,8 @@ impl AppMetrics {
             snapshot_poll_wait: Histogram::new(SNAPSHOT_POLL_BUCKETS),
             finalization_failures: Counter::default(),
             blocks_finalized: Counter::default(),
+            unpersisted_snapshot_depth: Gauge::default(),
+            snapshot_store_total: Gauge::default(),
             gossip_tx_broadcast: Counter::default(),
             gossip_tx_received: Counter::default(),
             gossip_tx_broadcast_failed: Counter::default(),
@@ -183,6 +196,16 @@ impl AppMetrics {
             "kora_blocks_finalized",
             "Total blocks successfully finalized",
             self.blocks_finalized.clone(),
+        );
+        registry.register(
+            "kora_unpersisted_snapshot_depth",
+            "Number of in-memory snapshots not yet persisted to QMDB",
+            self.unpersisted_snapshot_depth.clone(),
+        );
+        registry.register(
+            "kora_snapshot_store_total",
+            "Total snapshots currently held in the in-memory store",
+            self.snapshot_store_total.clone(),
         );
         registry.register(
             "kora_gossip_tx_broadcast",

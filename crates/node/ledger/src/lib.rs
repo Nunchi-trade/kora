@@ -561,6 +561,15 @@ impl LedgerView {
         let inner = self.inner.lock().await;
         inner.snapshots.is_persisted(digest)
     }
+
+    /// Return snapshot store statistics: `(total, unpersisted)`.
+    ///
+    /// - `total`: number of snapshots currently held in memory.
+    /// - `unpersisted`: number of snapshots not yet persisted to QMDB.
+    pub async fn snapshot_store_stats(&self) -> (usize, usize) {
+        let inner = self.inner.lock().await;
+        (inner.snapshots.len(), inner.snapshots.unpersisted_count())
+    }
 }
 
 /// Domain service that exposes high-level ledger commands.
@@ -735,6 +744,13 @@ impl LedgerService {
     /// (even if the in-memory snapshot data has since been evicted).
     pub async fn is_snapshot_persisted(&self, digest: &ConsensusDigest) -> bool {
         self.view.is_snapshot_persisted(digest).await
+    }
+
+    /// Return snapshot store statistics: `(total, unpersisted)`.
+    ///
+    /// Delegates to [`LedgerView::snapshot_store_stats`].
+    pub async fn snapshot_store_stats(&self) -> (usize, usize) {
+        self.view.snapshot_store_stats().await
     }
 }
 
