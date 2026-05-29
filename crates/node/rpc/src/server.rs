@@ -662,6 +662,9 @@ impl<S: StateProvider + Clone + 'static> RpcServer<S> {
             if let Some(sender) = mempool_broadcast.clone() {
                 eth_api = eth_api.with_mempool_broadcast(sender);
             }
+            if let Some(ref pool) = txpool {
+                eth_api = eth_api.with_txpool(pool.clone());
+            }
             let net_api = NetApiImpl::new(chain_id);
             net_api.set_peer_count(peer_count);
             let web3_api = Web3ApiImpl::new();
@@ -919,6 +922,9 @@ impl<S: StateProvider + Clone + 'static> JsonRpcServer<S> {
         }
         if let Some(sender) = self.mempool_broadcast.clone() {
             eth_api = eth_api.with_mempool_broadcast(sender);
+        }
+        if let Some(ref pool) = self.txpool {
+            eth_api = eth_api.with_txpool(pool.clone());
         }
         let net_api = NetApiImpl::new(self.chain_id);
         net_api.set_peer_count(self.peer_count);

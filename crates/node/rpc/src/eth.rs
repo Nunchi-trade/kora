@@ -15,6 +15,7 @@ use alloy_eips::eip2718::Decodable2718 as _;
 use alloy_primitives::{Address, B256, Bytes, U64, U256};
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use kora_domain::MempoolEvent;
+use kora_txpool::TransactionPool;
 use tokio::sync::RwLock;
 use tracing::warn;
 
@@ -286,6 +287,9 @@ pub struct EthApiImpl<S: StateProvider> {
     pending_txs: Arc<RwLock<HashMap<B256, RpcTransaction>>>,
     pending_tx_broadcast: Option<PendingTxEventSender>,
     mempool_broadcast: Option<MempoolEventSender>,
+    /// Transaction pool used for pending nonce lookups in
+    /// `eth_getTransactionCount("pending")`.
+    txpool: Option<TransactionPool>,
     gas_oracle_config: GasOracleConfig,
     gas_oracle_cache: Arc<RwLock<Option<CachedGasOracleEstimate>>>,
     /// Insertion-ordered record of pending transaction hashes so that
@@ -310,6 +314,7 @@ impl<S: StateProvider> std::fmt::Debug for EthApiImpl<S> {
             .field("chain_id", &self.chain_id)
             .field("block_height", &self.block_height)
             .field("tx_submit", &self.tx_submit.is_some())
+            .field("txpool", &self.txpool.is_some())
             .field("gas_oracle_config", &self.gas_oracle_config)
             .finish()
     }
@@ -340,6 +345,7 @@ impl<S: StateProvider + 'static> EthApiImpl<S> {
             pending_txs: Arc::new(RwLock::new(HashMap::new())),
             pending_tx_broadcast: None,
             mempool_broadcast: None,
+            txpool: None,
             gas_oracle_config,
             gas_oracle_cache: Arc::new(RwLock::new(None)),
             pending_tx_order: Arc::new(RwLock::new(VecDeque::new())),
@@ -361,6 +367,17 @@ impl<S: StateProvider + 'static> EthApiImpl<S> {
     #[must_use]
     pub fn with_mempool_broadcast(mut self, mempool_broadcast: MempoolEventSender) -> Self {
         self.mempool_broadcast = Some(mempool_broadcast);
+        self
+    }
+
+    /// Attach a transaction pool for pending nonce lookups.
+    ///
+    /// When set, `eth_getTransactionCount("pending")` will return the
+    /// next nonce after all pending mempool transactions, rather than
+    /// the finalized on-chain nonce.
+    #[must_use]
+    pub fn with_txpool(mut self, txpool: TransactionPool) -> Self {
+        self.txpool = Some(txpool);
         self
     }
 
@@ -446,9 +463,23 @@ impl<S: StateProvider + 'static> EthApiServer for EthApiImpl<S> {
         address: Address,
         block: Option<BlockNumberOrTag>,
     ) -> RpcResult<U64> {
+        let is_pending = block.as_ref().is_some_and(BlockNumberOrTag::is_pending);
+
         let provider = self.state_provider.read().await;
-        let nonce = provider.nonce(address, block).await?;
-        Ok(U64::from(nonce))
+        let finalized_nonce = provider.nonce(address, block).await?;
+
+        // When the caller asks for the "pending" nonce, augment the
+        // finalized on-chain nonce with the transaction pool's view so
+        // that sequential sends from one account get strictly increasing
+        // nonces.
+        if is_pending
+            && let Some(ref txpool) = self.txpool
+            && let Some(pool_nonce) = txpool.next_nonce(&address)
+        {
+            return Ok(U64::from(pool_nonce.max(finalized_nonce)));
+        }
+
+        Ok(U64::from(finalized_nonce))
     }
 
     async fn get_code(

@@ -161,7 +161,11 @@ impl SenderQueue {
         self.promote_queued();
     }
 
-    const fn next_pending_nonce(&self) -> u64 {
+    /// Returns the next expected nonce after all pending (executable) transactions.
+    ///
+    /// This is `next_nonce + len(pending)` -- i.e. the nonce a new transaction
+    /// must use to be appended directly to the pending queue.
+    pub const fn next_pending_nonce(&self) -> u64 {
         self.next_nonce.saturating_add(self.pending.len() as u64)
     }
 
