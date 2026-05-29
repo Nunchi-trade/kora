@@ -58,11 +58,6 @@ impl BlockContext {
         }
         self
     }
-
-    /// Get the base fee from the header.
-    pub fn base_fee(&self) -> u64 {
-        self.header.base_fee_per_gas.unwrap_or_default()
-    }
 }
 
 /// Parent block info for header validation.

@@ -274,28 +274,6 @@ impl CallRequest {
     }
 }
 
-/// Sync status for eth_syncing.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum SyncStatus {
-    /// Not syncing.
-    NotSyncing(bool),
-    /// Syncing status.
-    Syncing(SyncInfo),
-}
-
-/// Syncing information.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SyncInfo {
-    /// Starting block.
-    pub starting_block: U64,
-    /// Current block.
-    pub current_block: U64,
-    /// Highest block.
-    pub highest_block: U64,
-}
-
 /// Log filter for `eth_getLogs` queries.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -485,27 +463,6 @@ mod tests {
         assert_eq!(log.address, Address::ZERO);
         assert!(log.topics.is_empty());
         assert!(!log.removed);
-    }
-
-    #[test]
-    fn sync_status_not_syncing() {
-        let status = SyncStatus::NotSyncing(false);
-        let json = serde_json::to_string(&status).unwrap();
-        assert_eq!(json, "false");
-    }
-
-    #[test]
-    fn sync_status_syncing() {
-        let info = SyncInfo {
-            starting_block: U64::from(0),
-            current_block: U64::from(100),
-            highest_block: U64::from(200),
-        };
-        let status = SyncStatus::Syncing(info);
-        let json = serde_json::to_string(&status).unwrap();
-        assert!(json.contains("startingBlock"));
-        assert!(json.contains("currentBlock"));
-        assert!(json.contains("highestBlock"));
     }
 
     #[test]

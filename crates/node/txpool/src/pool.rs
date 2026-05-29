@@ -402,11 +402,6 @@ impl TransactionPool {
         inner.by_sender.get(sender).map(|q| q.pending.clone()).unwrap_or_default()
     }
 
-    /// Gets a transaction by its hash.
-    pub fn get(&self, hash: &B256) -> Option<OrderedTransaction> {
-        self.inner.read().by_hash.get(hash).cloned()
-    }
-
     /// Removes a transaction by its hash, emitting a `TxEvicted` event with the
     /// provided `reason`.
     pub fn remove_with_reason(&self, hash: &B256, reason: &str) -> Option<OrderedTransaction> {

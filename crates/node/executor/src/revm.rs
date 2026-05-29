@@ -57,11 +57,6 @@ impl RevmExecutor {
         self.config.chain_id
     }
 
-    /// Get the execution configuration.
-    pub const fn config(&self) -> &ExecutionConfig {
-        &self.config
-    }
-
     /// Get the spec ID.
     pub const fn spec_id(&self) -> SpecId {
         self.config.spec_id

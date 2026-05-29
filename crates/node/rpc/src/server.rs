@@ -506,13 +506,6 @@ impl<S: StateProvider + Clone + 'static> RpcServer<S> {
         self
     }
 
-    /// Set CORS configuration.
-    #[must_use]
-    pub fn with_cors(mut self, cors_config: CorsConfig) -> Self {
-        self.cors_config = cors_config;
-        self
-    }
-
     /// Set rate limiting configuration.
     #[must_use]
     pub const fn with_rate_limit_config(mut self, rate_limit_config: RateLimitConfig) -> Self {

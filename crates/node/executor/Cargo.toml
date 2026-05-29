@@ -11,7 +11,6 @@ description = "Block execution abstractions and REVM implementation for Kora"
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
 alloy-primitives.workspace = true
-alloy-rlp.workspace = true
 futures.workspace = true
 kora-qmdb = { path = "../../storage/qmdb" }
 kora-traits = { path = "../../storage/traits" }
