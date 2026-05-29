@@ -1253,7 +1253,7 @@ impl NodeRunner for ProductionRunner {
             block_cfg.max_txs,
             gas_limit,
         );
-        app = app.with_metrics(app_metrics);
+        app = app.with_metrics(app_metrics.clone());
         if let Some((height, _)) = recovered_head_height {
             app = app.with_recovered_height(height);
         }
@@ -1268,10 +1268,9 @@ impl NodeRunner for ProductionRunner {
         );
 
         let seed_reporter = SeedReporter::<MinSig>::new(ledger.clone());
-        let node_state_reporter = self
-            .rpc_config
-            .as_ref()
-            .map(|(state, _)| NodeStateReporter::<ThresholdScheme>::new(state.clone()));
+        let node_state_reporter = self.rpc_config.as_ref().map(|(state, _)| {
+            NodeStateReporter::<ThresholdScheme>::new(state.clone()).with_metrics(app_metrics)
+        });
         let inner_reporters: Reporters<_, MarshalMailbox, Option<NodeStateRptr>> =
             Reporters::from((marshal_mailbox.clone(), node_state_reporter));
         let reporter = Reporters::from((seed_reporter, inner_reporters));
