@@ -13,7 +13,7 @@ pub use app::RevmApplication;
 pub mod commit_marker;
 
 mod error;
-pub use error::RunnerError;
+pub use error::{BuildBlockError, RunnerError};
 
 mod no_sync_storage;
 
