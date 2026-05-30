@@ -1,7 +1,7 @@
 //! Transaction validation.
 
 use alloy_consensus::{Transaction, TxEnvelope};
-use alloy_eips::eip2718::Decodable2718;
+use alloy_eips::{eip2718::Decodable2718, eip4844::VERSIONED_HASH_VERSION_KZG};
 use alloy_primitives::{Address, B256, U256, keccak256};
 use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
 use kora_domain::Tx;
@@ -87,6 +87,8 @@ impl<S: StateDbRead> TransactionValidator<S> {
         if tx_chain_id != self.chain_id {
             return Err(TxPoolError::InvalidChainId { got: tx_chain_id, expected: self.chain_id });
         }
+
+        validate_typed_transaction_fields(&envelope)?;
 
         let (sender, hash) = recover_sender_and_hash(&envelope)?;
 
@@ -225,6 +227,36 @@ const fn effective_gas_price(envelope: &TxEnvelope) -> u128 {
     }
 }
 
+fn validate_typed_transaction_fields(envelope: &TxEnvelope) -> Result<(), TxPoolError> {
+    match envelope {
+        TxEnvelope::Eip4844(tx) => {
+            let blob_versioned_hashes = &tx.tx().tx().blob_versioned_hashes;
+            if blob_versioned_hashes.is_empty() {
+                return Err(TxPoolError::InvalidTransactionTypeFields {
+                    reason: "EIP-4844 transaction requires blob versioned hashes",
+                });
+            }
+
+            if blob_versioned_hashes
+                .iter()
+                .any(|hash| hash.as_slice()[0] != VERSIONED_HASH_VERSION_KZG)
+            {
+                return Err(TxPoolError::InvalidTransactionTypeFields {
+                    reason: "EIP-4844 blob versioned hashes must use KZG version",
+                });
+            }
+        }
+        TxEnvelope::Eip7702(tx) if tx.tx().authorization_list.is_empty() => {
+            return Err(TxPoolError::InvalidTransactionTypeFields {
+                reason: "EIP-7702 transaction requires authorizations",
+            });
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
 fn intrinsic_gas(envelope: &TxEnvelope) -> u64 {
     let mut gas = TX_BASE_GAS;
 
@@ -291,7 +323,7 @@ fn max_tx_cost(envelope: &TxEnvelope) -> U256 {
 mod tests {
     use std::{collections::HashMap, sync::Arc};
 
-    use alloy_consensus::{SignableTransaction as _, TxEip1559, TxLegacy};
+    use alloy_consensus::{SignableTransaction as _, TxEip1559, TxEip4844, TxEip7702, TxLegacy};
     use alloy_eips::{
         eip2718::Encodable2718,
         eip2930::{AccessList, AccessListItem},
@@ -429,6 +461,96 @@ mod tests {
         (sender, envelope, Tx::new(raw_bytes.into()))
     }
 
+    fn sign_eip4844_tx(
+        chain_id: u64,
+        nonce: u64,
+        gas_limit: u64,
+        max_fee_per_gas: u128,
+        blob_versioned_hashes: Vec<B256>,
+    ) -> (Address, TxEnvelope, Tx) {
+        let signing_key = SigningKey::random(&mut OsRng);
+        let verifying_key = signing_key.verifying_key();
+        let pubkey = verifying_key.to_encoded_point(false);
+        let pubkey_bytes = pubkey.as_bytes();
+        let pubkey_hash = sha3::Keccak256::digest(&pubkey_bytes[1..]);
+        let sender = Address::from_slice(&pubkey_hash[12..]);
+
+        let tx = TxEip4844 {
+            chain_id,
+            nonce,
+            gas_limit,
+            max_fee_per_gas,
+            max_priority_fee_per_gas: max_fee_per_gas,
+            to: Address::ZERO,
+            value: U256::ZERO,
+            access_list: Default::default(),
+            blob_versioned_hashes,
+            max_fee_per_blob_gas: max_fee_per_gas,
+            input: Bytes::new(),
+        };
+
+        let sig_hash = tx.signature_hash();
+        let (sig, recovery_id) = signing_key.sign_prehash_recoverable(sig_hash.as_slice()).unwrap();
+        let r = U256::from_be_slice(&sig.r().to_bytes());
+        let s = U256::from_be_slice(&sig.s().to_bytes());
+        let v = recovery_id.is_y_odd();
+        let signature = Signature::new(r, s, v);
+
+        let signed = tx.into_signed(signature);
+        let envelope = TxEnvelope::from(signed);
+        let mut raw_bytes = Vec::new();
+        envelope.encode_2718(&mut raw_bytes);
+
+        (sender, envelope, Tx::new(raw_bytes.into()))
+    }
+
+    fn sign_eip7702_empty_auth_tx(
+        chain_id: u64,
+        nonce: u64,
+        gas_limit: u64,
+        max_fee_per_gas: u128,
+    ) -> (Address, TxEnvelope, Tx) {
+        let signing_key = SigningKey::random(&mut OsRng);
+        let verifying_key = signing_key.verifying_key();
+        let pubkey = verifying_key.to_encoded_point(false);
+        let pubkey_bytes = pubkey.as_bytes();
+        let pubkey_hash = sha3::Keccak256::digest(&pubkey_bytes[1..]);
+        let sender = Address::from_slice(&pubkey_hash[12..]);
+
+        let tx = TxEip7702 {
+            chain_id,
+            nonce,
+            gas_limit,
+            max_fee_per_gas,
+            max_priority_fee_per_gas: max_fee_per_gas,
+            to: Address::ZERO,
+            value: U256::ZERO,
+            access_list: Default::default(),
+            authorization_list: Vec::new(),
+            input: Bytes::new(),
+        };
+
+        let sig_hash = tx.signature_hash();
+        let (sig, recovery_id) = signing_key.sign_prehash_recoverable(sig_hash.as_slice()).unwrap();
+        let r = U256::from_be_slice(&sig.r().to_bytes());
+        let s = U256::from_be_slice(&sig.s().to_bytes());
+        let v = recovery_id.is_y_odd();
+        let signature = Signature::new(r, s, v);
+
+        let signed = tx.into_signed(signature);
+        let envelope = TxEnvelope::from(signed);
+        let mut raw_bytes = Vec::new();
+        envelope.encode_2718(&mut raw_bytes);
+
+        (sender, envelope, Tx::new(raw_bytes.into()))
+    }
+
+    fn blob_hash_with_version(version: u8) -> B256 {
+        let mut bytes = [0u8; 32];
+        bytes[0] = version;
+        B256::from(bytes)
+    }
+
     #[tokio::test]
     async fn validate_valid_eip1559_transaction() {
         let chain_id = 1u64;
@@ -474,6 +596,81 @@ mod tests {
 
         let result = validator.validate(raw_tx).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn validate_valid_eip4844_transaction_with_kzg_hash() {
+        let chain_id = 1u64;
+        let (sender, _, raw_tx) = sign_eip4844_tx(
+            chain_id,
+            0,
+            21000,
+            1_000_000_000,
+            vec![blob_hash_with_version(VERSIONED_HASH_VERSION_KZG)],
+        );
+
+        let state =
+            MockState::new().with_account(sender, 0, U256::from(1_000_000_000_000_000_000u64));
+        let config = PoolConfig::default();
+        let validator = TransactionValidator::new(chain_id, state, config);
+
+        let result = validator.validate(raw_tx).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn reject_eip4844_empty_blob_versioned_hashes() {
+        let chain_id = 1u64;
+        let (_, _, raw_tx) = sign_eip4844_tx(chain_id, 0, 21000, 1_000_000_000, Vec::new());
+
+        let state = MockState::new();
+        let config = PoolConfig::default();
+        let validator = TransactionValidator::new(chain_id, state, config);
+
+        let result = validator.validate(raw_tx).await;
+        assert!(matches!(
+            result,
+            Err(TxPoolError::InvalidTransactionTypeFields {
+                reason: "EIP-4844 transaction requires blob versioned hashes"
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn reject_eip4844_invalid_blob_versioned_hash_version() {
+        let chain_id = 1u64;
+        let (_, _, raw_tx) =
+            sign_eip4844_tx(chain_id, 0, 21000, 1_000_000_000, vec![blob_hash_with_version(0x02)]);
+
+        let state = MockState::new();
+        let config = PoolConfig::default();
+        let validator = TransactionValidator::new(chain_id, state, config);
+
+        let result = validator.validate(raw_tx).await;
+        assert!(matches!(
+            result,
+            Err(TxPoolError::InvalidTransactionTypeFields {
+                reason: "EIP-4844 blob versioned hashes must use KZG version"
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn reject_eip7702_empty_authorization_list() {
+        let chain_id = 1u64;
+        let (_, _, raw_tx) = sign_eip7702_empty_auth_tx(chain_id, 0, 21000, 1_000_000_000);
+
+        let state = MockState::new();
+        let config = PoolConfig::default();
+        let validator = TransactionValidator::new(chain_id, state, config);
+
+        let result = validator.validate(raw_tx).await;
+        assert!(matches!(
+            result,
+            Err(TxPoolError::InvalidTransactionTypeFields {
+                reason: "EIP-7702 transaction requires authorizations"
+            })
+        ));
     }
 
     #[tokio::test]

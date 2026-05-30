@@ -123,6 +123,13 @@ pub enum TxPoolError {
         /// Maximum allowed size (49,152 bytes).
         max: usize,
     },
+
+    /// Typed transaction fields are inconsistent with transaction-type rules.
+    #[error("invalid transaction type fields: {reason}")]
+    InvalidTransactionTypeFields {
+        /// Validation failure reason.
+        reason: &'static str,
+    },
 }
 
 #[cfg(test)]
