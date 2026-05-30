@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use alloy_primitives::{Address, B256, Bytes, U256};
 use kora_qmdb::ChangeSet;
@@ -37,9 +36,7 @@ fn build_code_index(changes: &mut ChangeSet) -> HashMap<B256, Bytes> {
         if let Some(code) = update.code.take() {
             // Only insert if we haven't seen this code hash yet -- this is
             // where deduplication happens (issue #144).
-            index
-                .entry(update.code_hash)
-                .or_insert_with(|| Bytes::from(code));
+            index.entry(update.code_hash).or_insert_with(|| Bytes::from(code));
         }
     }
     index
@@ -93,11 +90,7 @@ impl<S> OverlayState<S> {
     #[must_use]
     pub fn new(base: S, mut changes: ChangeSet) -> Self {
         let code_by_hash = build_code_index(&mut changes);
-        Self {
-            base,
-            changes: Arc::new(changes),
-            code_by_hash: Arc::new(code_by_hash),
-        }
+        Self { base, changes: Arc::new(changes), code_by_hash: Arc::new(code_by_hash) }
     }
 
     /// Return the number of accounts in the overlay change set.
@@ -690,10 +683,7 @@ mod tests {
         assert_eq!(overlay.code_by_hash.len(), 1);
 
         // Both accounts should resolve to the same bytecode via the index.
-        assert_eq!(
-            overlay.code(&code_hash).await.unwrap(),
-            Bytes::from(code_bytes)
-        );
+        assert_eq!(overlay.code(&code_hash).await.unwrap(), Bytes::from(code_bytes));
     }
 
     #[test]
