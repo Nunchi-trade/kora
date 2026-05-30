@@ -683,6 +683,7 @@ fn test_execute_enforces_block_gas_limit() {
         2,
         "only 2 of 3 transactions should execute within gas limit"
     );
+    assert_eq!(outcome.included_tx_count, 2, "included count must match executed prefix");
     assert!(
         outcome.receipts.iter().all(|r| r.success()),
         "all executed transactions should succeed"
@@ -723,6 +724,7 @@ fn test_execute_within_gas_limit_processes_all_transactions() {
 
     // All 3 transactions should have been executed and all should succeed.
     assert_eq!(outcome.receipts.len(), 3, "all 3 transactions should execute within gas limit");
+    assert_eq!(outcome.included_tx_count, 3, "included count must include every transaction");
     assert!(
         outcome.receipts.iter().all(|r| r.success()),
         "all executed transactions should succeed"
@@ -762,6 +764,7 @@ fn test_execute_single_tx_exceeding_block_gas_limit_produces_empty_outcome() {
         outcome.receipts.is_empty(),
         "no transactions should execute when gas limit is too low"
     );
+    assert_eq!(outcome.included_tx_count, 0);
     assert_eq!(outcome.gas_used, 0);
 }
 

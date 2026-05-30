@@ -104,6 +104,7 @@ mod tests {
         assert!(outcome.changes.is_empty());
         assert!(outcome.receipts.is_empty());
         assert_eq!(outcome.gas_used, 0);
+        assert_eq!(outcome.included_tx_count, 0);
         assert!(outcome.selfdestructed_addresses.is_empty());
     }
 }

@@ -480,6 +480,13 @@ async fn replay_finalized_block(
     let execution = BlockExecution::execute(&parent_snapshot, executor, &block_context, &block.txs)
         .await
         .with_context(|| format!("failed to replay finalized block at height {}", block.height))?;
+    anyhow::ensure!(
+        execution.outcome.included_tx_count == block.txs.len(),
+        "replayed block at height {} executed {} of {} transactions",
+        block.height,
+        execution.outcome.included_tx_count,
+        block.txs.len()
+    );
     let state_root = ledger
         .compute_root_from_store(parent_digest, &execution.outcome.changes)
         .await

@@ -34,7 +34,7 @@ use commonware_runtime::{Spawner as _, Supervisor as _, tokio};
 use commonware_utils::acknowledgement::{Acknowledgement as _, Exact};
 pub use gc_log::SelfdestructGcLog;
 use kora_consensus::BlockExecution;
-use kora_domain::{Block, ConsensusDigest, MempoolEvent, PublicKey, StateRoot};
+use kora_domain::{Block, ConsensusDigest, MempoolEvent, PublicKey, StateRoot, Tx};
 use kora_executor::{BlockContext, BlockExecutor, ExecutionOutcome};
 use kora_indexer::{BlockIndex, IndexedBlock, IndexedLog, IndexedReceipt, IndexedTransaction};
 use kora_ledger::{LedgerError, LedgerService};
@@ -304,9 +304,10 @@ async fn handle_finalized_update<E, P>(
                      aborting to prevent state divergence. \
                      The node must be restarted after investigating the root cause."
                 );
-                // Prune mempool before halting so a restart does not re-propose
-                // transactions from the finalized block.
-                state.prune_mempool(&block.txs).await;
+                // Finalization failed, so this path cannot reliably
+                // distinguish executed transactions from a gas-skipped suffix.
+                // Leave mempool contents intact rather than pruning
+                // transactions that may not have been executed.
                 // Allow a brief window for log buffers to flush.
                 ::tokio::time::sleep(Duration::from_millis(200)).await;
                 std::process::abort();
@@ -330,17 +331,29 @@ async fn handle_finalized_update<E, P>(
                 }
             }
 
+            let execution_outcome = result.as_ref().ok().and_then(|(outcome, _)| outcome.as_ref());
+            let included_txs = included_tx_prefix(&block, execution_outcome);
+            if included_txs.len() < block.txs.len() {
+                warn!(
+                    block_height = block.height,
+                    block_txs = block.txs.len(),
+                    included_txs = included_txs.len(),
+                    "finalized block execution skipped trailing transactions; \
+                     pruning and publishing included prefix only"
+                );
+            }
+
             acknowledge_checkpoint(pending_acks, block.height, checkpoint_interval, ack).await;
 
             // Prune the mempool -- the block is consensus-finalized, so its
             // transactions must never be re-proposed.
-            state.prune_mempool(&block.txs).await;
+            state.prune_mempool(included_txs).await;
 
             // Evict any remaining transactions whose nonces are now stale
             // relative to finalized state.
             state.prune_stale_nonces().await;
 
-            publish_mempool_inclusions(mempool_broadcast.as_ref(), &block);
+            publish_mempool_inclusions(mempool_broadcast.as_ref(), &block, included_txs);
         }
     }
 }
@@ -544,6 +557,17 @@ where
                 });
             }
 
+            let included_txs = included_tx_prefix(block, Some(&execution.outcome));
+            if included_txs.len() < block.txs.len() {
+                warn!(
+                    ?digest,
+                    height = block.height,
+                    block_txs = block.txs.len(),
+                    included_txs = included_txs.len(),
+                    "finalize_block: snapshot will record only executed transaction prefix"
+                );
+            }
+
             if !snapshot_exists {
                 let merged_changes =
                     parent_snapshot.state.merge_changes(execution.outcome.changes.clone());
@@ -555,7 +579,7 @@ where
                         next_state,
                         state_root,
                         execution.outcome.changes.clone(),
-                        &block.txs,
+                        included_txs,
                     )
                     .await;
             }
@@ -614,13 +638,23 @@ where
     Ok((execution_outcome, execution_context))
 }
 
-fn publish_mempool_inclusions(mempool_broadcast: Option<&MempoolEventSender>, block: &Block) {
+fn included_tx_prefix<'a>(block: &'a Block, outcome: Option<&ExecutionOutcome>) -> &'a [Tx] {
+    let included_len =
+        outcome.map_or(block.txs.len(), |outcome| outcome.included_tx_count.min(block.txs.len()));
+    &block.txs[..included_len]
+}
+
+fn publish_mempool_inclusions(
+    mempool_broadcast: Option<&MempoolEventSender>,
+    block: &Block,
+    txs: &[Tx],
+) {
     let Some(sender) = mempool_broadcast else {
         return;
     };
 
     let block_hash = block.id().0;
-    for tx in &block.txs {
+    for tx in txs {
         let _ = sender.send(MempoolEvent::TxIncluded {
             hash: keccak256(&tx.bytes),
             block_number: block.height,
@@ -650,7 +684,7 @@ mod mempool_tests {
         );
         let block_hash = block.id().0;
 
-        publish_mempool_inclusions(Some(&sender), &block);
+        publish_mempool_inclusions(Some(&sender), &block, &block.txs);
 
         assert_eq!(
             receiver.try_recv().unwrap(),
@@ -660,6 +694,34 @@ mod mempool_tests {
                 block_hash,
             }
         );
+    }
+
+    #[test]
+    fn publish_mempool_inclusions_uses_included_prefix() {
+        let (sender, mut receiver) = kora_rpc::mempool_event_channel();
+        let tx0 = Tx::new(Bytes::from_static(&[0x01]));
+        let tx1 = Tx::new(Bytes::from_static(&[0x02]));
+        let block = Block::new(
+            BlockId(B256::ZERO),
+            7,
+            0,
+            B256::ZERO,
+            StateRoot(B256::ZERO),
+            vec![tx0.clone(), tx1],
+        );
+        let block_hash = block.id().0;
+
+        publish_mempool_inclusions(Some(&sender), &block, &block.txs[..1]);
+
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            MempoolEvent::TxIncluded {
+                hash: keccak256(&tx0.bytes),
+                block_number: block.height,
+                block_hash,
+            }
+        );
+        assert!(receiver.try_recv().is_err());
     }
 }
 
@@ -805,9 +867,11 @@ mod finalize_success_tests {
             &self,
             _state: &OverlayState<QmdbState>,
             _context: &BlockContext,
-            _txs: &[Bytes],
+            txs: &[Bytes],
         ) -> Result<ExecutionOutcome, ExecutionError> {
-            Ok(ExecutionOutcome::new())
+            let mut outcome = ExecutionOutcome::new();
+            outcome.included_tx_count = txs.len();
+            Ok(outcome)
         }
 
         fn validate_header(&self, _header: &Header) -> Result<(), ExecutionError> {
@@ -822,6 +886,30 @@ mod finalize_success_tests {
     impl BlockContextProvider for StubProvider {
         fn context(&self, block: &Block) -> BlockContext {
             BlockContext::new(Header::default(), block.parent.0, block.prevrandao)
+        }
+    }
+
+    #[derive(Clone)]
+    struct PrefixSuccessExecutor {
+        included_tx_count: usize,
+    }
+
+    impl BlockExecutor<OverlayState<QmdbState>> for PrefixSuccessExecutor {
+        type Tx = Bytes;
+
+        fn execute(
+            &self,
+            _state: &OverlayState<QmdbState>,
+            _context: &BlockContext,
+            _txs: &[Bytes],
+        ) -> Result<ExecutionOutcome, ExecutionError> {
+            let mut outcome = ExecutionOutcome::new();
+            outcome.included_tx_count = self.included_tx_count;
+            Ok(outcome)
+        }
+
+        fn validate_header(&self, _header: &Header) -> Result<(), ExecutionError> {
+            Ok(())
         }
     }
 
@@ -893,6 +981,73 @@ mod finalize_success_tests {
                 genesis_root,
                 "persisted root must match the block state root"
             );
+        });
+    }
+
+    #[test]
+    fn finalization_prunes_and_publishes_only_included_prefix() {
+        run_reporter_test(|context| async move {
+            let ledger = LedgerView::init(
+                context.child("ledger"),
+                next_partition("reporters-finalize-prefix"),
+                Vec::new(),
+            )
+            .await
+            .expect("init ledger");
+            let service = LedgerService::new(ledger);
+            let genesis = service.genesis_block();
+            let genesis_digest = genesis.commitment();
+            let genesis_root =
+                service.query_state_root(genesis_digest).await.expect("genesis state root");
+
+            let sender_key = SigningKey::from_bytes(&[3u8; 32].into()).expect("valid key");
+            let to = Address::repeat_byte(0xcd);
+            let tx0 = Evm::sign_eip1559_transfer(&sender_key, 1, to, U256::ZERO, 0, 21_000, 0, 0);
+            let tx1 = Evm::sign_eip1559_transfer(&sender_key, 1, to, U256::ZERO, 1, 21_000, 0, 0);
+            assert!(service.submit_tx(tx0.clone()).await, "tx0 should be accepted");
+            assert!(service.submit_tx(tx1.clone()).await, "tx1 should be accepted");
+            let pool = service.txpool().await;
+            assert_eq!(pool.len(), 2);
+            let tx0_id = tx0.id();
+            let tx1_id = tx1.id();
+
+            let block =
+                Block::new(genesis.id(), 1, 1, B256::ZERO, genesis_root, vec![tx0.clone(), tx1]);
+            let block_digest = block.commitment();
+            let block_hash = block.id().0;
+            let (ack, waiter) = Exact::handle();
+            let (mempool_sender, mut mempool_receiver) = kora_rpc::mempool_event_channel();
+
+            handle_finalized_update(
+                service.clone(),
+                context,
+                PrefixSuccessExecutor { included_tx_count: 1 },
+                StubProvider,
+                None,
+                Some(mempool_sender),
+                None,
+                None,
+                1,
+                Arc::new(Mutex::new(Vec::new())),
+                None,
+                Update::Block(block, ack),
+            )
+            .await;
+
+            assert_eq!(pool.len(), 1, "only the included prefix tx should be pruned");
+            assert_eq!(
+                mempool_receiver.try_recv().unwrap(),
+                MempoolEvent::TxIncluded {
+                    hash: keccak256(&tx0.bytes),
+                    block_number: 1,
+                    block_hash,
+                }
+            );
+            assert!(mempool_receiver.try_recv().is_err());
+            let snapshot = service.parent_snapshot(block_digest).await.expect("snapshot exists");
+            assert!(snapshot.tx_ids.contains(&tx0_id));
+            assert!(!snapshot.tx_ids.contains(&tx1_id));
+            waiter.await.expect("ack must be called");
         });
     }
 
