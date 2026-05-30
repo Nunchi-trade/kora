@@ -1,7 +1,7 @@
 //! Ethereum JSON-RPC API implementation.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     future::Future,
     pin::Pin,
     sync::Arc,
@@ -228,11 +228,14 @@ pub trait EthApi {
 
     /// Returns the number of uncles in a block by hash (always zero post-merge).
     #[method(name = "getUncleCountByBlockHash")]
-    async fn get_uncle_count_by_block_hash(&self, hash: B256) -> RpcResult<U64>;
+    async fn get_uncle_count_by_block_hash(&self, hash: B256) -> RpcResult<Option<U64>>;
 
     /// Returns the number of uncles in a block by number (always zero post-merge).
     #[method(name = "getUncleCountByBlockNumber")]
-    async fn get_uncle_count_by_block_number(&self, block: BlockNumberOrTag) -> RpcResult<U64>;
+    async fn get_uncle_count_by_block_number(
+        &self,
+        block: BlockNumberOrTag,
+    ) -> RpcResult<Option<U64>>;
 }
 
 /// Net namespace API.
@@ -560,11 +563,13 @@ impl<S: StateProvider + 'static> EthApiServer for EthApiImpl<S> {
             false
         };
 
-        {
+        let is_new_pending = {
             let mut txs = self.pending_txs.write().await;
             let mut order = self.pending_tx_order.write().await;
-            txs.insert(tx_hash, pending_tx.clone());
-            order.push_back(tx_hash);
+            let is_new = txs.insert(tx_hash, pending_tx.clone()).is_none();
+            if is_new {
+                order.push_back(tx_hash);
+            }
 
             // Evict oldest entries when either the pending map or the
             // order deque exceeds the cap. The deque can accumulate stale
@@ -599,9 +604,10 @@ impl<S: StateProvider + 'static> EthApiServer for EthApiImpl<S> {
                 // cursors (which store absolute indices) remain correct.
                 self.pending_tx_evicted.fetch_add(drained, std::sync::atomic::Ordering::Relaxed);
             }
-        }
+            is_new
+        };
 
-        if accepted {
+        if accepted && is_new_pending {
             self.broadcast_pending_tx(tx_hash, pending_tx);
         }
         Ok(tx_hash)
@@ -749,14 +755,13 @@ impl<S: StateProvider + 'static> EthApiServer for EthApiImpl<S> {
             && state.is_catching_up()
         {
             let current_block = self.current_block_number().await;
-            // Use the consensus view as a proxy for the network tip.
-            // In Simplex BFT the view number closely tracks the highest
-            // block height observed from peers.
-            let highest_block = state.current_view().max(current_block);
             Ok(SyncStatus::Syncing(SyncInfo {
                 starting_block: U64::from(state.recovered_height()),
                 current_block: U64::from(current_block),
-                highest_block: U64::from(highest_block),
+                // Kora does not currently track a peer-advertised block tip.
+                // Consensus view can advance via nullifications without new
+                // blocks, so do not expose it as an Ethereum block height.
+                highest_block: U64::from(current_block),
             }))
         } else {
             Ok(SyncStatus::NotSyncing(false))
@@ -935,9 +940,9 @@ impl<S: StateProvider + 'static> EthApiServer for EthApiImpl<S> {
                 Ok(FilterChanges::Hashes(hashes))
             }
             FilterSnapshot::PendingTx { last_seen_index } => {
-                // Return new pending tx hashes in insertion order.
-                // The cursor-based approach (last_seen_index) is sufficient
-                // for deduplication -- no per-filter hash set needed.
+                // Return new pending tx hashes in insertion order. Keep a
+                // per-poll set as a final guard against duplicated hashes in
+                // the global order deque from older cache entries or races.
                 let (new_hashes, new_index) = {
                     let tx_order = self.pending_tx_order.read().await;
                     let evicted =
@@ -946,7 +951,13 @@ impl<S: StateProvider + 'static> EthApiServer for EthApiImpl<S> {
                     // If entries were evicted past the cursor, start from the
                     // front of the deque (relative offset 0).
                     let relative_skip = last_seen_index.saturating_sub(evicted);
-                    let hashes: Vec<B256> = tx_order.iter().skip(relative_skip).copied().collect();
+                    let mut seen = HashSet::new();
+                    let hashes: Vec<B256> = tx_order
+                        .iter()
+                        .skip(relative_skip)
+                        .copied()
+                        .filter(|hash| seen.insert(*hash))
+                        .collect();
                     let idx = evicted + tx_order.len();
                     (hashes, idx)
                 };
@@ -1048,12 +1059,17 @@ impl<S: StateProvider + 'static> EthApiServer for EthApiImpl<S> {
         Ok(U256::ZERO)
     }
 
-    async fn get_uncle_count_by_block_hash(&self, _hash: B256) -> RpcResult<U64> {
-        Ok(U64::ZERO)
+    async fn get_uncle_count_by_block_hash(&self, hash: B256) -> RpcResult<Option<U64>> {
+        let provider = self.state_provider.read().await;
+        Ok(provider.block_by_hash(hash, false).await?.map(|_| U64::ZERO))
     }
 
-    async fn get_uncle_count_by_block_number(&self, _block: BlockNumberOrTag) -> RpcResult<U64> {
-        Ok(U64::ZERO)
+    async fn get_uncle_count_by_block_number(
+        &self,
+        block: BlockNumberOrTag,
+    ) -> RpcResult<Option<U64>> {
+        let provider = self.state_provider.read().await;
+        Ok(provider.block_by_number(block, false).await?.map(|_| U64::ZERO))
     }
 }
 
@@ -2926,5 +2942,77 @@ mod tests {
         };
         assert!(hashes.contains(&h3), "new tx after filter creation should appear");
         assert!(hashes.contains(&h4), "new tx after filter creation should appear");
+    }
+
+    #[tokio::test]
+    async fn resubmitting_same_pending_tx_does_not_emit_duplicate_filter_change() {
+        let callback: TxSubmitCallback = Arc::new(move |_| Box::pin(async { Ok(()) }));
+        let api = EthApiImpl::with_tx_submit(1, NoopStateProvider, callback);
+
+        let raw = signed_test_tx(1, 0);
+        let filter_id = EthApiServer::new_pending_transaction_filter(&api).await.unwrap();
+        let hash = EthApiServer::send_raw_transaction(&api, raw.clone()).await.unwrap();
+        let duplicate = EthApiServer::send_raw_transaction(&api, raw).await.unwrap();
+        assert_eq!(duplicate, hash);
+
+        let changes = EthApiServer::get_filter_changes(&api, filter_id).await.unwrap();
+        let FilterChanges::Hashes(hashes) = changes else {
+            panic!("pending transaction filter should return hashes");
+        };
+        assert_eq!(hashes, vec![hash]);
+    }
+
+    #[tokio::test]
+    async fn syncing_highest_block_does_not_use_consensus_view() {
+        let provider =
+            MockFeeStateProvider::new(vec![make_fee_block(7, gwei(1), 21_000, 30_000_000, vec![])]);
+        let node_state = NodeState::new(1, 0);
+        node_state.set_recovered_height(100);
+        node_state.set_view(1_000);
+        let api = EthApiImpl::new(1, provider).with_node_state(node_state);
+
+        let status = EthApiServer::syncing(&api).await.unwrap();
+        let SyncStatus::Syncing(info) = status else {
+            panic!("expected syncing status");
+        };
+        assert_eq!(info.current_block, U64::from(7));
+        assert_eq!(info.highest_block, U64::from(7));
+    }
+
+    #[tokio::test]
+    async fn uncle_count_returns_none_for_missing_blocks() {
+        let block = make_fee_block(7, gwei(1), 21_000, 30_000_000, vec![]);
+        let block_hash = block.hash;
+        let provider = MockFeeStateProvider::new(vec![block]);
+        let api = EthApiImpl::new(1, provider);
+
+        assert_eq!(
+            EthApiServer::get_uncle_count_by_block_hash(&api, block_hash).await.unwrap(),
+            Some(U64::ZERO),
+        );
+        assert_eq!(
+            EthApiServer::get_uncle_count_by_block_hash(&api, B256::repeat_byte(0xff))
+                .await
+                .unwrap(),
+            None,
+        );
+        assert_eq!(
+            EthApiServer::get_uncle_count_by_block_number(
+                &api,
+                BlockNumberOrTag::Number(U64::from(7)),
+            )
+            .await
+            .unwrap(),
+            Some(U64::ZERO),
+        );
+        assert_eq!(
+            EthApiServer::get_uncle_count_by_block_number(
+                &api,
+                BlockNumberOrTag::Number(U64::from(99)),
+            )
+            .await
+            .unwrap(),
+            None,
+        );
     }
 }

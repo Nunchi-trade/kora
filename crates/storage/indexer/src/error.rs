@@ -30,6 +30,13 @@ pub enum IndexerError {
         /// End of the range.
         to: u64,
     },
+
+    /// Query matched more logs than the configured result cap.
+    #[error("query returned more than {limit} logs")]
+    TooManyLogs {
+        /// Maximum number of logs returned by one query.
+        limit: usize,
+    },
 }
 
 #[cfg(test)]
@@ -77,6 +84,12 @@ mod tests {
     fn test_invalid_block_range_display() {
         let err = IndexerError::InvalidBlockRange { from: 100, to: 50 };
         assert_eq!(err.to_string(), "invalid block range: from 100 > to 50");
+    }
+
+    #[test]
+    fn test_too_many_logs_display() {
+        let err = IndexerError::TooManyLogs { limit: 10_000 };
+        assert_eq!(err.to_string(), "query returned more than 10000 logs");
     }
 
     #[test]
