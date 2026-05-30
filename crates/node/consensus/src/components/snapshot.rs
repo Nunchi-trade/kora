@@ -171,6 +171,26 @@ impl<S> InMemorySnapshotStore<S> {
     }
 }
 
+impl<S> InMemorySnapshotStore<S> {
+    /// Attach a cached execution outcome to an existing snapshot.
+    ///
+    /// Used by `verify_block` to cache the outcome so that the finalization
+    /// reporter can skip redundant re-execution.
+    pub fn set_execution_outcome(&self, digest: &Digest, outcome: kora_executor::ExecutionOutcome) {
+        if let Some(snapshot) = self.snapshots.write().get_mut(digest) {
+            snapshot.execution_outcome = Some(outcome);
+        }
+    }
+
+    /// Take (remove) the cached execution outcome from a snapshot, if present.
+    pub fn take_execution_outcome(
+        &self,
+        digest: &Digest,
+    ) -> Option<kora_executor::ExecutionOutcome> {
+        self.snapshots.write().get_mut(digest).and_then(|s| s.execution_outcome.take())
+    }
+}
+
 impl<S> Default for InMemorySnapshotStore<S> {
     fn default() -> Self {
         Self::new()

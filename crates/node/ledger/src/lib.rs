@@ -369,6 +369,26 @@ impl LedgerView {
         self.snapshot_notify.notify_waiters();
     }
 
+    /// Attach a cached execution outcome to an existing snapshot so that the
+    /// finalization reporter can skip redundant re-execution.
+    pub async fn set_execution_outcome(
+        &self,
+        digest: ConsensusDigest,
+        outcome: kora_executor::ExecutionOutcome,
+    ) {
+        let inner = self.inner.lock().await;
+        inner.snapshots.set_execution_outcome(&digest, outcome);
+    }
+
+    /// Take (remove) the cached execution outcome from a snapshot, if present.
+    pub async fn take_execution_outcome(
+        &self,
+        digest: ConsensusDigest,
+    ) -> Option<kora_executor::ExecutionOutcome> {
+        let inner = self.inner.lock().await;
+        inner.snapshots.take_execution_outcome(&digest)
+    }
+
     /// Restore a finalized block as an already-persisted snapshot over the current QMDB state.
     pub async fn restore_persisted_snapshot(&self, block: &Block) {
         let mut inner = self.inner.lock().await;
@@ -689,6 +709,23 @@ impl LedgerService {
     /// Restore a finalized block as an already-persisted snapshot.
     pub async fn restore_persisted_snapshot(&self, block: &Block) {
         self.view.restore_persisted_snapshot(block).await;
+    }
+
+    /// Attach a cached execution outcome to an existing snapshot.
+    pub async fn set_execution_outcome(
+        &self,
+        digest: ConsensusDigest,
+        outcome: kora_executor::ExecutionOutcome,
+    ) {
+        self.view.set_execution_outcome(digest, outcome).await;
+    }
+
+    /// Take (remove) the cached execution outcome from a snapshot, if present.
+    pub async fn take_execution_outcome(
+        &self,
+        digest: ConsensusDigest,
+    ) -> Option<kora_executor::ExecutionOutcome> {
+        self.view.take_execution_outcome(digest).await
     }
 
     /// Fetch proposal components.

@@ -181,7 +181,13 @@ impl<S: StateDbRead + Send + Sync + 'static> StateProvider for IndexedStateProvi
         self.reject_historical_block(&block)?;
         let block_ctx = self.block_context_for(block)?;
         let params = call_request_to_params(request);
-        self.executor.simulate_call(&self.state, params, &block_ctx).map_err(execution_error_to_rpc)
+        let executor = Arc::clone(&self.executor);
+        let state = self.state.clone();
+        tokio::task::spawn_blocking(move || {
+            executor.simulate_call(&state, params, &block_ctx).map_err(execution_error_to_rpc)
+        })
+        .await
+        .map_err(|e| RpcError::Internal(e.to_string()))?
     }
 
     async fn estimate_gas(
@@ -192,7 +198,13 @@ impl<S: StateDbRead + Send + Sync + 'static> StateProvider for IndexedStateProvi
         self.reject_historical_block(&block)?;
         let block_ctx = self.block_context_for(block)?;
         let params = call_request_to_params(request);
-        self.executor.estimate_gas(&self.state, params, &block_ctx).map_err(execution_error_to_rpc)
+        let executor = Arc::clone(&self.executor);
+        let state = self.state.clone();
+        tokio::task::spawn_blocking(move || {
+            executor.estimate_gas(&state, params, &block_ctx).map_err(execution_error_to_rpc)
+        })
+        .await
+        .map_err(|e| RpcError::Internal(e.to_string()))?
     }
 
     async fn get_logs(&self, filter: RpcLogFilter) -> Result<Vec<RpcLog>, RpcError> {

@@ -63,7 +63,7 @@ impl ExecutionConfig {
     pub const fn new(chain_id: u64) -> Self {
         Self {
             chain_id,
-            spec_id: SpecId::CANCUN,
+            spec_id: SpecId::PRAGUE,
             gas_limit_bounds: GasLimitBounds::DEFAULT,
             base_fee_params: BaseFeeParams::DEFAULT,
         }
@@ -98,7 +98,7 @@ mod tests {
     fn config_default() {
         let config = ExecutionConfig::default();
         assert_eq!(config.chain_id, 1);
-        assert_eq!(config.spec_id, SpecId::CANCUN);
+        assert_eq!(config.spec_id, SpecId::PRAGUE);
     }
 
     #[test]

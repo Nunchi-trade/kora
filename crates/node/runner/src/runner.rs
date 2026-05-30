@@ -656,6 +656,8 @@ impl BlockContextProvider for RevmContextProvider {
             gas_limit: self.gas_limit,
             beneficiary: self.fee_recipient,
             base_fee_per_gas: Some(base_fee),
+            // EIP-4788: stub -- Kora has no beacon chain.
+            parent_beacon_block_root: Some(B256::ZERO),
             ..Default::default()
         };
         let recent_hashes = self.recent_block_hashes(block.height);

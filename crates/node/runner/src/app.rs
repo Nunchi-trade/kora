@@ -245,6 +245,10 @@ where
             gas_limit: self.gas_limit,
             beneficiary: self.fee_recipient,
             base_fee_per_gas: Some(base_fee),
+            // EIP-4788: Kora has no beacon chain, so we use B256::ZERO as a
+            // stub. This satisfies the Cancun/Prague spec requirement that the
+            // field is present, while indicating no beacon root is available.
+            parent_beacon_block_root: Some(B256::ZERO),
             ..Default::default()
         };
         BlockContext::new(header, B256::ZERO, prevrandao)
@@ -678,6 +682,10 @@ where
         let merged_changes = parent_snapshot.state.merge_changes(execution.outcome.changes.clone());
         let next_state = OverlayState::new(parent_snapshot.state.base(), merged_changes);
 
+        // Cache the execution outcome so finalization can reuse it instead
+        // of re-executing the entire block a third time.
+        let cached_outcome = execution.outcome.clone();
+
         self.ledger
             .insert_snapshot(
                 digest,
@@ -688,6 +696,8 @@ where
                 &block.txs,
             )
             .await;
+
+        self.ledger.set_execution_outcome(digest, cached_outcome).await;
 
         // Full execution verification succeeded.  Advance the verified
         // height so that the catch-up window eventually closes once we

@@ -281,7 +281,9 @@ impl RevmExecutor {
         params.gas_limit = Some(upper);
         self.simulate_call(state, params.clone(), context)?;
 
-        let mut lo = 21_000u64;
+        // Contract creation (CREATE) has a higher intrinsic gas cost than
+        // simple transfers: 53_000 = 21_000 (base) + 32_000 (CREATE cost).
+        let mut lo = if params.to.is_none() { 53_000u64 } else { 21_000u64 };
         let mut hi = upper;
         let mut best = upper;
         let mut iters = 0u32;
@@ -294,8 +296,19 @@ impl RevmExecutor {
                     best = mid;
                     hi = mid;
                 }
-                Err(_) => {
+                // Genuinely needs more gas -- raise lower bound.
+                Err(ExecutionError::TxExecution(ref msg)) if msg.contains("OutOfGas") => {
                     lo = mid;
+                }
+                // Contract reverted -- propagate immediately since more gas
+                // won't help (unless the contract uses gasleft()-dependent
+                // logic, but the upper-bound check already passed).
+                Err(ExecutionError::Revert(output)) => {
+                    return Err(ExecutionError::Revert(output));
+                }
+                // State errors, invalid tx, other halts -- propagate immediately.
+                Err(e) => {
+                    return Err(e);
                 }
             }
         }
