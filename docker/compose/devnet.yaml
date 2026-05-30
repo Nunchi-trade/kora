@@ -152,7 +152,7 @@ services:
       - IS_BOOTSTRAP=true
       - IS_LEADER=true
     ports:
-      - "30300:30303"
+      - "127.0.0.1:30300:30303"
 
   dkg-node1:
     <<: *node-common
@@ -174,7 +174,7 @@ services:
       - IS_BOOTSTRAP=false
       - BOOTSTRAP_PEERS=node0:30303
     ports:
-      - "30301:30303"
+      - "127.0.0.1:30301:30303"
 
   dkg-node2:
     <<: *node-common
@@ -196,7 +196,7 @@ services:
       - IS_BOOTSTRAP=false
       - BOOTSTRAP_PEERS=node0:30303
     ports:
-      - "30302:30303"
+      - "127.0.0.1:30302:30303"
 
   dkg-node3:
     <<: *node-common
@@ -218,7 +218,7 @@ services:
       - IS_BOOTSTRAP=false
       - BOOTSTRAP_PEERS=node0:30303
     ports:
-      - "30303:30303"
+      - "127.0.0.1:30303:30303"
 
   validator-node0:
     <<: *validator-common
@@ -244,7 +244,7 @@ services:
       - PEER_NODES=node0,node1,node2,node3
       - HEALTHCHECK_MODE=ready
     ports:
-      - "30400:30303"
+      - "127.0.0.1:30400:30303"
       - "127.0.0.1:8545:8545"
       - "127.0.0.1:9000:9002"
 
@@ -272,7 +272,7 @@ services:
       - PEER_NODES=node0,node1,node2,node3
       - HEALTHCHECK_MODE=ready
     ports:
-      - "30401:30303"
+      - "127.0.0.1:30401:30303"
       - "127.0.0.1:8546:8545"
       - "127.0.0.1:9001:9002"
 
@@ -301,7 +301,7 @@ services:
       - PEER_NODES=node0,node1,node2,node3
       - HEALTHCHECK_MODE=ready
     ports:
-      - "30402:30303"
+      - "127.0.0.1:30402:30303"
       - "127.0.0.1:8547:8545"
       - "127.0.0.1:9002:9002"
 
@@ -330,7 +330,7 @@ services:
       - PEER_NODES=node0,node1,node2,node3
       - HEALTHCHECK_MODE=ready
     ports:
-      - "30403:30303"
+      - "127.0.0.1:30403:30303"
       - "127.0.0.1:8548:8545"
       - "127.0.0.1:9003:9002"
 
@@ -354,7 +354,7 @@ services:
       - BOOTSTRAP_PEERS=node0:30303,node1:30303
       - HEALTHCHECK_MODE=p2p
     ports:
-      - "30500:30303"
+      - "127.0.0.1:30500:30303"
       - "127.0.0.1:8549:8545"
       - "127.0.0.1:9004:9002"
 
