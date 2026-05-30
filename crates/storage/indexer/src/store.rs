@@ -214,18 +214,28 @@ impl BlockIndex {
         self.head_block.load(Ordering::Acquire)
     }
 
+    /// Maximum number of log entries returned by a single `get_logs` query.
+    /// Matches the default cap used by Geth and Erigon to prevent memory
+    /// exhaustion from broad event queries.
+    pub const MAX_LOG_RESULTS: usize = 10_000;
+
     /// Gets logs matching the given filter.
-    pub fn get_logs(&self, filter: &LogFilter) -> Vec<IndexedLog> {
+    ///
+    /// Returns at most [`Self::MAX_LOG_RESULTS`] entries. When the limit is
+    /// reached the second element of the tuple is `true`, indicating that the
+    /// result set was truncated.
+    pub fn get_logs(&self, filter: &LogFilter) -> (Vec<IndexedLog>, bool) {
         let head = self.head_block_number();
         let from_block = filter.from_block.unwrap_or(0);
         let to_block = filter.to_block.unwrap_or(head).min(head);
 
         let mut result = Vec::new();
+        let mut truncated = false;
 
         let blocks_by_number = self.blocks_by_number.read();
         let logs_by_block = self.logs_by_block.read();
 
-        for block_num in from_block..=to_block {
+        'outer: for block_num in from_block..=to_block {
             let Some(block_hash) = blocks_by_number.get(&block_num) else {
                 continue;
             };
@@ -239,10 +249,14 @@ impl BlockIndex {
                     continue;
                 }
                 result.push(log.clone());
+                if result.len() >= Self::MAX_LOG_RESULTS {
+                    truncated = true;
+                    break 'outer;
+                }
             }
         }
 
-        result
+        (result, truncated)
     }
 
     /// Returns the total number of indexed blocks.
@@ -470,16 +484,18 @@ mod tests {
         index.insert_block(create_test_block(1, block_hash), vec![], vec![receipt]);
 
         let filter = LogFilter::new().address(vec![contract_addr]);
-        let logs = index.get_logs(&filter);
+        let (logs, truncated) = index.get_logs(&filter);
         assert_eq!(logs.len(), 1);
+        assert!(!truncated);
         assert_eq!(logs[0].address, contract_addr);
 
         let filter = LogFilter::new().topic(0, vec![topic]);
-        let logs = index.get_logs(&filter);
+        let (logs, truncated) = index.get_logs(&filter);
         assert_eq!(logs.len(), 1);
+        assert!(!truncated);
 
         let filter = LogFilter::new().address(vec![Address::repeat_byte(0xFF)]);
-        let logs = index.get_logs(&filter);
+        let (logs, _) = index.get_logs(&filter);
         assert!(logs.is_empty());
     }
 

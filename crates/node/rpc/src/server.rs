@@ -40,7 +40,7 @@ use crate::{
         Web3ApiServer,
     },
     kora::{KoraApiImpl, KoraApiServer},
-    state::NodeState,
+    state::{NodeState, PartitionStatus},
     state_provider::{NoopStateProvider, StateProvider},
     subscription::{MempoolEventSender, PendingTxEventSender, subscription_module},
     txpool::{TxpoolApiImpl, TxpoolApiServer},
@@ -763,7 +763,14 @@ async fn status_handler(State(state): State<Arc<NodeState>>) -> impl IntoRespons
     (StatusCode::OK, axum::Json(status))
 }
 
-async fn health_handler() -> impl IntoResponse {
+async fn health_handler(State(state): State<Arc<NodeState>>) -> impl IntoResponse {
+    let status = state.status();
+    if status.partition_status == PartitionStatus::Partitioned {
+        return (StatusCode::SERVICE_UNAVAILABLE, "partitioned");
+    }
+    if state.is_catching_up() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "syncing");
+    }
     (StatusCode::OK, "ok")
 }
 
