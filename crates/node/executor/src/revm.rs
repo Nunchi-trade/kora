@@ -720,15 +720,10 @@ fn extract_changes(state: &EvmState) -> ChangeSet {
             .map(|(k, v): (&U256, &EvmStorageSlot)| (*k, v.present_value()))
             .collect();
 
-        // Only copy bytecode when the account was created (contract
-        // deployment).  Previously every touched account — including plain
-        // ETH transfers to existing contracts — paid a full bytecode clone,
-        // which is wasteful since the code hasn't changed.
-        let code = if account.is_created() {
-            account.info.code.as_ref().map(|c: &Bytecode| c.bytes().to_vec())
-        } else {
-            None
-        };
+        // Preserve code whenever REVM materialized it. Kora's transition root
+        // commits to the code-present flag and bytes, so omitting unchanged
+        // code from a touched contract would change consensus output.
+        let code = account.info.code.as_ref().map(|c: &Bytecode| c.bytes().to_vec());
 
         let update = AccountUpdate {
             created: account.is_created(),
@@ -748,11 +743,13 @@ fn extract_changes(state: &EvmState) -> ChangeSet {
 
 #[cfg(test)]
 mod tests {
-    use alloy_consensus::{SignableTransaction as _, TxEip1559, TxEnvelope};
-    use alloy_eips::eip2718::Encodable2718;
+    use alloy_consensus::{
+        SignableTransaction as _, TxEip1559, TxEnvelope, transaction::SignerRecoverable as _,
+    };
+    use alloy_eips::eip2718::{Decodable2718, Encodable2718};
     use alloy_primitives::{Address, Bytes, KECCAK256_EMPTY, Signature, TxKind as AlTxKind, U256};
     use k256::ecdsa::SigningKey;
-    use kora_qmdb::ChangeSet;
+    use kora_qmdb::{ChangeSet, StateRoot};
     use kora_traits::{StateDb, StateDbError, StateDbRead, StateDbWrite};
     use revm::state::Account;
     use sha3::{Digest as _, Keccak256};
@@ -1083,7 +1080,12 @@ mod tests {
         let mut state = EvmState::default();
 
         // Created accounts also need to be touched to be processed
+        let bytecode = Bytes::from_static(&[0x60, 0x00, 0x60, 0x00]);
+        let code_hash = keccak256(bytecode.as_ref());
+        let code = Bytecode::new_raw(bytecode);
+        let expected_code = code.bytes().to_vec();
         let account = Account {
+            info: revm::state::AccountInfo { code_hash, code: Some(code), ..Default::default() },
             status: AccountStatus::Created | AccountStatus::Touched,
             ..Default::default()
         };
@@ -1095,6 +1097,65 @@ mod tests {
 
         let update = changes.accounts.get(&Address::ZERO).unwrap();
         assert!(update.created);
+        assert_eq!(update.code_hash, code_hash);
+        assert_eq!(update.code.as_deref(), Some(expected_code.as_slice()));
+    }
+
+    #[test]
+    fn extract_changes_touched_existing_contract_preserves_transition_root_code() {
+        use revm::state::AccountStatus;
+
+        let mut state = EvmState::default();
+        let address = Address::repeat_byte(0xcd);
+        let bytecode = Bytes::from_static(&[0x60, 0x01, 0x60, 0x02, 0x01]);
+        let code_hash = keccak256(bytecode.as_ref());
+        let code = Bytecode::new_raw(bytecode);
+        let expected_code = code.bytes().to_vec();
+
+        let info = revm::state::AccountInfo {
+            nonce: 7,
+            balance: U256::from(100),
+            code_hash,
+            code: Some(code),
+            account_id: None,
+        };
+        let account = Account {
+            info: info.clone(),
+            original_info: Box::new(info),
+            status: AccountStatus::Touched,
+            ..Default::default()
+        };
+
+        state.insert(address, account);
+
+        let changes = extract_changes(&state);
+        let update = changes.accounts.get(&address).unwrap();
+        assert_eq!(update.code.as_deref(), Some(expected_code.as_slice()));
+
+        let parent_root = B256::repeat_byte(0x11);
+        let root_with_code = StateRoot::transition(parent_root, &changes);
+
+        let mut without_code = changes.clone();
+        without_code.accounts.get_mut(&address).unwrap().code = None;
+        let root_without_code = StateRoot::transition(parent_root, &without_code);
+
+        assert_ne!(
+            root_with_code, root_without_code,
+            "dropping materialized bytecode changes the consensus transition root"
+        );
+    }
+
+    #[test]
+    fn decode_tx_env_uses_envelope_recovered_signer() {
+        let tx = build_valid_tx(1, 42);
+        let envelope = TxEnvelope::decode_2718(&mut tx.as_ref()).expect("signed tx should decode");
+        let expected = envelope.recover_signer().expect("signer should recover");
+
+        let decoded = decode_tx_env(&tx, 1).expect("tx env should decode");
+
+        assert_eq!(decoded.caller, expected);
+        assert_eq!(decoded.nonce, 42);
+        assert_eq!(decoded.chain_id, Some(1));
     }
 
     #[test]

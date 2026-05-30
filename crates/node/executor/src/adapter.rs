@@ -108,6 +108,11 @@ impl<S: StateDbRead> DatabaseRef for StateDbAdapter<S> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
     use alloy_primitives::Bytes;
     use kora_traits::StateDbError;
 
@@ -140,11 +145,76 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Default)]
+    struct ConcurrentState {
+        in_flight: Arc<AtomicUsize>,
+        max_in_flight: Arc<AtomicUsize>,
+    }
+
+    impl ConcurrentState {
+        async fn observe<T>(&self, value: T) -> Result<T, StateDbError> {
+            let current = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_in_flight.fetch_max(current, Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            Ok(value)
+        }
+    }
+
+    impl StateDbRead for ConcurrentState {
+        async fn nonce(&self, _: &Address) -> Result<u64, StateDbError> {
+            self.observe(7).await
+        }
+
+        async fn balance(&self, _: &Address) -> Result<U256, StateDbError> {
+            self.observe(U256::from(11)).await
+        }
+
+        async fn code_hash(&self, _: &Address) -> Result<B256, StateDbError> {
+            self.observe(B256::repeat_byte(0x22)).await
+        }
+
+        async fn code(&self, _: &B256) -> Result<Bytes, StateDbError> {
+            Ok(Bytes::new())
+        }
+
+        async fn storage(&self, _: &Address, _: &U256) -> Result<U256, StateDbError> {
+            Ok(U256::ZERO)
+        }
+    }
+
     #[test]
     fn adapter_new() {
         let adapter = StateDbAdapter::new(NoopState, HashMap::new());
         // Verify the adapter is created successfully; state() returns a reference.
         let _ = adapter.state();
+    }
+
+    #[test]
+    fn basic_ref_overlaps_account_field_reads_on_multithread_runtime() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime should build");
+
+        runtime.block_on(async {
+            let state = ConcurrentState::default();
+            let adapter = StateDbAdapter::new(state.clone(), HashMap::new());
+
+            let account = tokio::task::spawn_blocking(move || {
+                DatabaseRef::basic_ref(&adapter, Address::repeat_byte(0x33))
+            })
+            .await
+            .expect("blocking task should complete")
+            .expect("state read should succeed")
+            .expect("account should exist");
+
+            assert_eq!(account.nonce, 7);
+            assert_eq!(account.balance, U256::from(11));
+            assert_eq!(account.code_hash, B256::repeat_byte(0x22));
+            assert_eq!(state.max_in_flight.load(Ordering::SeqCst), 3);
+        });
     }
 
     #[test]
