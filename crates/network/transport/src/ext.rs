@@ -57,7 +57,7 @@ impl NetworkConfigExt for NetworkConfig {
             bootstrappers,
             DEFAULT_MAX_MESSAGE_SIZE,
         )
-        .with_allow_private_ips(true);
+        .with_allow_private_ips(self.allow_private_ips);
 
         Ok(transport_config.build(context))
     }
@@ -79,7 +79,8 @@ impl NetworkConfigExt for NetworkConfig {
             dialable,
             bootstrappers,
             DEFAULT_MAX_MESSAGE_SIZE,
-        );
+        )
+        .with_allow_private_ips(self.allow_private_ips);
 
         Ok(transport_config.build(context))
     }

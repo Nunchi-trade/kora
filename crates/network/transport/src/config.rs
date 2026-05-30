@@ -8,8 +8,13 @@ use commonware_p2p::{Ingress, authenticated::discovery};
 
 use crate::error::TransportError;
 
-/// Default maximum message size (1 MB).
-pub const DEFAULT_MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
+/// Default maximum message size (16 MB).
+///
+/// Must be larger than the maximum possible serialized block to prevent
+/// valid blocks from being silently dropped by the transport layer.
+/// The block codec allows up to 10,000 txs * 8 MB each, so 16 MB provides
+/// headroom for realistic production blocks with contract deployments.
+pub const DEFAULT_MAX_MESSAGE_SIZE: u32 = 16 * 1024 * 1024;
 
 /// Default channel backlog size.
 pub const DEFAULT_BACKLOG: usize = 1024;
@@ -301,7 +306,7 @@ mod tests {
 
     #[test]
     fn constants_values() {
-        assert_eq!(DEFAULT_MAX_MESSAGE_SIZE, 1024 * 1024);
+        assert_eq!(DEFAULT_MAX_MESSAGE_SIZE, 16 * 1024 * 1024);
         assert_eq!(DEFAULT_BACKLOG, 1024);
         assert_eq!(DEFAULT_CONSENSUS_BACKLOG, 2048);
         assert_eq!(DEFAULT_BLOCK_BACKLOG, 2048);

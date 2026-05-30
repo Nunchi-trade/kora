@@ -201,6 +201,7 @@ case "$MODE" in
             --data-dir "$DATA_DIR" \
             --peers "${SHARED_DIR}/peers.json" \
             --chain-id "$CHAIN_ID" \
+            --allow-private-ips \
             $GOSSIP_FLAG \
             "$@"
         ;;
@@ -228,6 +229,7 @@ case "$MODE" in
             --data-dir "$DATA_DIR" \
             --peers "${SHARED_DIR}/peers.json" \
             --chain-id "$CHAIN_ID" \
+            --allow-private-ips \
             "$@"
         ;;
 

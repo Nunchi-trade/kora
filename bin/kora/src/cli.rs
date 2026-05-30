@@ -59,6 +59,10 @@ pub(crate) struct ValidatorArgs {
     /// Enable P2P transaction gossip between validators.
     #[arg(long, default_value = "false")]
     pub tx_gossip: bool,
+
+    /// Allow private IP addresses for P2P connections (devnet/Docker only).
+    #[arg(long, default_value = "false")]
+    pub allow_private_ips: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -74,6 +78,10 @@ pub(crate) struct SecondaryArgs {
     /// Prometheus metrics server bind address.
     #[arg(long, default_value = "0.0.0.0:9002")]
     pub metrics_addr: String,
+
+    /// Allow private IP addresses for P2P connections (devnet/Docker only).
+    #[arg(long, default_value = "false")]
+    pub allow_private_ips: bool,
 }
 
 impl Cli {
@@ -156,6 +164,9 @@ impl Cli {
 
         if args.tx_gossip {
             config.network.tx_gossip = true;
+        }
+        if args.allow_private_ips {
+            config.network.allow_private_ips = true;
         }
 
         tracing::info!(chain_id = config.chain_id, "Starting validator");
@@ -247,6 +258,9 @@ impl Cli {
         let mut config = self.load_config()?;
         let peers = load_peers(&args.peers)?;
         config.network.bootstrap_peers = format_bootstrappers(&peers.bootstrappers);
+        if args.allow_private_ips {
+            config.network.allow_private_ips = true;
+        }
 
         let identity_key = config.validator_key()?;
         let my_pk = commonware_cryptography::Signer::public_key(&identity_key);
@@ -288,10 +302,16 @@ impl Cli {
                 .with_worker_threads(config.worker_threads),
         );
         executor.start(|context| async move {
-            let mut transport = config
-                .network
-                .build_local_transport(identity_key, context.child("transport"))
-                .map_err(|e| eyre::eyre!("failed to build transport: {}", e))?;
+            let mut transport = if config.network.allow_private_ips {
+                config
+                    .network
+                    .build_local_transport(identity_key, context.child("transport"))
+            } else {
+                config
+                    .network
+                    .build_transport(identity_key, context.child("transport"))
+            }
+            .map_err(|e| eyre::eyre!("failed to build transport: {}", e))?;
 
             transport
                 .oracle

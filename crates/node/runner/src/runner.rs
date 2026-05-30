@@ -70,6 +70,11 @@ impl kora_metrics::MetricsRegister for RuntimeMetrics<'_> {
     }
 }
 
+/// Epoch length for the P2P oracle.
+///
+/// WARNING: Changing this to a finite value will break P2P connectivity at the
+/// epoch boundary because no code currently calls `oracle.track()` for epochs
+/// beyond 0. Dynamic oracle tracking must be implemented before reducing this.
 const EPOCH_LENGTH: u64 = u64::MAX;
 const PARTITION_PREFIX: &str = "kora";
 const TXPOOL_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
@@ -79,13 +84,27 @@ const CHECKPOINT_INTERVAL_ENV: &str = "KORA_CHECKPOINT_INTERVAL";
 const DEFAULT_CHECKPOINT_INTERVAL: u64 = 256;
 
 /// Maximum number of transaction hashes retained in the gossip seen-set.
-/// When the set exceeds this size it is cleared to avoid unbounded memory
-/// growth. Under normal load the TTL-based cleanup keeps the set far smaller.
 const TX_GOSSIP_SEEN_SET_CAPACITY: usize = 65_536;
 
 /// Buffer size for the internal channel that forwards locally accepted
 /// transactions to the P2P gossip broadcast task.
 const TX_GOSSIP_OUTBOUND_BUFFER: usize = 4096;
+
+/// Maximum number of gossip messages queued for validation before applying
+/// backpressure.  When this channel is full, inbound gossip messages are
+/// dropped rather than blocking the P2P receive loop.
+const TX_GOSSIP_VALIDATION_BUFFER: usize = 1024;
+
+/// Maximum transactions per second accepted from a single peer via gossip.
+const TX_GOSSIP_PER_PEER_RATE_LIMIT: u32 = 100;
+
+/// Maximum transactions drained from the P2P channel per validation batch.
+const TX_GOSSIP_BATCH_SIZE: usize = 64;
+
+/// Duration for which the cached ledger state is reused across gossip
+/// validations before re-fetching.  At ~34 blocks/s the state changes every
+/// ~30ms, so 100ms provides a good balance of freshness vs. lock contention.
+const TX_GOSSIP_STATE_CACHE_DURATION: Duration = Duration::from_millis(100);
 
 type Peer = ed25519::PublicKey;
 type CertArchive = Finalization<ThresholdScheme, ConsensusDigest>;
@@ -704,38 +723,63 @@ fn spawn_txpool_cleanup(pool: TransactionPool, context: cw_tokio::Context) {
 
 /// Bounded seen-set for transaction gossip de-duplication.
 ///
-/// Tracks the hashes of recently seen transactions so we neither re-broadcast
-/// locally originated transactions that come back from peers nor re-insert
-/// gossipped transactions we already have.  When the set exceeds
-/// [`TX_GOSSIP_SEEN_SET_CAPACITY`] it is cleared wholesale -- this is cheaper
-/// than an LRU and perfectly safe because the txpool itself provides the
-/// ultimate dedup (via `AlreadyExists` / `NonceAlreadyInPool`).
-type SeenSet = Arc<parking_lot::Mutex<HashSet<B256>>>;
+/// Uses two generations: when `current` fills up, the `previous` generation is
+/// dropped, `current` becomes `previous`, and a fresh `current` is allocated.
+/// This avoids the wholesale-clear thundering-herd problem where clearing the
+/// entire set causes mass re-validation of already-processed transactions.
+struct GossipSeenSet {
+    current: HashSet<B256>,
+    previous: HashSet<B256>,
+    capacity: usize,
+}
+
+impl GossipSeenSet {
+    fn new(capacity: usize) -> Self {
+        Self { current: HashSet::with_capacity(capacity / 2), previous: HashSet::new(), capacity }
+    }
+
+    /// Returns `true` if the hash was **not** previously present (i.e. it is new).
+    fn mark_seen(&mut self, hash: B256) -> bool {
+        if self.current.contains(&hash) || self.previous.contains(&hash) {
+            return false;
+        }
+        if self.current.len() >= self.capacity / 2 {
+            let old_current =
+                std::mem::replace(&mut self.current, HashSet::with_capacity(self.capacity / 2));
+            self.previous = old_current;
+        }
+        self.current.insert(hash);
+        true
+    }
+}
+
+type SeenSet = Arc<parking_lot::Mutex<GossipSeenSet>>;
 
 fn new_seen_set() -> SeenSet {
-    Arc::new(parking_lot::Mutex::new(HashSet::with_capacity(1024)))
+    Arc::new(parking_lot::Mutex::new(GossipSeenSet::new(TX_GOSSIP_SEEN_SET_CAPACITY)))
 }
 
 /// Returns `true` if the hash was **not** previously present (i.e. it is new).
 fn mark_seen(seen: &SeenSet, hash: B256) -> bool {
-    let mut set = seen.lock();
-    if set.len() >= TX_GOSSIP_SEEN_SET_CAPACITY {
-        debug!(capacity = TX_GOSSIP_SEEN_SET_CAPACITY, "tx gossip seen-set full, clearing");
-        set.clear();
-    }
-    set.insert(hash)
+    seen.lock().mark_seen(hash)
 }
 
 /// Periodically check peer connectivity and log warnings when the network
 /// appears degraded or partitioned.
 ///
-/// This task reads the peer count from `NodeState` every
-/// [`PARTITION_CHECK_INTERVAL`] and compares it against the expected peer
-/// count to determine partition status. Warnings and errors are emitted so
-/// operators (and log-based alerting) can detect connectivity issues even
-/// without Prometheus.
+/// NOTE: The peer_count in NodeState is currently set once at startup to the
+/// static expected value (validator count - 1) and is NOT updated with live
+/// connectivity data from the transport oracle.  As a result this monitor will
+/// always report "healthy" until dynamic peer count tracking is implemented.
+/// See issue #162.
 fn spawn_partition_monitor(node_state: kora_rpc::NodeState, context: cw_tokio::Context) {
     context.child("partition_monitor").shared(false).spawn(move |ctx| async move {
+        // Log the limitation once at startup so operators are aware.
+        warn!(
+            "partition monitor: peer_count is static (set at startup); \
+             this monitor cannot detect actual connectivity loss until \
+             dynamic oracle peer tracking is implemented"
+        );
         loop {
             ctx.sleep(PARTITION_CHECK_INTERVAL).await;
             let status = node_state.status();
@@ -779,10 +823,12 @@ fn spawn_consensus_monitor(
     engine_handle: RuntimeHandle<()>,
     marshal_handle: RuntimeHandle<()>,
     broadcast_handle: RuntimeHandle<()>,
+    transport_handle: RuntimeHandle<()>,
 ) {
     spawn_task_watchdog(&context, "consensus_engine", engine_handle);
     spawn_task_watchdog(&context, "marshal_actor", marshal_handle);
     spawn_task_watchdog(&context, "broadcast_engine", broadcast_handle);
+    spawn_task_watchdog(&context, "network_transport", transport_handle);
 }
 
 /// Spawn a watchdog that awaits a critical task handle and aborts the process
@@ -906,10 +952,14 @@ impl ProductionRunner {
                 .validator_key()
                 .map_err(|e| anyhow::anyhow!("failed to load validator key: {}", e))?;
 
-            let transport = config
-                .network
-                .build_local_transport(validator_key, context.child("transport"))
-                .map_err(|e| anyhow::anyhow!("failed to build transport: {}", e))?;
+            // Use production transport by default; local transport only when
+            // allow_private_ips is explicitly enabled (devnet/Docker).
+            let transport = if config.network.allow_private_ips {
+                config.network.build_local_transport(validator_key, context.child("transport"))
+            } else {
+                config.network.build_transport(validator_key, context.child("transport"))
+            }
+            .map_err(|e| anyhow::anyhow!("failed to build transport: {}", e))?;
 
             let ctx =
                 kora_service::NodeRunContext::new(context, std::sync::Arc::new(config), transport);
@@ -1058,7 +1108,8 @@ impl NodeRunner for ProductionRunner {
                         if !mark_seen(&seen, hash) {
                             continue;
                         }
-                        let msg = bytes::Bytes::copy_from_slice(&raw);
+                        // Zero-copy: alloy_primitives::Bytes wraps bytes::Bytes internally.
+                        let msg: bytes::Bytes = raw.0.clone();
                         let recipients = sender.send(Recipients::All, msg, false);
                         if recipients.is_empty() {
                             warn!("tx gossip: failed to broadcast transaction");
@@ -1076,15 +1127,25 @@ impl NodeRunner for ProductionRunner {
                 });
             }
 
-            // Inbound: read from P2P, validate, insert into local pool.
+            // Inbound: fast receive loop with backpressure.
+            // Drains messages from the P2P channel, applies per-peer rate limiting
+            // and dedup, then forwards to a bounded validation channel.
+            let (validation_tx, mut validation_rx) =
+                tokio::sync::mpsc::channel::<bytes::Bytes>(TX_GOSSIP_VALIDATION_BUFFER);
             {
                 let seen = seen.clone();
-                let gossip_ledger = ledger.clone();
-                let gossip_chain_id = self.chain_id;
-                let gossip_pool = txpool.clone();
                 let mut receiver = tx_gossip_receiver;
                 let in_metrics = app_metrics.clone();
-                context.child("tx_gossip_in").shared(true).spawn(move |_| async move {
+                context.child("tx_gossip_recv").shared(true).spawn(move |_| async move {
+                    use governor::{Quota as GovQuota, RateLimiter, clock::DefaultClock, state::keyed::DefaultKeyedStateStore};
+                    use std::num::NonZeroU32;
+
+                    let rate_limiter = RateLimiter::<Peer, DefaultKeyedStateStore<Peer>, DefaultClock>::keyed(
+                        GovQuota::per_second(
+                            NonZeroU32::new(TX_GOSSIP_PER_PEER_RATE_LIMIT).expect("rate limit is non-zero"),
+                        ),
+                    );
+
                     loop {
                         let (peer, raw) = match receiver.recv().await {
                             Ok(msg) => msg,
@@ -1095,37 +1156,98 @@ impl NodeRunner for ProductionRunner {
                         };
 
                         in_metrics.gossip_tx_received.inc();
+
+                        // Per-peer rate limiting (issue #025).
+                        if rate_limiter.check_key(&peer).is_err() {
+                            trace!(?peer, "tx gossip: rate-limited peer, dropping message");
+                            in_metrics.gossip_tx_invalid.inc();
+                            continue;
+                        }
+
                         let hash = keccak256(&raw);
                         if !mark_seen(&seen, hash) {
                             trace!(?hash, ?peer, "tx gossip: skipping already-seen transaction");
                             continue;
                         }
 
-                        let data = alloy_primitives::Bytes::copy_from_slice(raw.as_ref());
-                        let tx = Tx::new(data);
-                        let tx_id = tx.id();
+                        // Backpressure: if validation queue is full, drop the message
+                        // rather than blocking the P2P receive loop (issue #161).
+                        let raw_bytes: bytes::Bytes = raw.into();
+                        if validation_tx.try_send(raw_bytes).is_err() {
+                            trace!("tx gossip: validation queue full, dropping transaction");
+                            in_metrics.gossip_tx_invalid.inc();
+                        }
+                    }
+                });
+            }
 
-                        // Fetch the latest state on each validation so nonce
-                        // and balance checks reflect finalized blocks.  The
-                        // previous code captured state once at startup, making
-                        // gossip validation increasingly stale.
-                        let current_state = gossip_ledger.latest_state().await;
+            // Validation task: batch-drains the validation channel, amortizes
+            // state fetches across batches (issues #048, #159).
+            {
+                let gossip_ledger = ledger.clone();
+                let gossip_chain_id = self.chain_id;
+                let gossip_pool = txpool.clone();
+                let in_metrics = app_metrics.clone();
+                let pool_config = PoolConfig::default();
+                context.child("tx_gossip_validate").shared(true).spawn(move |_| async move {
+                    use tokio::time::Instant;
+
+                    let mut cached_state_ts: Option<Instant> = None;
+                    let mut cached_state_val = gossip_ledger.latest_state().await;
+
+                    loop {
+                        // Wait for at least one message.
+                        let first = match validation_rx.recv().await {
+                            Some(msg) => msg,
+                            None => break,
+                        };
+
+                        // Drain up to BATCH_SIZE more messages that are already
+                        // buffered (issue #159: batch validation).
+                        let mut batch = vec![first];
+                        while batch.len() < TX_GOSSIP_BATCH_SIZE {
+                            match validation_rx.try_recv() {
+                                Ok(msg) => batch.push(msg),
+                                Err(_) => break,
+                            }
+                        }
+
+                        // Reuse cached state if still fresh (issue #048).
+                        let needs_refresh = cached_state_ts
+                            .is_none_or(|ts| ts.elapsed() >= TX_GOSSIP_STATE_CACHE_DURATION);
+                        if needs_refresh {
+                            cached_state_val = gossip_ledger.latest_state().await;
+                            cached_state_ts = Some(Instant::now());
+                        }
+                        let current_state = cached_state_val.clone();
+
                         let validator = TransactionValidator::new(
                             gossip_chain_id,
                             current_state,
-                            PoolConfig::default(),
+                            pool_config.clone(),
                         )
                         .with_pool(gossip_pool.clone());
-                        if let Err(e) = validator.validate(tx.clone()).await {
-                            trace!(?tx_id, ?peer, error = %e, "tx gossip: peer tx failed validation");
-                            in_metrics.gossip_tx_invalid.inc();
-                            continue;
-                        }
 
-                        if gossip_ledger.submit_tx(tx).await {
-                            debug!(?tx_id, ?peer, "tx gossip: accepted transaction from peer");
-                        } else {
-                            trace!(?tx_id, ?peer, "tx gossip: ledger rejected transaction (duplicate)");
+                        for raw in batch {
+                            // Zero-copy conversion (issue #156).
+                            let data = alloy_primitives::Bytes::from(raw);
+                            let tx = Tx::new(data);
+                            let tx_id = tx.id();
+
+                            if let Err(e) = validator.validate(tx.clone()).await {
+                                trace!(?tx_id, error = %e, "tx gossip: peer tx failed validation");
+                                in_metrics.gossip_tx_invalid.inc();
+                                continue;
+                            }
+
+                            if gossip_ledger.submit_tx(tx).await {
+                                debug!(?tx_id, "tx gossip: accepted transaction from peer");
+                            } else {
+                                trace!(
+                                    ?tx_id,
+                                    "tx gossip: ledger rejected transaction (duplicate)"
+                                );
+                            }
                         }
                     }
                 });
@@ -1456,7 +1578,13 @@ impl NodeRunner for ProductionRunner {
             transport.simplex.resolver,
         );
 
-        spawn_consensus_monitor(context, engine_handle, marshal_handle, broadcast_handle);
+        spawn_consensus_monitor(
+            context,
+            engine_handle,
+            marshal_handle,
+            broadcast_handle,
+            transport.handle,
+        );
 
         info!("Validator started successfully");
         Ok(ledger)
