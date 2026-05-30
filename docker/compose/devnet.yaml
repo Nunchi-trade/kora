@@ -377,9 +377,32 @@ services:
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15d'
+      - '--storage.tsdb.retention.size=10GB'
       - '--web.enable-lifecycle'
     ports:
       - "127.0.0.1:9090:9090"
+    networks:
+      - kora-net
+
+  alertmanager:
+    image: prom/alertmanager:latest
+    profiles: ["observability"]
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    volumes:
+      - ../config/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/tmp/alertmanager'
+    ports:
+      - "127.0.0.1:9093:9093"
     networks:
       - kora-net
 
@@ -447,7 +470,9 @@ services:
       - ../grafana/dashboards:/var/lib/grafana/dashboards:ro
     environment:
       - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=${GF_SECURITY_ADMIN_PASSWORD:-admin}
+      # GF_SECURITY_ADMIN_PASSWORD must be set in the environment or .env file.
+      # There is no default -- Grafana will refuse to start if unset.
+      - GF_SECURITY_ADMIN_PASSWORD=${GF_SECURITY_ADMIN_PASSWORD:?Set GF_SECURITY_ADMIN_PASSWORD in .env or environment}
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
       # read_only rootfs prevents writing to /var/log/grafana; use console only

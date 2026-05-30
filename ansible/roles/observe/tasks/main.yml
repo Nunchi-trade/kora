@@ -1,9 +1,21 @@
 ---
+- name: Fail if grafana_admin_password is unset or insecure
+  ansible.builtin.fail:
+    msg: >-
+      grafana_admin_password is {{ 'not set' if grafana_admin_password is not defined
+      else 'set to the insecure default "admin"' }}.
+      Set a strong password via host_vars, ansible-vault, or --extra-vars
+      (e.g. -e grafana_admin_password=YOUR_SECRET).
+  when: >-
+    grafana_admin_password is not defined
+    or grafana_admin_password | length < 8
+    or grafana_admin_password == 'admin'
+
 - name: Start observability stack
   ansible.builtin.command:
     cmd: >
       docker compose -f {{ compose_file }} --profile observability up -d
-      prometheus loki promtail grafana
+      prometheus alertmanager loki promtail grafana
   environment:
     GF_SECURITY_ADMIN_PASSWORD: "{{ grafana_admin_password }}"
   changed_when: true
@@ -15,6 +27,16 @@
     status_code: 200
   register: prom_health
   until: prom_health.status == 200
+  retries: 12
+  delay: 5
+
+- name: Wait for Alertmanager to be ready
+  ansible.builtin.uri:
+    url: "http://localhost:9093/-/ready"
+    method: GET
+    status_code: 200
+  register: am_health
+  until: am_health.status == 200
   retries: 12
   delay: 5
 
@@ -42,9 +64,10 @@
   ansible.builtin.debug:
     msg: |
       Observability stack is ready!
-        Prometheus: http://{{ ansible_host }}:{{ prometheus_port }}
-        Loki:       http://{{ ansible_host }}:{{ loki_port }}
-        Grafana:    http://{{ ansible_host }}:{{ grafana_port }} (user: admin, password set via grafana_admin_password)
+        Prometheus:   http://{{ ansible_host }}:{{ prometheus_port }}
+        Alertmanager: http://{{ ansible_host }}:9093
+        Loki:         http://{{ ansible_host }}:{{ loki_port }}
+        Grafana:      http://{{ ansible_host }}:{{ grafana_port }} (user: admin, password set via grafana_admin_password)
       Dashboards:
         Overview:          http://{{ ansible_host }}:{{ grafana_port }}/d/kora-overview
         Performance:       http://{{ ansible_host }}:{{ grafana_port }}/d/kora-performance

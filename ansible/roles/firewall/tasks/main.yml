@@ -1,4 +1,12 @@
 ---
+- name: Fail if trusted_ips allows all traffic
+  ansible.builtin.fail:
+    msg: >-
+      trusted_ips contains '0.0.0.0/0' which opens RPC, metrics, Prometheus,
+      and Grafana to the entire internet. Set trusted_ips to specific operator
+      IPs in host_vars or vault (e.g. ["10.0.0.0/8", "203.0.113.5/32"]).
+  when: "'0.0.0.0/0' in (trusted_ips | default([]))"
+
 - name: Deploy nftables configuration
   ansible.builtin.template:
     src: nftables.conf.j2
