@@ -16,9 +16,13 @@
     cmd: >
       docker compose -f {{ compose_file }} --profile observability up -d
       prometheus alertmanager loki promtail grafana
+  register: observe_compose_up
   environment:
     GF_SECURITY_ADMIN_PASSWORD: "{{ grafana_admin_password }}"
-  changed_when: true
+  changed_when: >-
+    'Created' in (observe_compose_up.stdout ~ observe_compose_up.stderr)
+    or 'Recreated' in (observe_compose_up.stdout ~ observe_compose_up.stderr)
+    or 'Started' in (observe_compose_up.stdout ~ observe_compose_up.stderr)
 
 - name: Wait for Prometheus to be ready
   ansible.builtin.uri:
@@ -32,7 +36,7 @@
 
 - name: Wait for Alertmanager to be ready
   ansible.builtin.uri:
-    url: "http://localhost:9093/-/ready"
+    url: "http://localhost:{{ alertmanager_port }}/-/ready"
     method: GET
     status_code: 200
   register: am_health
@@ -63,13 +67,16 @@
 - name: Print observability endpoints
   ansible.builtin.debug:
     msg: |
-      Observability stack is ready!
-        Prometheus:   http://{{ ansible_host }}:{{ prometheus_port }}
-        Alertmanager: http://{{ ansible_host }}:9093
-        Loki:         http://{{ ansible_host }}:{{ loki_port }}
-        Grafana:      http://{{ ansible_host }}:{{ grafana_port }} (user: admin, password set via grafana_admin_password)
+      Observability stack is ready on the remote host loopback interface.
+      Use SSH tunnels unless you intentionally change the compose bind host
+      and restrict access with trusted_ips.
+
+        Prometheus:   http://localhost:{{ prometheus_port }}
+        Alertmanager: http://localhost:{{ alertmanager_port }}
+        Loki:         http://localhost:{{ loki_port }}
+        Grafana:      http://localhost:{{ grafana_port }} (user: admin)
       Dashboards:
-        Overview:          http://{{ ansible_host }}:{{ grafana_port }}/d/kora-overview
-        Performance:       http://{{ ansible_host }}:{{ grafana_port }}/d/kora-performance
-        Stall Diagnostics: http://{{ ansible_host }}:{{ grafana_port }}/d/kora-stall-diagnostics
-        Logs Explorer:     http://{{ ansible_host }}:{{ grafana_port }}/d/kora-logs
+        Overview:          http://localhost:{{ grafana_port }}/d/kora-overview
+        Performance:       http://localhost:{{ grafana_port }}/d/kora-performance
+        Stall Diagnostics: http://localhost:{{ grafana_port }}/d/kora-stall-diagnostics
+        Logs Explorer:     http://localhost:{{ grafana_port }}/d/kora-logs

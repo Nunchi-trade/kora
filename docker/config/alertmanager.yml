@@ -1,12 +1,7 @@
-# Alertmanager configuration
-#
-# Replace the placeholder webhook_url with your actual alerting destination:
-#   - Slack:      https://hooks.slack.com/services/T.../B.../...
-#   - PagerDuty:  use pagerduty_configs with a service_key
-#   - OpsGenie:   use opsgenie_configs with an api_key
-#   - Generic:    any HTTP endpoint that accepts Alertmanager webhook JSON
-#
-# See: https://prometheus.io/docs/alerting/latest/configuration/
+# Alertmanager configuration. The default receiver intentionally drops
+# notifications so a test deployment does not emit alerts to a placeholder URL.
+# Replace the receiver with Slack, PagerDuty, OpsGenie, or webhook configs when
+# wiring a real alert destination.
 
 global:
   resolve_timeout: 5m
@@ -19,25 +14,19 @@ route:
   repeat_interval: 4h
   routes:
     - receiver: critical
-      match:
-        severity: critical
+      matchers:
+        - severity="critical"
       repeat_interval: 1h
 
 receivers:
   - name: default
-    webhook_configs:
-      - url: ${ALERTMANAGER_WEBHOOK_URL:-http://localhost:9095/alert/dev/null}
-        send_resolved: true
   - name: critical
-    webhook_configs:
-      - url: ${ALERTMANAGER_WEBHOOK_URL:-http://localhost:9095/alert/dev/null}
-        send_resolved: true
 
 # Inhibit lower-severity alerts when a critical alert is already firing
 # for the same instance. Reduces noise during outages.
 inhibit_rules:
-  - source_match:
-      severity: critical
-    target_match:
-      severity: warning
+  - source_matchers:
+      - severity="critical"
+    target_matchers:
+      - severity="warning"
     equal: ['alertname', 'instance']

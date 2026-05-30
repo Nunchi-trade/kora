@@ -29,44 +29,49 @@ table inet filter {
         udp dport {{ secondary_p2p_port }} accept
 
         # Kora RPC (restricted to trusted IPs)
-{% if trusted_ips | default([]) | length > 0 %}
 {% for ip in trusted_ips %}
-        ip saddr {{ ip }} tcp dport { {{ rpc_ports | replace(':', '-') }} } accept
-{% endfor %}
+{% if ':' in ip %}
+        ip6 saddr {{ ip }} tcp dport { {{ rpc_ports | replace(':', '-') }} } accept
 {% else %}
-        # WARNING: RPC is open to the world. Set 'trusted_ips' to restrict access.
-        tcp dport { {{ rpc_ports | replace(':', '-') }} } accept
+        ip saddr {{ ip }} tcp dport { {{ rpc_ports | replace(':', '-') }} } accept
 {% endif %}
+{% endfor %}
 
         # Metrics (restricted to trusted IPs)
-{% if trusted_ips | default([]) | length > 0 %}
 {% for ip in trusted_ips %}
-        ip saddr {{ ip }} tcp dport { {{ metrics_ports | replace(':', '-') }} } accept
-{% endfor %}
+{% if ':' in ip %}
+        ip6 saddr {{ ip }} tcp dport { {{ metrics_ports | replace(':', '-') }} } accept
 {% else %}
-        # WARNING: Metrics are open to the world. Set 'trusted_ips' to restrict access.
-        tcp dport { {{ metrics_ports | replace(':', '-') }} } accept
+        ip saddr {{ ip }} tcp dport { {{ metrics_ports | replace(':', '-') }} } accept
 {% endif %}
+{% endfor %}
 
         # Prometheus (restricted to trusted IPs)
-{% if trusted_ips | default([]) | length > 0 %}
 {% for ip in trusted_ips %}
-        ip saddr {{ ip }} tcp dport {{ prometheus_port }} accept
-{% endfor %}
+{% if ':' in ip %}
+        ip6 saddr {{ ip }} tcp dport {{ prometheus_port }} accept
 {% else %}
-        # WARNING: Prometheus is open to the world. Set 'trusted_ips' to restrict access.
-        tcp dport {{ prometheus_port }} accept
+        ip saddr {{ ip }} tcp dport {{ prometheus_port }} accept
 {% endif %}
+{% endfor %}
+
+        # Alertmanager (restricted to trusted IPs)
+{% for ip in trusted_ips %}
+{% if ':' in ip %}
+        ip6 saddr {{ ip }} tcp dport {{ alertmanager_port }} accept
+{% else %}
+        ip saddr {{ ip }} tcp dport {{ alertmanager_port }} accept
+{% endif %}
+{% endfor %}
 
         # Grafana (restricted to trusted IPs)
-{% if trusted_ips | default([]) | length > 0 %}
 {% for ip in trusted_ips %}
-        ip saddr {{ ip }} tcp dport {{ grafana_port }} accept
-{% endfor %}
+{% if ':' in ip %}
+        ip6 saddr {{ ip }} tcp dport {{ grafana_port }} accept
 {% else %}
-        # WARNING: Grafana is open to the world. Set 'trusted_ips' to restrict access.
-        tcp dport {{ grafana_port }} accept
+        ip saddr {{ ip }} tcp dport {{ grafana_port }} accept
 {% endif %}
+{% endfor %}
 
         # Log and drop
         log prefix "[nftables drop] " flags all counter drop
@@ -75,8 +80,9 @@ table inet filter {
     chain forward {
         type filter hook forward priority 0; policy drop;
 
-        # Allow Docker bridge traffic
+        # Allow Docker bridge traffic (default bridge and Compose custom bridges)
         iifname "docker0" oifname "docker0" accept
+        iifname "br-*" oifname "br-*" accept
         ct state established,related accept
     }
 

@@ -1,11 +1,25 @@
 ---
+- name: Fail if trusted_ips is unset or empty
+  ansible.builtin.fail:
+    msg: >-
+      trusted_ips must contain explicit operator CIDRs for RPC, metrics,
+      Prometheus, Alertmanager, and Grafana. Use ["127.0.0.1/32"] for
+      localhost-only access, or add specific operator IPs in host_vars/vault.
+  when: >-
+    trusted_ips is not defined
+    or trusted_ips is string
+    or (trusted_ips | length == 0)
+
 - name: Fail if trusted_ips allows all traffic
   ansible.builtin.fail:
     msg: >-
-      trusted_ips contains '0.0.0.0/0' which opens RPC, metrics, Prometheus,
-      and Grafana to the entire internet. Set trusted_ips to specific operator
-      IPs in host_vars or vault (e.g. ["10.0.0.0/8", "203.0.113.5/32"]).
-  when: "'0.0.0.0/0' in (trusted_ips | default([]))"
+      trusted_ips contains a public-any CIDR which opens RPC, metrics,
+      Prometheus, Alertmanager, and Grafana to the entire internet. Set
+      trusted_ips to specific operator IPs in host_vars or vault
+      (e.g. ["10.0.0.0/8", "203.0.113.5/32"]).
+  when: >-
+    '0.0.0.0/0' in trusted_ips
+    or '::/0' in trusted_ips
 
 - name: Deploy nftables configuration
   ansible.builtin.template:
@@ -13,7 +27,9 @@
     dest: /etc/nftables.conf
     mode: "0644"
     validate: 'nft -c -f %s'
-  notify: restart nftables
+  notify:
+    - restart nftables
+    - restart docker
 
 - name: Enable and start nftables
   ansible.builtin.systemd:
