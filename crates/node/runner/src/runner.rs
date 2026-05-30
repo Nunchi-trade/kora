@@ -1211,9 +1211,12 @@ impl NodeRunner for ProductionRunner {
                     let tx = Tx::new(data.clone());
                     let tx_id = tx.id();
                     let state = ledger.latest_state().await;
-                    let validator =
-                        TransactionValidator::new(chain_id, state, PoolConfig::default().with_block_gas_limit(rpc_gas_limit))
-                            .with_pool(pool);
+                    let validator = TransactionValidator::new(
+                        chain_id,
+                        state,
+                        PoolConfig::default().with_block_gas_limit(rpc_gas_limit),
+                    )
+                    .with_pool(pool);
                     validator.validate(tx.clone()).await.map_err(|err| {
                         warn!(?tx_id, error = %err, "rpc submit: validator rejected tx");
                         kora_rpc::RpcError::InvalidTransaction(err.to_string())
