@@ -14,8 +14,10 @@ pub struct OrderedTransaction {
     pub sender: Address,
     /// Transaction nonce.
     pub nonce: u64,
-    /// Effective gas price for ordering.
+    /// Effective gas price (EIP-1559: `min(max_fee_per_gas, base_fee + max_priority_fee_per_gas)`).
     pub effective_gas_price: u128,
+    /// The base fee used to compute `effective_gas_price`.
+    pub base_fee: u128,
     /// Timestamp when transaction was received.
     pub timestamp: u64,
     /// The decoded transaction envelope.
@@ -29,16 +31,16 @@ impl OrderedTransaction {
         sender: Address,
         nonce: u64,
         effective_gas_price: u128,
+        base_fee: u128,
         timestamp: u64,
         envelope: TxEnvelope,
     ) -> Self {
-        Self { hash, sender, nonce, effective_gas_price, timestamp, envelope }
+        Self { hash, sender, nonce, effective_gas_price, base_fee, timestamp, envelope }
     }
 
-    /// Calculates the effective tip given a base fee.
-    pub fn effective_tip(&self, base_fee: Option<u128>) -> u128 {
-        base_fee
-            .map_or(self.effective_gas_price, |base| self.effective_gas_price.saturating_sub(base))
+    /// Calculates the effective tip (priority fee) the transaction pays above the base fee.
+    pub fn effective_tip(&self) -> u128 {
+        self.effective_gas_price.saturating_sub(self.base_fee)
     }
 }
 
@@ -59,8 +61,8 @@ impl PartialOrd for OrderedTransaction {
 impl Ord for OrderedTransaction {
     fn cmp(&self, other: &Self) -> Ordering {
         other
-            .effective_gas_price
-            .cmp(&self.effective_gas_price)
+            .effective_tip()
+            .cmp(&self.effective_tip())
             .then_with(|| self.timestamp.cmp(&other.timestamp))
             .then_with(|| self.hash.cmp(&other.hash))
     }
@@ -101,7 +103,7 @@ impl SenderQueue {
             match self.queued.binary_search_by(|q| q.nonce.cmp(&tx.nonce)) {
                 Ok(pos) => {
                     let existing = &self.queued[pos];
-                    if tx.effective_gas_price > existing.effective_gas_price {
+                    if tx.effective_tip() > existing.effective_tip() {
                         let old = std::mem::replace(&mut self.queued[pos], tx);
                         Some(old)
                     } else {
@@ -117,7 +119,7 @@ impl SenderQueue {
             let idx = (tx.nonce - self.next_nonce) as usize;
             if idx < self.pending.len() {
                 let existing = &self.pending[idx];
-                if tx.effective_gas_price > existing.effective_gas_price {
+                if tx.effective_tip() > existing.effective_tip() {
                     let old = std::mem::replace(&mut self.pending[idx], tx);
                     return Some(old);
                 }
@@ -211,12 +213,21 @@ mod tests {
     }
 
     fn make_tx(nonce: u64, gas_price: u128) -> OrderedTransaction {
+        make_tx_with_base_fee(nonce, gas_price, gas_price, 0)
+    }
+
+    fn make_tx_with_base_fee(
+        nonce: u64,
+        max_fee: u128,
+        max_priority_fee: u128,
+        base_fee: u128,
+    ) -> OrderedTransaction {
         let inner = TxEip1559 {
             chain_id: 1,
             nonce,
             gas_limit: 21000,
-            max_fee_per_gas: gas_price,
-            max_priority_fee_per_gas: gas_price,
+            max_fee_per_gas: max_fee,
+            max_priority_fee_per_gas: max_priority_fee,
             to: TxKind::Call(Address::ZERO),
             value: U256::ZERO,
             access_list: Default::default(),
@@ -229,7 +240,16 @@ mod tests {
         );
         let signed = inner.into_signed(sig);
         let envelope = TxEnvelope::from(signed);
-        OrderedTransaction::new(random_b256(), random_address(), nonce, gas_price, 0, envelope)
+        let effective_gas_price = std::cmp::min(max_fee, base_fee + max_priority_fee);
+        OrderedTransaction::new(
+            random_b256(),
+            random_address(),
+            nonce,
+            effective_gas_price,
+            base_fee,
+            0,
+            envelope,
+        )
     }
 
     #[test]
@@ -315,5 +335,22 @@ mod tests {
         let tx2 = make_tx(0, 200);
 
         assert!(tx2 < tx1);
+    }
+
+    /// EIP-1559: a transaction with higher effective tip should be ordered first,
+    /// even when its max_fee_per_gas is lower.
+    #[test]
+    fn eip1559_ordering_by_effective_tip() {
+        let base_fee: u128 = 10;
+
+        // tx_high_max: max_fee=100, priority_fee=1 => effective_gas_price=11, tip=1
+        let tx_high_max = make_tx_with_base_fee(0, 100, 1, base_fee);
+        // tx_high_tip: max_fee=50, priority_fee=50 => effective_gas_price=50, tip=40
+        let tx_high_tip = make_tx_with_base_fee(0, 50, 50, base_fee);
+
+        // tx_high_tip has a higher effective tip (40 vs 1), so it should be ordered first (< in Ord)
+        assert!(tx_high_tip < tx_high_max);
+        assert_eq!(tx_high_tip.effective_tip(), 40);
+        assert_eq!(tx_high_max.effective_tip(), 1);
     }
 }

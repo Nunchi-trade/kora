@@ -30,8 +30,10 @@ pub struct ValidatedTransaction {
     pub nonce: u64,
     /// Gas limit.
     pub gas_limit: u64,
-    /// Effective gas price for ordering.
+    /// Effective gas price for ordering (EIP-1559: `min(max_fee, base_fee + priority_fee)`).
     pub effective_gas_price: u128,
+    /// The base fee used to compute `effective_gas_price`.
+    pub base_fee: u128,
     /// Maximum cost (gas * price + value).
     pub max_cost: U256,
     /// The decoded transaction envelope.
@@ -44,6 +46,7 @@ pub struct ValidatedTransaction {
 #[derive(Debug)]
 pub struct TransactionValidator<S> {
     chain_id: u64,
+    base_fee: u128,
     state: S,
     config: PoolConfig,
     pool: Option<TransactionPool>,
@@ -52,7 +55,14 @@ pub struct TransactionValidator<S> {
 impl<S: StateDbRead> TransactionValidator<S> {
     /// Creates a new transaction validator.
     pub const fn new(chain_id: u64, state: S, config: PoolConfig) -> Self {
-        Self { chain_id, state, config, pool: None }
+        Self { chain_id, base_fee: 0, state, config, pool: None }
+    }
+
+    /// Sets the current base fee for EIP-1559 effective gas price computation.
+    #[must_use]
+    pub const fn with_base_fee(mut self, base_fee: u128) -> Self {
+        self.base_fee = base_fee;
+        self
     }
 
     /// Attach a transaction pool so the validator can reject same-nonce
@@ -82,13 +92,19 @@ impl<S: StateDbRead> TransactionValidator<S> {
 
         let (sender, hash) = recover_sender_and_hash(&envelope)?;
 
-        let effective_gas_price = effective_gas_price(&envelope);
-        if effective_gas_price < self.config.min_gas_price {
+        // Reject transactions whose maximum fee is below the pool minimum.
+        // We check max_fee_per_gas (not effective_gas_price) because a tx may
+        // be valid at a future base fee even if the current effective price is
+        // low.  For legacy / EIP-2930 transactions max_fee_per_gas == gas_price.
+        let max_fee = max_fee_per_gas(&envelope);
+        if max_fee < self.config.min_gas_price {
             return Err(TxPoolError::GasPriceTooLow {
-                price: effective_gas_price,
+                price: max_fee,
                 min: self.config.min_gas_price,
             });
         }
+
+        let effective_gas_price = effective_gas_price(&envelope, self.base_fee);
 
         let intrinsic_gas = intrinsic_gas(&envelope);
         let gas_limit = envelope.gas_limit();
@@ -135,6 +151,7 @@ impl<S: StateDbRead> TransactionValidator<S> {
             nonce,
             gas_limit,
             effective_gas_price,
+            base_fee: self.base_fee,
             max_cost,
             envelope,
             raw: tx,
@@ -150,6 +167,7 @@ impl ValidatedTransaction {
             self.sender,
             self.nonce,
             self.effective_gas_price,
+            self.base_fee,
             timestamp,
             self.envelope,
         )
@@ -191,7 +209,38 @@ fn recover_sender_and_hash(envelope: &TxEnvelope) -> Result<(Address, B256), TxP
     Ok((sender, hash))
 }
 
-const fn effective_gas_price(envelope: &TxEnvelope) -> u128 {
+/// Computes the effective gas price for a transaction given the current base fee.
+///
+/// For EIP-1559 (and EIP-4844 / EIP-7702) transactions, this is:
+///   `min(max_fee_per_gas, base_fee + max_priority_fee_per_gas)`
+///
+/// For legacy and EIP-2930 transactions, the gas price is used directly
+/// (these types have no priority fee field).
+fn effective_gas_price(envelope: &TxEnvelope, base_fee: u128) -> u128 {
+    match envelope {
+        TxEnvelope::Legacy(tx) => tx.tx().gas_price,
+        TxEnvelope::Eip2930(tx) => tx.tx().gas_price,
+        TxEnvelope::Eip1559(tx) => {
+            let tx = tx.tx();
+            std::cmp::min(tx.max_fee_per_gas, base_fee + tx.max_priority_fee_per_gas)
+        }
+        TxEnvelope::Eip4844(tx) => {
+            let tx = tx.tx().tx();
+            std::cmp::min(tx.max_fee_per_gas, base_fee + tx.max_priority_fee_per_gas)
+        }
+        TxEnvelope::Eip7702(tx) => {
+            let tx = tx.tx();
+            std::cmp::min(tx.max_fee_per_gas, base_fee + tx.max_priority_fee_per_gas)
+        }
+    }
+}
+
+/// Returns the maximum fee per gas for balance checks.
+///
+/// For EIP-1559 transactions this is `max_fee_per_gas` (worst case), not the
+/// effective gas price, because the sender must be able to cover the maximum
+/// possible cost.
+fn max_fee_per_gas(envelope: &TxEnvelope) -> u128 {
     match envelope {
         TxEnvelope::Legacy(tx) => tx.tx().gas_price,
         TxEnvelope::Eip2930(tx) => tx.tx().gas_price,
@@ -240,10 +289,10 @@ fn access_list_gas_cost(access_list: &alloy_eips::eip2930::AccessList) -> u64 {
 
 fn max_tx_cost(envelope: &TxEnvelope) -> U256 {
     let gas_limit = U256::from(envelope.gas_limit());
-    let max_fee = U256::from(effective_gas_price(envelope));
+    let fee = U256::from(max_fee_per_gas(envelope));
     let value = envelope.value();
 
-    gas_limit * max_fee + value
+    gas_limit * fee + value
 }
 
 #[cfg(test)]
@@ -691,7 +740,16 @@ mod tests {
         let signed = tx.into_signed(sig);
         let envelope = TxEnvelope::from(signed);
 
-        assert_eq!(effective_gas_price(&envelope), 2_000_000_000);
+        // With base_fee=500_000_000:
+        // effective = min(2_000_000_000, 500_000_000 + 1_000_000_000) = 1_500_000_000
+        assert_eq!(effective_gas_price(&envelope, 500_000_000), 1_500_000_000);
+
+        // With base_fee=0: effective = min(2_000_000_000, 0 + 1_000_000_000) = 1_000_000_000
+        assert_eq!(effective_gas_price(&envelope, 0), 1_000_000_000);
+
+        // With base_fee=1_500_000_000:
+        // effective = min(2_000_000_000, 1_500_000_000 + 1_000_000_000) = 2_000_000_000
+        assert_eq!(effective_gas_price(&envelope, 1_500_000_000), 2_000_000_000);
     }
 
     #[test]
@@ -709,7 +767,9 @@ mod tests {
         let signed = tx.into_signed(sig);
         let envelope = TxEnvelope::from(signed);
 
-        assert_eq!(effective_gas_price(&envelope), 3_000_000_000);
+        // Legacy transactions ignore base_fee -- gas_price is used directly
+        assert_eq!(effective_gas_price(&envelope, 0), 3_000_000_000);
+        assert_eq!(effective_gas_price(&envelope, 1_000_000_000), 3_000_000_000);
     }
 
     #[test]

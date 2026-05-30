@@ -132,6 +132,8 @@ fn insertion_target(queue: Option<&SenderQueue>, tx: &OrderedTransaction) -> Ins
 pub struct TransactionPool {
     inner: Arc<RwLock<PoolInner>>,
     config: PoolConfig,
+    /// Current base fee used for EIP-1559 effective gas price computation.
+    base_fee: Arc<RwLock<u128>>,
     events: Option<broadcast::Sender<MempoolEvent>>,
     metrics: Arc<RwLock<Option<AppMetrics>>>,
 }
@@ -143,6 +145,7 @@ impl TransactionPool {
         Self {
             inner: Arc::new(RwLock::new(PoolInner::new())),
             config,
+            base_fee: Arc::new(RwLock::new(0)),
             events: None,
             metrics: Arc::new(RwLock::new(None)),
         }
@@ -154,9 +157,23 @@ impl TransactionPool {
         Self {
             inner: Arc::new(RwLock::new(PoolInner::new())),
             config,
+            base_fee: Arc::new(RwLock::new(0)),
             events: Some(events),
             metrics: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Updates the current base fee used for EIP-1559 ordering.
+    ///
+    /// Should be called whenever a new block is produced or received so that
+    /// transaction ordering and eviction reflect the latest fee market state.
+    pub fn set_base_fee(&self, base_fee: u128) {
+        *self.base_fee.write() = base_fee;
+    }
+
+    /// Returns the current base fee.
+    pub fn base_fee(&self) -> u128 {
+        *self.base_fee.read()
     }
 
     /// Attach application-level metrics to this pool.
@@ -321,8 +338,8 @@ impl TransactionPool {
                     return Err(TxPoolError::PoolFull);
                 }
                 if inner.pending_count >= self.config.max_pending_txs
-                    && let Some(min_price) = Self::min_pending_price(inner)
-                    && tx.effective_gas_price <= min_price
+                    && let Some(min_tip) = Self::min_pending_tip(inner)
+                    && tx.effective_tip() <= min_tip
                 {
                     return Err(TxPoolError::PoolFull);
                 }
@@ -332,8 +349,8 @@ impl TransactionPool {
                     return Err(TxPoolError::PoolFull);
                 }
                 if inner.queued_count >= self.config.max_queued_txs
-                    && let Some(min_price) = Self::min_queued_price(inner)
-                    && tx.effective_gas_price <= min_price
+                    && let Some(min_tip) = Self::min_queued_tip(inner)
+                    && tx.effective_tip() <= min_tip
                 {
                     return Err(TxPoolError::PoolFull);
                 }
@@ -344,19 +361,19 @@ impl TransactionPool {
         Ok(())
     }
 
-    fn min_pending_price(inner: &PoolInner) -> Option<u128> {
+    fn min_pending_tip(inner: &PoolInner) -> Option<u128> {
         inner
             .by_sender
             .values()
-            .flat_map(|queue| queue.pending.iter().map(|tx| tx.effective_gas_price))
+            .flat_map(|queue| queue.pending.iter().map(|tx| tx.effective_tip()))
             .min()
     }
 
-    fn min_queued_price(inner: &PoolInner) -> Option<u128> {
+    fn min_queued_tip(inner: &PoolInner) -> Option<u128> {
         inner
             .by_sender
             .values()
-            .flat_map(|queue| queue.queued.iter().map(|tx| tx.effective_gas_price))
+            .flat_map(|queue| queue.queued.iter().map(|tx| tx.effective_tip()))
             .min()
     }
 
@@ -365,7 +382,7 @@ impl TransactionPool {
             .by_sender
             .values()
             .flat_map(|queue| queue.pending.iter())
-            .min_by_key(|tx| (tx.effective_gas_price, std::cmp::Reverse(tx.timestamp), tx.hash))
+            .min_by_key(|tx| (tx.effective_tip(), std::cmp::Reverse(tx.timestamp), tx.hash))
             .map(|tx| tx.hash)?;
         let removed = inner.remove_by_hash(&hash);
         inner.update_counts();
@@ -377,7 +394,7 @@ impl TransactionPool {
             .by_sender
             .values()
             .flat_map(|queue| queue.queued.iter())
-            .min_by_key(|tx| (tx.effective_gas_price, std::cmp::Reverse(tx.timestamp), tx.hash))
+            .min_by_key(|tx| (tx.effective_tip(), std::cmp::Reverse(tx.timestamp), tx.hash))
             .map(|tx| tx.hash)?;
         let removed = inner.remove_by_hash(&hash);
         inner.update_counts();
@@ -580,6 +597,7 @@ impl Clone for TransactionPool {
         Self {
             inner: self.inner.clone(),
             config: self.config.clone(),
+            base_fee: self.base_fee.clone(),
             events: self.events.clone(),
             metrics: self.metrics.clone(), // Arc clone: all clones share the same metrics handle
         }
@@ -633,7 +651,7 @@ fn rejection_reason(err: &TxPoolError) -> String {
     }
 }
 
-fn tx_to_ordered(tx: &Tx) -> Option<OrderedTransaction> {
+fn tx_to_ordered(tx: &Tx, base_fee: u128) -> Option<OrderedTransaction> {
     let envelope = TxEnvelope::decode_2718(&mut tx.bytes.as_ref()).ok()?;
     let sender = recover_sender_from_envelope(&envelope).ok()?;
     let hash = alloy_primitives::keccak256(&tx.bytes);
@@ -641,9 +659,18 @@ fn tx_to_ordered(tx: &Tx) -> Option<OrderedTransaction> {
     let effective_gas_price = match &envelope {
         TxEnvelope::Legacy(tx) => tx.tx().gas_price,
         TxEnvelope::Eip2930(tx) => tx.tx().gas_price,
-        TxEnvelope::Eip1559(tx) => tx.tx().max_fee_per_gas,
-        TxEnvelope::Eip4844(tx) => tx.tx().tx().max_fee_per_gas,
-        TxEnvelope::Eip7702(tx) => tx.tx().max_fee_per_gas,
+        TxEnvelope::Eip1559(tx) => {
+            let tx = tx.tx();
+            std::cmp::min(tx.max_fee_per_gas, base_fee + tx.max_priority_fee_per_gas)
+        }
+        TxEnvelope::Eip4844(tx) => {
+            let tx = tx.tx().tx();
+            std::cmp::min(tx.max_fee_per_gas, base_fee + tx.max_priority_fee_per_gas)
+        }
+        TxEnvelope::Eip7702(tx) => {
+            let tx = tx.tx();
+            std::cmp::min(tx.max_fee_per_gas, base_fee + tx.max_priority_fee_per_gas)
+        }
     };
 
     Some(OrderedTransaction::new(
@@ -651,6 +678,7 @@ fn tx_to_ordered(tx: &Tx) -> Option<OrderedTransaction> {
         sender,
         nonce,
         effective_gas_price,
+        base_fee,
         current_timestamp(),
         envelope,
     ))
@@ -658,7 +686,8 @@ fn tx_to_ordered(tx: &Tx) -> Option<OrderedTransaction> {
 
 impl Mempool for TransactionPool {
     fn insert(&self, tx: Tx) -> bool {
-        let Some(ordered) = tx_to_ordered(&tx) else {
+        let base_fee = self.base_fee();
+        let Some(ordered) = tx_to_ordered(&tx, base_fee) else {
             trace!("failed to decode transaction for mempool insert");
             self.record_rejection("decode_error");
             return false;
@@ -804,7 +833,8 @@ mod tests {
         let sig = Signature::from_scalars_and_parity(B256::ZERO, B256::ZERO, false);
         let signed = inner.into_signed(sig);
         let envelope = TxEnvelope::from(signed);
-        OrderedTransaction::new(random_b256(), sender, nonce, gas_price, 0, envelope)
+        // base_fee=0 so effective_gas_price = min(gas_price, 0 + gas_price) = gas_price
+        OrderedTransaction::new(random_b256(), sender, nonce, gas_price, 0, 0, envelope)
     }
 
     fn tx_nonce(tx: &Tx) -> u64 {
