@@ -135,8 +135,8 @@ pub struct TransactionPool {
     events: Option<broadcast::Sender<MempoolEvent>>,
     /// Metrics handle -- set once via `set_metrics`, lock-free reads thereafter.
     metrics: Arc<std::sync::OnceLock<AppMetrics>>,
-    /// Dynamic minimum gas price that tracks the EIP-1559 base fee.
-    /// Updated via `update_base_fee()` after each finalized block.
+    /// Dynamic minimum gas price that tracks the EIP-1559 base fee for the next
+    /// block. Updated via `update_base_fee()` after each finalized block.
     dynamic_min_gas_price: Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -548,11 +548,21 @@ impl TransactionPool {
         let Some(queue) = inner.by_sender.get(sender) else {
             return U256::ZERO;
         };
-        queue.pending.iter().fold(U256::ZERO, |acc, tx| {
-            let gas_cost = U256::from(tx.envelope.gas_limit()) * U256::from(tx.effective_gas_price);
-            let value = tx.envelope.value();
-            acc + gas_cost + value
-        })
+        queue.pending.iter().fold(U256::ZERO, |acc, tx| acc + ordered_tx_cost(tx))
+    }
+
+    /// Returns the cumulative maximum cost of pending transactions from
+    /// `sender`, excluding the pending transaction with `nonce` if present.
+    pub fn pending_cost_excluding_nonce(&self, sender: &Address, nonce: u64) -> U256 {
+        let inner = self.inner.read();
+        let Some(queue) = inner.by_sender.get(sender) else {
+            return U256::ZERO;
+        };
+        queue
+            .pending
+            .iter()
+            .filter(|tx| tx.nonce != nonce)
+            .fold(U256::ZERO, |acc, tx| acc + ordered_tx_cost(tx))
     }
 
     /// Returns all sender queues for pool introspection.
@@ -613,12 +623,12 @@ impl TransactionPool {
         &self.config
     }
 
-    /// Update the dynamic minimum gas price to track the current EIP-1559 base
-    /// fee.  The floor is the static `config.min_gas_price`.  Validators should
-    /// call this after each finalized block.
+    /// Update the dynamic minimum gas price to track the EIP-1559 base fee. The
+    /// floor is the static `config.min_gas_price`.
     pub fn update_base_fee(&self, base_fee: u128) {
         let floor = self.config.min_gas_price;
-        let dynamic = (base_fee as u64).max(floor);
+        let base_fee = u64::try_from(base_fee).unwrap_or(u64::MAX);
+        let dynamic = base_fee.max(floor);
         self.dynamic_min_gas_price.store(dynamic, std::sync::atomic::Ordering::Relaxed);
     }
 
@@ -662,6 +672,11 @@ fn tx_added_event(tx: &OrderedTransaction) -> MempoolEvent {
         gas_price: U256::from(tx.effective_gas_price),
         nonce: tx.nonce,
     }
+}
+
+fn ordered_tx_cost(tx: &OrderedTransaction) -> U256 {
+    let gas_cost = U256::from(tx.envelope.gas_limit()) * U256::from(tx.effective_gas_price);
+    gas_cost + tx.envelope.value()
 }
 
 fn current_timestamp() -> u64 {
@@ -1095,6 +1110,32 @@ mod tests {
         assert!(pool.contains(&tx0_low.hash));
         assert!(!pool.contains(&tx1_high.hash));
         assert_eq!(pool.pending_count(), 2);
+    }
+
+    #[test]
+    fn pool_eviction_preserves_executable_prefix_of_cheapest_sender() {
+        let config = PoolConfig::default().with_max_pending_txs(3);
+        let pool = TransactionPool::new(config);
+        let sender = random_address();
+
+        let tx0_low = make_ordered_tx(sender, 0, 10);
+        let tx1_high = make_ordered_tx(sender, 1, 100);
+        let tx2_high = make_ordered_tx(sender, 2, 100);
+        let other = make_ordered_tx(random_address(), 0, 50);
+
+        pool.add(tx0_low.clone()).unwrap();
+        pool.add(tx1_high.clone()).unwrap();
+        pool.add(tx2_high.clone()).unwrap();
+        pool.add(other.clone()).unwrap();
+
+        assert!(pool.contains(&tx0_low.hash));
+        assert!(pool.contains(&tx1_high.hash));
+        assert!(!pool.contains(&tx2_high.hash));
+        assert!(pool.contains(&other.hash));
+
+        let sender_nonces: Vec<_> =
+            pool.pending_for_sender(&sender).into_iter().map(|tx| tx.nonce).collect();
+        assert_eq!(sender_nonces, vec![0, 1]);
     }
 
     #[test]

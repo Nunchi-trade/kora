@@ -231,6 +231,14 @@ where
         self.block_fees.write().insert(digest, (gas_used, base_fee));
     }
 
+    /// Update the txpool's dynamic gas-price floor to the base fee expected for
+    /// the next block.
+    async fn update_txpool_next_base_fee(&self, base_fee: u64, gas_used: u64) {
+        let next_base_fee =
+            calculate_base_fee(base_fee, gas_used, self.gas_limit, &BaseFeeParams::DEFAULT);
+        self.ledger.txpool().await.update_base_fee(u128::from(next_base_fee));
+    }
+
     fn block_context(
         &self,
         height: u64,
@@ -408,6 +416,7 @@ where
 
         // Cache gas usage so that the next block can derive its base fee.
         self.record_block_fees(block_digest, outcome.gas_used, base_fee);
+        self.update_txpool_next_base_fee(base_fee, outcome.gas_used).await;
 
         let total_elapsed = start.elapsed();
 
@@ -674,6 +683,7 @@ where
 
         // Cache gas usage so the next block can derive its base fee.
         self.record_block_fees(digest, execution.outcome.gas_used, base_fee);
+        self.update_txpool_next_base_fee(base_fee, execution.outcome.gas_used).await;
 
         let merged_changes = parent_snapshot.state.merge_changes(execution.outcome.changes.clone());
         let next_state = OverlayState::new(parent_snapshot.state.base(), merged_changes);
