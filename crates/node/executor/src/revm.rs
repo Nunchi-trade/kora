@@ -300,11 +300,13 @@ impl RevmExecutor {
                 Err(ExecutionError::TxExecution(ref msg)) if msg.contains("OutOfGas") => {
                     lo = mid;
                 }
-                // Contract reverted -- propagate immediately since more gas
-                // won't help (unless the contract uses gasleft()-dependent
-                // logic, but the upper-bound check already passed).
-                Err(ExecutionError::Revert(output)) => {
-                    return Err(ExecutionError::Revert(output));
+                // The upper-bound check already proved this call can succeed.
+                // A midpoint revert can still be gas-dependent (for example,
+                // contract logic that checks gasleft()), so keep searching for
+                // the lowest known-successful gas limit instead of turning the
+                // estimate into a revert error.
+                Err(ExecutionError::Revert(_)) => {
+                    lo = mid;
                 }
                 // State errors, invalid tx, other halts -- propagate immediately.
                 Err(e) => {
