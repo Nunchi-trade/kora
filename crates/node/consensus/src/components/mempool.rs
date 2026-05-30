@@ -47,7 +47,7 @@ impl Mempool for InMemoryMempool {
         inner.insert(id, tx).is_none()
     }
 
-    fn build(&self, max_txs: usize, excluded: &std::collections::BTreeSet<TxId>) -> Vec<Tx> {
+    fn build(&self, max_txs: usize, excluded: &std::collections::HashSet<TxId>) -> Vec<Tx> {
         let inner = self.inner.read();
         let mut candidates: Vec<_> = inner
             .iter()
@@ -122,7 +122,7 @@ mod tests {
 
         assert_eq!(mempool.len(), 2);
 
-        let txs = mempool.build(10, &std::collections::BTreeSet::new());
+        let txs = mempool.build(10, &std::collections::HashSet::new());
         assert_eq!(txs.len(), 2);
     }
 
@@ -151,7 +151,7 @@ mod tests {
         mempool.insert(tx1);
         mempool.insert(tx2.clone());
 
-        let mut excluded = std::collections::BTreeSet::new();
+        let mut excluded = std::collections::HashSet::new();
         excluded.insert(id1);
 
         let txs = mempool.build(10, &excluded);
@@ -178,7 +178,7 @@ mod tests {
         let mut expected = txs;
         expected.sort_by_key(signed_order_key);
 
-        let built = mempool.build(10, &std::collections::BTreeSet::new());
+        let built = mempool.build(10, &std::collections::HashSet::new());
         let built_ids: Vec<_> = built.iter().map(Tx::id).collect();
         let expected_ids: Vec<_> = expected.iter().map(Tx::id).collect();
 

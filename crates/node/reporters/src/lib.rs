@@ -10,7 +10,7 @@ use std::{
     fmt,
     marker::PhantomData,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use alloy_consensus::{
@@ -253,6 +253,7 @@ async fn handle_finalized_update<E, P>(
     match update {
         Update::Tip(..) => {}
         Update::Block(block, ack) => {
+            let finalize_start = Instant::now();
             if let Some(ref ns) = node_state {
                 ns.set_finalized_height(block.height);
             }
@@ -266,6 +267,7 @@ async fn handle_finalized_update<E, P>(
                 block_index.as_ref(),
                 &block,
                 persist_checkpoint,
+                metrics.as_ref(),
             )
             .await;
 
@@ -273,6 +275,7 @@ async fn handle_finalized_update<E, P>(
             if let Some(ref m) = metrics {
                 if result.is_ok() {
                     m.blocks_finalized.inc();
+                    m.finalized_height.set(block.height as i64);
                 } else {
                     m.finalization_failures.inc();
                 }
@@ -341,6 +344,15 @@ async fn handle_finalized_update<E, P>(
             state.prune_stale_nonces().await;
 
             publish_mempool_inclusions(mempool_broadcast.as_ref(), &block);
+
+            let finalize_elapsed = finalize_start.elapsed();
+            info!(
+                height = block.height,
+                tx_count = block.txs.len(),
+                finalize_duration_ms = finalize_elapsed.as_millis() as u64,
+                persisted = persist_checkpoint,
+                "block finalized"
+            );
         }
     }
 }
@@ -386,6 +398,7 @@ async fn finalize_with_retry<E, P>(
     block_index: Option<&Arc<BlockIndex>>,
     block: &Block,
     persist_checkpoint: bool,
+    metrics: Option<&AppMetrics>,
 ) -> Result<(Option<ExecutionOutcome>, Option<BlockContext>), FinalizationError>
 where
     E: BlockExecutor<OverlayState<QmdbState>, Tx = Bytes>,
@@ -403,6 +416,7 @@ where
             block_index,
             block,
             persist_checkpoint,
+            metrics,
         )
         .await
         {
@@ -481,6 +495,7 @@ async fn finalize_block<E, P>(
     block_index: Option<&Arc<BlockIndex>>,
     block: &Block,
     persist_checkpoint: bool,
+    metrics: Option<&AppMetrics>,
 ) -> Result<(Option<ExecutionOutcome>, Option<BlockContext>), FinalizationError>
 where
     E: BlockExecutor<OverlayState<QmdbState>, Tx = Bytes>,
@@ -598,6 +613,7 @@ where
         trace!(?digest, "using cached snapshot for finalized block");
     }
     if persist_checkpoint {
+        let persist_start = Instant::now();
         let persist_state = state.clone();
         let persist_handle = context
             .child("persist")
@@ -608,6 +624,11 @@ where
             .map_err(|err| FinalizationError::PersistTaskFailed(format!("{err}")))?;
         if let Err(err) = persist_result {
             return Err(FinalizationError::PersistFailed(err));
+        }
+        // Record persist duration for Prometheus so operators can detect
+        // I/O contention on shared storage (see issue #069).
+        if let Some(ref m) = metrics {
+            m.persist_duration_seconds.observe(persist_start.elapsed().as_secs_f64());
         }
     }
 
@@ -1610,14 +1631,25 @@ where
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         match &activity {
             Activity::Notarization(n) => {
-                self.state.set_view(n.proposal.round.view().get());
+                let view = n.proposal.round.view().get();
+                self.state.set_view(view);
+                if let Some(ref m) = self.metrics {
+                    m.current_view.set(view as i64);
+                }
             }
             Activity::Finalization(f) => {
-                self.state.set_view(f.proposal.round.view().get());
+                let view = f.proposal.round.view().get();
+                self.state.set_view(view);
                 self.state.inc_finalized();
+                if let Some(ref m) = self.metrics {
+                    m.current_view.set(view as i64);
+                }
             }
             Activity::Nullification(_) => {
                 self.state.inc_nullified();
+                if let Some(ref m) = self.metrics {
+                    m.nullifications_total.inc();
+                }
             }
             Activity::ConflictingNotarize(proof) => {
                 warn!(

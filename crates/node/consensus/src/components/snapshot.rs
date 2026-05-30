@@ -208,7 +208,9 @@ impl<S: StateDb> SnapshotStore<S> for InMemorySnapshotStore<S> {
         let snapshots = self.snapshots.read();
         let persisted = self.persisted.read();
 
-        // Walk back to find all unpersisted ancestors
+        // Walk back to find all unpersisted ancestors.
+        // We collect Arc<ChangeSet> refs cheaply; the actual deep copy
+        // happens only in the merge loop below.
         let mut chain = Vec::new();
         let mut current = Some(parent);
 
@@ -227,7 +229,7 @@ impl<S: StateDb> SnapshotStore<S> for InMemorySnapshotStore<S> {
         // Merge in reverse order (oldest first)
         let mut merged = ChangeSet::new();
         for changes in chain.into_iter().rev() {
-            merged.merge(changes);
+            merged.merge((*changes).clone());
         }
         merged.merge(new_changes);
 
@@ -263,7 +265,7 @@ impl<S: StateDb> SnapshotStore<S> for InMemorySnapshotStore<S> {
 
         let mut merged = ChangeSet::new();
         for changes in changes_chain {
-            merged.merge(changes);
+            merged.merge((*changes).clone());
         }
 
         Ok((chain, merged))

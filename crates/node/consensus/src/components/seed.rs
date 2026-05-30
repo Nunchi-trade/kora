@@ -7,7 +7,14 @@ use parking_lot::RwLock;
 
 use crate::traits::{Digest, SeedTracker};
 
-/// Simple in-memory seed tracker.
+/// Maximum number of seed entries retained before pruning.
+///
+/// Only the most recent parent's seed is ever queried, so older entries
+/// serve no purpose. 256 matches the snapshot store's default retention
+/// and caps memory at approximately 25 KB.
+const MAX_SEED_ENTRIES: usize = 256;
+
+/// Simple in-memory seed tracker with bounded retention.
 #[derive(Debug, Clone)]
 pub struct InMemorySeedTracker {
     inner: Arc<RwLock<BTreeMap<Digest, B256>>>,
@@ -27,6 +34,16 @@ impl InMemorySeedTracker {
     pub fn empty() -> Self {
         Self { inner: Arc::new(RwLock::new(BTreeMap::new())) }
     }
+
+    /// Return the current number of tracked seeds.
+    pub fn len(&self) -> usize {
+        self.inner.read().len()
+    }
+
+    /// Return true if the tracker contains no seeds.
+    pub fn is_empty(&self) -> bool {
+        self.inner.read().is_empty()
+    }
 }
 
 impl Default for InMemorySeedTracker {
@@ -41,7 +58,12 @@ impl SeedTracker for InMemorySeedTracker {
     }
 
     fn insert(&self, digest: Digest, seed: B256) {
-        self.inner.write().insert(digest, seed);
+        let mut inner = self.inner.write();
+        inner.insert(digest, seed);
+        // Prune oldest entries to bound memory usage.
+        while inner.len() > MAX_SEED_ENTRIES {
+            inner.pop_first();
+        }
     }
 }
 
@@ -68,5 +90,22 @@ mod tests {
         let tracker = InMemorySeedTracker::new(genesis);
 
         assert_eq!(tracker.get(&genesis), Some(B256::ZERO));
+    }
+
+    #[test]
+    fn seed_tracker_prunes_oldest_entries() {
+        let tracker = InMemorySeedTracker::empty();
+
+        // Insert MAX_SEED_ENTRIES + 10 entries.
+        for i in 0..=(MAX_SEED_ENTRIES + 10) as u16 {
+            let mut bytes = [0u8; 32];
+            bytes[0] = (i >> 8) as u8;
+            bytes[1] = (i & 0xff) as u8;
+            let digest = Digest::from(bytes);
+            tracker.insert(digest, B256::repeat_byte(i as u8));
+        }
+
+        // Should be bounded at MAX_SEED_ENTRIES.
+        assert_eq!(tracker.len(), MAX_SEED_ENTRIES);
     }
 }

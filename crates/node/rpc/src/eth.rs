@@ -509,6 +509,11 @@ impl<S: StateProvider + 'static> EthApiServer for EthApiImpl<S> {
             submit(data).await?;
             true
         } else {
+            tracing::warn!(
+                tx_hash = %tx_hash,
+                "send_raw_transaction: no tx_submit callback wired -- \
+                 transaction accepted but will NOT be proposed to consensus"
+            );
             false
         };
 

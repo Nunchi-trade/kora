@@ -1,7 +1,7 @@
 //! REVM-based consensus application implementation.
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{HashMap, HashSet},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -386,20 +386,7 @@ where
 
         let root_start = Instant::now();
         let state_root =
-            match self.ledger.compute_root_from_store(parent_digest, &outcome.changes).await {
-                Ok(root) => root,
-                Err(err) => {
-                    error!(
-                        parent = ?parent_digest,
-                        height,
-                        error = %err,
-                        error_debug = ?err,
-                        "build_block: QMDB state root computation failed -- \
-                         this may indicate a storage I/O error or inconsistent state"
-                    );
-                    return None;
-                }
-            };
+            LedgerService::compute_root_with_parent(parent_snapshot.state_root, &outcome.changes);
         let root_elapsed = root_start.elapsed();
 
         let block = Block::new(parent.id(), height, timestamp, prevrandao, state_root, txs);
@@ -414,7 +401,8 @@ where
         if let Some(ref m) = self.metrics {
             m.block_build_time.observe(total_elapsed.as_secs_f64());
             m.evm_execution_seconds.observe(exec_elapsed.as_secs_f64());
-            m.block_txs_included.set(block.txs.len() as i64);
+            m.block_txs_included.observe(block.txs.len() as f64);
+            m.block_gas_used.set(outcome.gas_used as i64);
         }
 
         debug!(
@@ -618,28 +606,10 @@ where
         let exec_elapsed = exec_start.elapsed();
 
         let root_start = Instant::now();
-        let state_root = match self
-            .ledger
-            .compute_root_from_store(parent_digest, &execution.outcome.changes)
-            .await
-        {
-            Ok(root) => root,
-            Err(err) => {
-                if self.is_catching_up(block.height) {
-                    warn!(
-                        ?digest,
-                        height = block.height,
-                        error = ?err,
-                        "verify_block: compute root failed during catch-up; \
-                         falling back to certificate trust"
-                    );
-                    self.ledger.restore_persisted_snapshot(block).await;
-                    return true;
-                }
-                warn!(?digest, error = ?err, "compute root failed");
-                return false;
-            }
-        };
+        let state_root = LedgerService::compute_root_with_parent(
+            parent_snapshot.state_root,
+            &execution.outcome.changes,
+        );
         let root_elapsed = root_start.elapsed();
 
         if state_root != block.state_root {
@@ -696,13 +666,24 @@ where
         if let Some(ref state) = self.node_state {
             state.set_last_verified_height(block.height);
         }
-        if prev_verified < self.recovered_height.load(Ordering::Relaxed)
-            && block.height >= self.recovered_height.load(Ordering::Relaxed)
-        {
+        let recovered = self.recovered_height.load(Ordering::Relaxed);
+        if prev_verified < recovered && block.height >= recovered {
             info!(
                 height = block.height,
-                recovered_height = self.recovered_height.load(Ordering::Relaxed),
+                recovered_height = recovered,
                 "catch-up: first full-execution verification past recovery point"
+            );
+        }
+        // Log when catch-up mode ends (verified height reaches recovery + threshold).
+        if recovered > 0
+            && prev_verified < recovered.saturating_add(CATCH_UP_THRESHOLD)
+            && block.height >= recovered.saturating_add(CATCH_UP_THRESHOLD)
+        {
+            info!(
+                recovered_height = recovered,
+                current_height = block.height,
+                catch_up_threshold = CATCH_UP_THRESHOLD,
+                "catch-up complete -- full execution required for all blocks"
             );
         }
 
@@ -734,8 +715,8 @@ where
         &self,
         snapshots: &InMemorySnapshotStore<OverlayState<QmdbState>>,
         from: ConsensusDigest,
-    ) -> Option<BTreeSet<kora_consensus::TxId>> {
-        let mut excluded = BTreeSet::new();
+    ) -> Option<HashSet<kora_consensus::TxId>> {
+        let mut excluded = HashSet::new();
         let mut current = Some(from);
 
         while let Some(digest) = current {

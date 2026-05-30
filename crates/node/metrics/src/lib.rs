@@ -30,6 +30,12 @@ const EVM_EXEC_BUCKETS: [f64; 9] = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 
 /// CPU-contention-related stalls.
 const SNAPSHOT_POLL_BUCKETS: [f64; 8] = [0.001, 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.15];
 
+/// Default histogram buckets for QMDB persist duration (seconds).
+const PERSIST_DURATION_BUCKETS: [f64; 9] = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0];
+
+/// Default histogram buckets for transactions included per block.
+const BLOCK_TXS_BUCKETS: [f64; 10] = [0.0, 1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 200.0, 500.0, 1000.0];
+
 /// Application-level metrics for a Kora node.
 ///
 /// Create with [`AppMetrics::new`] and register with
@@ -50,8 +56,10 @@ pub struct AppMetrics {
     // -- Block Building --
     /// Histogram of block build durations in seconds.
     pub block_build_time: Histogram,
-    /// Number of transactions included in the most recently built block.
-    pub block_txs_included: Gauge,
+    /// Distribution of transactions included per block.
+    pub block_txs_included: Histogram,
+    /// Gas used in the most recently built block.
+    pub block_gas_used: Gauge,
 
     // -- Proposal health --
     /// Total proposals skipped because the parent snapshot was not ready
@@ -73,6 +81,20 @@ pub struct AppMetrics {
     pub finalization_failures: Counter,
     /// Total number of blocks successfully finalized.
     pub blocks_finalized: Counter,
+    /// Histogram of QMDB persist duration in seconds.
+    pub persist_duration_seconds: Histogram,
+
+    // -- Consensus State --
+    /// Latest finalized block height.
+    pub finalized_height: Gauge,
+    /// Current consensus view number.
+    pub current_view: Gauge,
+    /// Total number of nullified consensus rounds.
+    pub nullifications_total: Counter,
+
+    // -- Network --
+    /// Number of currently connected peers.
+    pub peer_count: Gauge,
 
     // -- EVM Execution --
     /// Histogram of EVM execution time in seconds (excluding proposal
@@ -136,12 +158,18 @@ impl AppMetrics {
             txpool_queued: Gauge::default(),
             txpool_rejected: Family::default(),
             block_build_time: Histogram::new(BLOCK_BUILD_BUCKETS),
-            block_txs_included: Gauge::default(),
+            block_txs_included: Histogram::new(BLOCK_TXS_BUCKETS),
+            block_gas_used: Gauge::default(),
             proposal_snapshot_misses: Counter::default(),
             proposal_lag_skips: Counter::default(),
             snapshot_poll_wait: Histogram::new(SNAPSHOT_POLL_BUCKETS),
             finalization_failures: Counter::default(),
             blocks_finalized: Counter::default(),
+            persist_duration_seconds: Histogram::new(PERSIST_DURATION_BUCKETS),
+            finalized_height: Gauge::default(),
+            current_view: Gauge::default(),
+            nullifications_total: Counter::default(),
+            peer_count: Gauge::default(),
             evm_execution_seconds: Histogram::new(EVM_EXEC_BUCKETS),
             rpc_requests_total: Counter::default(),
             unpersisted_snapshot_depth: Gauge::default(),
@@ -189,8 +217,13 @@ impl AppMetrics {
         );
         registry.register(
             "kora_block_txs_included",
-            "Transactions in the most recently built block",
+            "Distribution of transactions included per block",
             self.block_txs_included.clone(),
+        );
+        registry.register(
+            "kora_block_gas_used",
+            "Gas used in the most recently built block",
+            self.block_gas_used.clone(),
         );
         registry.register(
             "kora_proposal_snapshot_misses",
@@ -216,6 +249,31 @@ impl AppMetrics {
             "kora_blocks_finalized",
             "Total blocks successfully finalized",
             self.blocks_finalized.clone(),
+        );
+        registry.register(
+            "kora_persist_duration_seconds",
+            "QMDB persist duration in seconds",
+            self.persist_duration_seconds.clone(),
+        );
+        registry.register(
+            "kora_finalized_height",
+            "Latest finalized block height",
+            self.finalized_height.clone(),
+        );
+        registry.register(
+            "kora_current_view",
+            "Current consensus view number",
+            self.current_view.clone(),
+        );
+        registry.register(
+            "kora_nullifications",
+            "Total nullified consensus rounds",
+            self.nullifications_total.clone(),
+        );
+        registry.register(
+            "kora_peer_count",
+            "Number of currently connected peers",
+            self.peer_count.clone(),
         );
         registry.register(
             "kora_evm_execution_seconds",

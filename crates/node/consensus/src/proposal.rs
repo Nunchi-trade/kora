@@ -1,6 +1,6 @@
 //! Block proposal building logic.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 use alloy_consensus::Header;
 use alloy_primitives::{Address, B256, Bytes};
@@ -330,7 +330,7 @@ mod tests {
             self.txs.write().insert(id, tx).is_none()
         }
 
-        fn build(&self, max_txs: usize, excluded: &BTreeSet<TxId>) -> Vec<Tx> {
+        fn build(&self, max_txs: usize, excluded: &HashSet<TxId>) -> Vec<Tx> {
             self.txs
                 .read()
                 .iter()
@@ -405,7 +405,7 @@ mod tests {
                 .get(&digest)
                 .cloned()
                 .ok_or(ConsensusError::SnapshotNotFound(digest))?;
-            Ok((vec![digest], snapshot.changes))
+            Ok((vec![digest], (*snapshot.changes).clone()))
         }
     }
 

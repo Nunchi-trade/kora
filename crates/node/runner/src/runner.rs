@@ -1177,6 +1177,7 @@ impl NodeRunner for ProductionRunner {
         if let Some((node_state, addr)) = &self.rpc_config {
             let peer_count = self.scheme.participants().len().saturating_sub(1) as u64;
             node_state.set_peer_count(peer_count);
+            app_metrics.peer_count.set(peer_count as i64);
 
             // Restore finalized height from archive so the proposal lag guard
             // in RevmApplication does not reject proposals after a restart.

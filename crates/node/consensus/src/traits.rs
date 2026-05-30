@@ -1,6 +1,9 @@
 //! Core trait abstractions for consensus components.
 
-use std::collections::BTreeSet;
+use std::{
+    collections::{BTreeSet, HashSet},
+    sync::Arc,
+};
 
 use alloy_primitives::B256;
 use kora_domain::{ConsensusDigest, StateRoot, Tx, TxId as DomainTxId};
@@ -16,6 +19,10 @@ pub type TxId = DomainTxId;
 pub type Digest = ConsensusDigest;
 
 /// A snapshot of execution state at a specific block.
+///
+/// `changes` and `tx_ids` are wrapped in `Arc` so that cloning a snapshot
+/// (which happens on every `SnapshotStore::get()` call) is an O(1) atomic
+/// reference count bump instead of an O(state_size) deep copy.
 #[derive(Clone, Debug)]
 pub struct Snapshot<S> {
     /// Parent block digest.
@@ -24,22 +31,22 @@ pub struct Snapshot<S> {
     pub state: S,
     /// Computed state root.
     pub state_root: StateRoot,
-    /// Pending state changes not yet persisted.
-    pub changes: ChangeSet,
-    /// Transaction IDs included in this snapshot's block.
-    pub tx_ids: BTreeSet<TxId>,
+    /// Pending state changes not yet persisted (Arc-shared for cheap clone).
+    pub changes: Arc<ChangeSet>,
+    /// Transaction IDs included in this snapshot's block (Arc-shared for cheap clone).
+    pub tx_ids: Arc<BTreeSet<TxId>>,
 }
 
 impl<S> Snapshot<S> {
-    /// Create a new snapshot.
-    pub const fn new(
+    /// Create a new snapshot, wrapping `changes` and `tx_ids` in `Arc`.
+    pub fn new(
         parent: Option<Digest>,
         state: S,
         state_root: StateRoot,
         changes: ChangeSet,
         tx_ids: BTreeSet<TxId>,
     ) -> Self {
-        Self { parent, state, state_root, changes, tx_ids }
+        Self { parent, state, state_root, changes: Arc::new(changes), tx_ids: Arc::new(tx_ids) }
     }
 }
 
@@ -56,7 +63,7 @@ pub trait Mempool: Clone + Send + Sync + 'static {
     ///
     /// `excluded` contains transaction IDs already included in pending ancestor blocks.
     /// `max_txs` limits the number of transactions returned.
-    fn build(&self, max_txs: usize, excluded: &BTreeSet<TxId>) -> Vec<Tx>;
+    fn build(&self, max_txs: usize, excluded: &HashSet<TxId>) -> Vec<Tx>;
 
     /// Remove finalized transactions from the mempool.
     fn prune(&self, tx_ids: &[TxId]);
