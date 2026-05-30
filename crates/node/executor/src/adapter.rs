@@ -65,13 +65,17 @@ impl<S: StateDbRead> DatabaseRef for StateDbAdapter<S> {
     type Error = ExecutionError;
 
     fn basic_ref(&self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
-        // Batch all three reads into a single block_on call to reduce the
-        // overhead of the async-to-sync bridge (block_in_place + handle.block_on).
+        // Issue all three reads concurrently within a single block_on call.
+        // The underlying StateDb may serve these from different shards or
+        // cache lines, so overlapping the I/O (via tokio::join!) is
+        // significantly faster than the previous sequential approach.
         match block_on(async {
-            let nonce = self.state.nonce(&address).await?;
-            let balance = self.state.balance(&address).await?;
-            let code_hash = self.state.code_hash(&address).await?;
-            Ok::<_, StateDbError>((nonce, balance, code_hash))
+            let (nonce, balance, code_hash) = tokio::join!(
+                self.state.nonce(&address),
+                self.state.balance(&address),
+                self.state.code_hash(&address),
+            );
+            Ok::<_, StateDbError>((nonce?, balance?, code_hash?))
         }) {
             Ok((nonce, balance, code_hash)) => {
                 Ok(Some(AccountInfo { nonce, balance, code_hash, code: None, account_id: None }))
