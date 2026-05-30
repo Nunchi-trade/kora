@@ -1299,8 +1299,11 @@ mod tests {
     async fn http_status_rate_limiter_returns_too_many_requests() {
         let rate_limiter =
             SharedRateLimiter::new(RateLimitConfig { requests_per_second: 1, burst_size: 1 });
+        let node_state = NodeState::new(1, 0);
+        // Set peer count so the health endpoint returns 200 instead of 503 (partitioned).
+        node_state.set_peer_count(3);
         let app = build_http_router(
-            Arc::new(NodeState::new(1, 0)),
+            Arc::new(node_state),
             build_cors_layer(&CorsConfig::none()),
             10,
             rate_limiter,
