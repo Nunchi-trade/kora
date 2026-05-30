@@ -247,6 +247,14 @@ fn seed_hash(seed: impl commonware_codec::Encode) -> B256 {
     keccak256(seed.encode())
 }
 
+/// Index a recovered block from the archive into the RPC block index.
+///
+/// **Important:** The archive stores only header and transaction data, not
+/// execution outputs.  Recovered blocks are indexed with `gas_used: 0`,
+/// `logs_bloom: ZERO`, empty receipts, and empty logs because these values
+/// require EVM re-execution which is only performed for the tail
+/// (checkpoint..HEAD).  Historical RPC queries for blocks before the
+/// checkpoint will return incomplete data.  See issue #111.
 fn index_recovered_block(
     index: &kora_indexer::BlockIndex,
     block: &Block,
@@ -264,7 +272,7 @@ fn index_recovered_block(
         receipts_root: EMPTY_ROOT_HASH,
         timestamp: block_context.header.timestamp,
         gas_limit: block_context.header.gas_limit,
-        gas_used: 0,
+        gas_used: 0, // Archive lacks execution data; see doc comment above.
         base_fee_per_gas: block_context.header.base_fee_per_gas,
         mix_hash: block.prevrandao,
         logs_bloom: alloy_primitives::Bloom::ZERO,
@@ -301,8 +309,23 @@ where
     let block_ranges: Vec<_> = finalized_blocks.ranges().collect();
     let finalization_ranges: Vec<_> = finalizations_by_height.ranges().collect();
 
-    for (start, end) in finalization_ranges {
-        for height in start..=end {
+    // Determine the archive head height from the last range so we can
+    // bound how far back we load.  Downstream consumers need at most:
+    //   - seed cache: recent finalization certificates
+    //   - snapshot prepopulate: SNAPSHOT_PREPOPULATE_COUNT (64)
+    //   - checkpoint replay: DEFAULT_CHECKPOINT_INTERVAL (256)
+    // We add margin and only load blocks within this window to avoid
+    // loading the entire archive into memory (issue #104).
+    let archive_head_height = block_ranges.last().map(|&(_, end)| end).unwrap_or(0);
+    let recovery_window = DEFAULT_CHECKPOINT_INTERVAL + SNAPSHOT_PREPOPULATE_COUNT + 64;
+    let min_recovery_height = archive_head_height.saturating_sub(recovery_window);
+
+    for (start, end) in &finalization_ranges {
+        let effective_start = (*start).max(min_recovery_height);
+        if effective_start > *end {
+            continue;
+        }
+        for height in effective_start..=*end {
             if let Some(finalization) = finalizations_by_height
                 .get(ArchiveId::Index(height))
                 .await
@@ -317,8 +340,39 @@ where
 
     let mut recovered = 0u64;
     let mut recovered_blocks = BTreeMap::new();
-    for (start, end) in block_ranges {
-        for height in start..=end {
+    for &(start, end) in &block_ranges {
+        let effective_start = start.max(min_recovery_height);
+        if effective_start > end {
+            // Index-only pass: record blocks before the recovery window in
+            // the block index without keeping them in memory.
+            for height in start..=end {
+                let Some(block) = finalized_blocks
+                    .get(ArchiveId::Index(height))
+                    .await
+                    .with_context(|| format!("load finalized block at height {height}"))?
+                else {
+                    continue;
+                };
+                index_recovered_block(block_index, &block, provider);
+                recovered += 1;
+            }
+            continue;
+        }
+        // For blocks before the window in a range that straddles it,
+        // index without keeping in memory.
+        for height in start..effective_start {
+            let Some(block) = finalized_blocks
+                .get(ArchiveId::Index(height))
+                .await
+                .with_context(|| format!("load finalized block at height {height}"))?
+            else {
+                continue;
+            };
+            index_recovered_block(block_index, &block, provider);
+            recovered += 1;
+        }
+        // For blocks within the recovery window, index AND keep in memory.
+        for height in effective_start..=end {
             let Some(block) = finalized_blocks
                 .get(ArchiveId::Index(height))
                 .await
@@ -343,6 +397,15 @@ where
             block_index,
         )
         .await?;
+        if recovered > 0 {
+            warn!(
+                recovered_blocks = recovered,
+                min_recovery_height,
+                "recovered blocks indexed with gas_used=0 and no receipts; \
+                 historical RPC queries before height {min_recovery_height} \
+                 may return incomplete data (issue #111)"
+            );
+        }
         info!(
             archive_head_height = archive_head.height,
             restored_height,
@@ -843,6 +906,9 @@ pub struct ProductionRunner {
     pub metrics_addr: Option<std::net::SocketAddr>,
     /// Secondary peers authorized to follow validator traffic without participating in consensus.
     pub secondary_peers: Vec<Peer>,
+    /// Validator public key, derived once from the private key at startup
+    /// to avoid re-reading the key file from disk (issue #106).
+    pub validator_pk: Option<Peer>,
 }
 
 impl ProductionRunner {
@@ -859,6 +925,7 @@ impl ProductionRunner {
             rpc_config: None,
             metrics_addr: None,
             secondary_peers: Vec::new(),
+            validator_pk: None,
         }
     }
 
@@ -886,9 +953,16 @@ impl ProductionRunner {
 
 impl ProductionRunner {
     /// Run the validator as a standalone process.
-    pub fn run_standalone(self, config: kora_config::NodeConfig) -> Result<(), RunnerError> {
+    pub fn run_standalone(mut self, config: kora_config::NodeConfig) -> Result<(), RunnerError> {
         use commonware_runtime::Runner;
         use kora_transport::NetworkConfigExt;
+
+        // Load the validator key once and derive the public key before
+        // the private key is moved into the transport (issue #106).
+        let validator_key = config
+            .validator_key()
+            .map_err(|e| RunnerError(anyhow::anyhow!("failed to load validator key: {}", e)))?;
+        self.validator_pk = Some(commonware_cryptography::Signer::public_key(&validator_key));
 
         let runtime_dir = runtime_storage_directory(&config.data_dir);
         info!(
@@ -902,10 +976,6 @@ impl ProductionRunner {
                 .with_worker_threads(config.worker_threads),
         );
         executor.start(|context| async move {
-            let validator_key = config
-                .validator_key()
-                .map_err(|e| anyhow::anyhow!("failed to load validator key: {}", e))?;
-
             let transport = config
                 .network
                 .build_local_transport(validator_key, context.child("transport"))
@@ -925,11 +995,16 @@ impl ProductionRunner {
             }
             info!("Received shutdown signal, initiating graceful shutdown...");
 
-            // Allow a brief window for in-flight QMDB commits and log drains
-            // to complete before the runtime drops all task contexts. The
-            // watchdog no longer calls abort() on `Error::Closed`, so these
-            // tasks will terminate cleanly when their contexts are dropped.
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            // Allow a grace window for in-flight QMDB commits and log drains
+            // to complete before the runtime drops all task contexts.  The
+            // previous 200 ms was too short when a QMDB checkpoint was in
+            // progress (can take hundreds of ms under I/O load).  2 seconds
+            // covers the worst-case QMDB commit on devnet hardware while
+            // keeping shutdown latency acceptable.
+            //
+            // TODO(#101): Replace fixed sleep with cooperative shutdown
+            // signal from the finalization pipeline.
+            tokio::time::sleep(Duration::from_secs(2)).await;
 
             info!("Graceful shutdown complete");
             Ok::<(), RunnerError>(())
@@ -1300,10 +1375,17 @@ impl NodeRunner for ProductionRunner {
             });
         }
 
-        let validator_key = config
-            .validator_key()
-            .map_err(|e| anyhow::anyhow!("failed to load validator key: {}", e))?;
-        let my_pk = commonware_cryptography::Signer::public_key(&validator_key);
+        // Use the public key derived once at startup (issue #106) rather
+        // than re-reading the private key file from disk.
+        let my_pk = match &self.validator_pk {
+            Some(pk) => pk.clone(),
+            None => {
+                let validator_key = config
+                    .validator_key()
+                    .map_err(|e| anyhow::anyhow!("failed to load validator key: {}", e))?;
+                commonware_cryptography::Signer::public_key(&validator_key)
+            }
+        };
 
         let finalized_executor = RevmExecutor::new(self.chain_id);
         let mut finalized_reporter = FinalizedReporter::new(

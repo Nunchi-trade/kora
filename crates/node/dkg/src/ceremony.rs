@@ -30,6 +30,7 @@ pub struct DkgCeremony {
     force_restart: bool,
 }
 
+#[allow(deprecated)]
 impl DkgCeremony {
     /// Create a new DKG ceremony.
     #[must_use]
@@ -66,8 +67,13 @@ impl DkgCeremony {
             PersistedDkgState::clear(&self.config.data_dir)?;
         }
 
-        // Initialize network
+        // Initialize network.
+        // TODO(#002): Replace DkgNetwork (plaintext TCP) with DkgTransport
+        // (authenticated, encrypted channels via commonware-p2p) before any
+        // non-isolated ceremony.
+        #[allow(deprecated)]
         let network = DkgNetwork::new(self.config.clone())?;
+        warn!("DKG ceremony using PLAINTEXT TCP transport -- do not use on untrusted networks");
 
         // Wait for peers to be ready
         self.wait_for_peers(&network).await?;

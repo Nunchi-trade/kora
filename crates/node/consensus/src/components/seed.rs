@@ -7,7 +7,17 @@ use parking_lot::RwLock;
 
 use crate::traits::{Digest, SeedTracker};
 
-/// Simple in-memory seed tracker.
+/// Maximum number of seed entries retained in memory.
+///
+/// This bounds memory growth to roughly `MAX_SEEDS * 96 bytes` (~6 MB).
+/// The value covers at least 2 checkpoint intervals (512 blocks) plus
+/// margin for concurrent consensus views.
+const MAX_SEEDS: usize = 1024;
+
+/// Simple in-memory seed tracker with bounded capacity.
+///
+/// Entries beyond [`MAX_SEEDS`] are evicted in insertion order (oldest first
+/// by [`BTreeMap`] key ordering).
 #[derive(Debug, Clone)]
 pub struct InMemorySeedTracker {
     inner: Arc<RwLock<BTreeMap<Digest, B256>>>,
@@ -41,7 +51,12 @@ impl SeedTracker for InMemorySeedTracker {
     }
 
     fn insert(&self, digest: Digest, seed: B256) {
-        self.inner.write().insert(digest, seed);
+        let mut map = self.inner.write();
+        map.insert(digest, seed);
+        // Evict oldest entries when the map exceeds the capacity bound.
+        while map.len() > MAX_SEEDS {
+            map.pop_first();
+        }
     }
 }
 

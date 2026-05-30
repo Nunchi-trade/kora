@@ -62,6 +62,12 @@ const MAX_FUTURE_TIMESTAMP_DRIFT: u64 = 15;
 /// blocks.
 const MAX_PROPOSAL_LAG: u64 = 64;
 
+/// Maximum number of entries retained in the `block_fees` cache.
+///
+/// Bounds memory to roughly `MAX_BLOCK_FEE_ENTRIES * 80 bytes` and
+/// prevents unbounded growth from the lack of finalization-based pruning.
+const MAX_BLOCK_FEE_ENTRIES: usize = 1024;
+
 fn unix_timestamp_secs<Env: Clock>(env: &Env) -> u64 {
     env.current().duration_since(UNIX_EPOCH).map(|duration| duration.as_secs()).unwrap_or(0)
 }
@@ -114,8 +120,13 @@ pub struct RevmApplication<S, E> {
     /// Per-block `(gas_used, base_fee_per_gas)` cache, keyed by consensus
     /// digest.  Populated when a block is built or verified so that the
     /// *next* block can compute its EIP-1559 base fee from the parent's
-    /// gas usage.  Entries are small (32 + 16 bytes) and the map is bounded
-    /// by the number of unfinalized blocks.
+    /// gas usage.  Bounded to [`MAX_BLOCK_FEE_ENTRIES`] entries; older
+    /// entries are evicted on insertion.
+    ///
+    /// **Note:** A second base-fee computation path exists in
+    /// [`RevmContextProvider::context()`](crate::runner::RevmContextProvider)
+    /// which reads from the persistent [`BlockIndex`] instead.  Both paths
+    /// must agree; see issue #019.
     block_fees: Arc<RwLock<HashMap<ConsensusDigest, (u64, u64)>>>,
     _scheme: std::marker::PhantomData<S>,
 }
@@ -227,8 +238,18 @@ where
 
     /// Record a block's gas usage and base fee so that the next block can
     /// derive its own base fee via [`Self::compute_base_fee`].
+    ///
+    /// Evicts a random entry when the cache exceeds [`MAX_BLOCK_FEE_ENTRIES`]
+    /// to bound memory growth.
     fn record_block_fees(&self, digest: ConsensusDigest, gas_used: u64, base_fee: u64) {
-        self.block_fees.write().insert(digest, (gas_used, base_fee));
+        let mut fees = self.block_fees.write();
+        fees.insert(digest, (gas_used, base_fee));
+        if fees.len() > MAX_BLOCK_FEE_ENTRIES {
+            // Evict an arbitrary old entry to keep the map bounded.
+            if let Some(old_key) = fees.keys().next().copied() {
+                fees.remove(&old_key);
+            }
+        }
     }
 
     fn block_context(
@@ -414,7 +435,7 @@ where
         if let Some(ref m) = self.metrics {
             m.block_build_time.observe(total_elapsed.as_secs_f64());
             m.evm_execution_seconds.observe(exec_elapsed.as_secs_f64());
-            m.block_txs_included.set(block.txs.len() as i64);
+            m.block_txs_included.observe(block.txs.len() as f64);
         }
 
         debug!(

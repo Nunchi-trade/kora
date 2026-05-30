@@ -98,10 +98,9 @@ fn parse_network_config(
         .map_err(|_| TransportError::InvalidListenAddr(config.listen_addr.clone()))?;
 
     let dialable = if let Some(ref dialable_addr) = config.dialable_addr {
-        let addr: SocketAddr = dialable_addr
-            .parse()
-            .map_err(|_| TransportError::InvalidListenAddr(dialable_addr.clone()))?;
-        Ingress::Socket(addr)
+        // Use DNS-aware parser so container hostnames (e.g. "kora-node0:30303")
+        // and Kubernetes service names work as dialable addresses.
+        TransportParsing::parse_ingress(dialable_addr)?
     } else {
         Ingress::Socket(listen_addr)
     };

@@ -120,13 +120,16 @@ impl RevmExecutor {
             )));
         }
 
-        let max_delta = parent_gas_limit / bounds.max_delta_divisor;
+        // Per Ethereum Yellow Paper Section 4.3.4 and go-ethereum's
+        // VerifyGaslimit: the absolute change must be STRICTLY LESS THAN
+        // parent_gas_limit / 1024.  `delta_bound` is the exclusive upper
+        // bound (the smallest disallowed value), not the maximum allowed.
+        let delta_bound = parent_gas_limit / bounds.max_delta_divisor;
         let diff = gas_limit.abs_diff(parent_gas_limit);
 
-        if diff >= max_delta {
+        if diff >= delta_bound {
             return Err(ExecutionError::BlockValidation(format!(
-                "gas limit change {} exceeds maximum delta {}",
-                diff, max_delta
+                "gas limit change {diff} not below bound {delta_bound} (must be strictly less)",
             )));
         }
 

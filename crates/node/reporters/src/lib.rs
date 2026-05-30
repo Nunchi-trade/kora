@@ -191,25 +191,61 @@ async fn seed_report_inner<V: Variant>(
     }
 }
 
-#[derive(Clone)]
+/// Bounded channel capacity for seed reporter activities.
+///
+/// Events beyond this limit are dropped with a warning rather than
+/// spawning unbounded detached tasks (issue #107).
+const SEED_REPORTER_CHANNEL_CAPACITY: usize = 256;
+
 /// Tracks simplex activity to store seed hashes for future proposals.
-pub struct SeedReporter<V> {
-    /// Ledger service that keeps per-digest seeds and snapshots.
-    state: LedgerService,
+///
+/// Uses a bounded MPSC channel feeding a single background worker to
+/// serialize seed updates and provide backpressure, replacing the
+/// previous unbounded `tokio::spawn` per-event pattern.
+pub struct SeedReporter<V>
+where
+    V: Variant,
+{
+    /// Bounded sender for activity events.
+    tx: ::tokio::sync::mpsc::Sender<Activity<Scheme<PublicKey, V>, ConsensusDigest>>,
     /// Marker indicating the variant for the threshold scheme in use.
     _variant: PhantomData<V>,
 }
 
-impl<V> fmt::Debug for SeedReporter<V> {
+impl<V> Clone for SeedReporter<V>
+where
+    V: Variant,
+{
+    fn clone(&self) -> Self {
+        Self { tx: self.tx.clone(), _variant: PhantomData }
+    }
+}
+
+impl<V> fmt::Debug for SeedReporter<V>
+where
+    V: Variant,
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SeedReporter").finish_non_exhaustive()
     }
 }
 
-impl<V> SeedReporter<V> {
+impl<V> SeedReporter<V>
+where
+    V: Variant + 'static,
+{
     /// Create a new seed reporter for the provided ledger service.
-    pub const fn new(state: LedgerService) -> Self {
-        Self { state, _variant: PhantomData }
+    ///
+    /// Spawns a single background worker that processes seed updates
+    /// sequentially from a bounded channel.
+    pub fn new(state: LedgerService) -> Self {
+        let (tx, mut rx) = ::tokio::sync::mpsc::channel(SEED_REPORTER_CHANNEL_CAPACITY);
+        ::tokio::spawn(async move {
+            while let Some(activity) = rx.recv().await {
+                seed_report_inner(state.clone(), activity).await;
+            }
+        });
+        Self { tx, _variant: PhantomData }
     }
 
     fn hash_seed(seed: impl commonware_codec::Encode) -> B256 {
@@ -219,15 +255,14 @@ impl<V> SeedReporter<V> {
 
 impl<V> Reporter for SeedReporter<V>
 where
-    V: Variant,
+    V: Variant + 'static,
 {
     type Activity = Activity<Scheme<PublicKey, V>, ConsensusDigest>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
-        let state = self.state.clone();
-        ::tokio::spawn(async move {
-            seed_report_inner(state, activity).await;
-        });
+        if self.tx.try_send(activity).is_err() {
+            warn!("seed reporter channel full, dropping activity event");
+        }
         Feedback::Ok
     }
 }
@@ -256,6 +291,9 @@ async fn handle_finalized_update<E, P>(
             if let Some(ref ns) = node_state {
                 ns.set_finalized_height(block.height);
             }
+            if let Some(ref m) = metrics {
+                m.finalized_height.set(block.height as i64);
+            }
             let persist_checkpoint =
                 checkpoint_interval <= 1 || block.height.is_multiple_of(checkpoint_interval);
             let result = finalize_with_retry(
@@ -271,7 +309,10 @@ async fn handle_finalized_update<E, P>(
 
             // Record finalization result in metrics.
             if let Some(ref m) = metrics {
-                if result.is_ok() {
+                if let Ok((Some(ref outcome), _)) = result {
+                    m.blocks_finalized.inc();
+                    m.block_gas_used.set(outcome.gas_used as i64);
+                } else if result.is_ok() {
                     m.blocks_finalized.inc();
                 } else {
                     m.finalization_failures.inc();
@@ -597,6 +638,9 @@ where
     } else {
         trace!(?digest, "using cached snapshot for finalized block");
     }
+    // TODO(#020): This `.await` blocks the finalization pipeline until QMDB
+    // disk I/O completes.  Consider submitting persistence to a bounded
+    // background channel so finalization can continue immediately.
     if persist_checkpoint {
         let persist_state = state.clone();
         let persist_handle = context
@@ -1610,14 +1654,25 @@ where
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         match &activity {
             Activity::Notarization(n) => {
-                self.state.set_view(n.proposal.round.view().get());
+                let view = n.proposal.round.view().get();
+                self.state.set_view(view);
+                if let Some(ref m) = self.metrics {
+                    m.current_view.set(view as i64);
+                }
             }
             Activity::Finalization(f) => {
-                self.state.set_view(f.proposal.round.view().get());
+                let view = f.proposal.round.view().get();
+                self.state.set_view(view);
                 self.state.inc_finalized();
+                if let Some(ref m) = self.metrics {
+                    m.current_view.set(view as i64);
+                }
             }
             Activity::Nullification(_) => {
                 self.state.inc_nullified();
+                if let Some(ref m) = self.metrics {
+                    m.nullifications_total.inc();
+                }
             }
             Activity::ConflictingNotarize(proof) => {
                 warn!(
