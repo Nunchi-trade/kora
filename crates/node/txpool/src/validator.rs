@@ -241,7 +241,7 @@ fn intrinsic_gas(envelope: &TxEnvelope) -> u64 {
         gas += TX_CREATE_GAS;
         // EIP-3860: initcode word cost.
         let initcode_len = envelope.input().len() as u64;
-        gas += INITCODE_WORD_COST * ((initcode_len + 31) / 32);
+        gas += INITCODE_WORD_COST * initcode_len.div_ceil(32);
     }
 
     let access_list_gas = match envelope {
