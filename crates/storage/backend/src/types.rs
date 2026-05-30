@@ -138,10 +138,12 @@ pub(crate) struct StoreGuard<'a, T> {
 }
 
 impl<T> StoreGuard<'_, T> {
+    #[allow(clippy::missing_const_for_fn)] // expect() is not const-stable
     pub(crate) fn as_ref(&self) -> &T {
         self.inner.as_ref().expect("StoreGuard inner is always Some while guard is live")
     }
 
+    #[allow(clippy::missing_const_for_fn)] // expect() is not const-stable
     pub(crate) fn as_mut(&mut self) -> &mut T {
         self.inner.as_mut().expect("StoreGuard inner is always Some while guard is live")
     }
