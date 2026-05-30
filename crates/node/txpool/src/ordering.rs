@@ -39,7 +39,7 @@ impl OrderedTransaction {
     }
 
     /// Calculates the effective tip (priority fee) the transaction pays above the base fee.
-    pub fn effective_tip(&self) -> u128 {
+    pub const fn effective_tip(&self) -> u128 {
         self.effective_gas_price.saturating_sub(self.base_fee)
     }
 }

@@ -240,7 +240,7 @@ fn effective_gas_price(envelope: &TxEnvelope, base_fee: u128) -> u128 {
 /// For EIP-1559 transactions this is `max_fee_per_gas` (worst case), not the
 /// effective gas price, because the sender must be able to cover the maximum
 /// possible cost.
-fn max_fee_per_gas(envelope: &TxEnvelope) -> u128 {
+const fn max_fee_per_gas(envelope: &TxEnvelope) -> u128 {
     match envelope {
         TxEnvelope::Legacy(tx) => tx.tx().gas_price,
         TxEnvelope::Eip2930(tx) => tx.tx().gas_price,
