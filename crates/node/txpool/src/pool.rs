@@ -630,13 +630,15 @@ fn rejection_reason(err: &TxPoolError) -> String {
         TxPoolError::NonceAlreadyInPool { .. } => "nonce_already_in_pool".to_string(),
         TxPoolError::StateError(_) => "state_error".to_string(),
         TxPoolError::ReplacementUnderpriced => "replacement_underpriced".to_string(),
+        TxPoolError::GasLimitTooHigh { .. } => "gas_limit_too_high".to_string(),
+        TxPoolError::InitcodeTooLarge { .. } => "initcode_too_large".to_string(),
     }
 }
 
 fn tx_to_ordered(tx: &Tx) -> Option<OrderedTransaction> {
     let envelope = TxEnvelope::decode_2718(&mut tx.bytes.as_ref()).ok()?;
     let sender = recover_sender_from_envelope(&envelope).ok()?;
-    let hash = alloy_primitives::keccak256(&tx.bytes);
+    let hash = *envelope.tx_hash();
     let nonce = envelope.nonce();
     let effective_gas_price = match &envelope {
         TxEnvelope::Legacy(tx) => tx.tx().gas_price,

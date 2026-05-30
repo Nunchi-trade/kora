@@ -3720,7 +3720,6 @@ dependencies = [
  "alloy-consensus 1.8.3",
  "alloy-eips 1.8.3",
  "alloy-primitives",
- "alloy-rlp",
  "k256",
  "kora-domain",
  "kora-metrics",

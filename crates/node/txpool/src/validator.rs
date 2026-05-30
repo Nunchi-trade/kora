@@ -2,7 +2,7 @@
 
 use alloy_consensus::{Transaction, TxEnvelope};
 use alloy_eips::eip2718::Decodable2718;
-use alloy_primitives::{Address, B256, U256, keccak256};
+use alloy_primitives::{Address, B256, U256};
 use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
 use kora_domain::Tx;
 use kora_traits::StateDbRead;
@@ -162,7 +162,7 @@ pub fn recover_sender_from_envelope(envelope: &TxEnvelope) -> Result<Address, Tx
 }
 
 fn recover_sender_and_hash(envelope: &TxEnvelope) -> Result<(Address, B256), TxPoolError> {
-    let hash = keccak256(alloy_rlp::encode(envelope));
+    let hash = *envelope.tx_hash();
 
     let signature = envelope.signature();
     let r_be = B256::from_slice(&signature.r().to_be_bytes::<32>());
@@ -172,6 +172,9 @@ fn recover_sender_and_hash(envelope: &TxEnvelope) -> Result<(Address, B256), TxP
     sig_bytes[32..].copy_from_slice(s_be.as_slice());
 
     let sig = Signature::from_slice(&sig_bytes).map_err(|_| TxPoolError::InvalidSignature)?;
+    if sig.normalize_s().is_some() {
+        return Err(TxPoolError::InvalidSignature); // EIP-2: reject high-s value
+    }
 
     let v = signature.v();
     let v_val: u64 = if v { 1 } else { 0 };
