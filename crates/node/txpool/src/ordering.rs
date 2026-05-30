@@ -3,7 +3,8 @@
 use std::cmp::Ordering;
 
 use alloy_consensus::TxEnvelope;
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, B256, Bytes};
+use kora_domain::TxId;
 
 /// A transaction with ordering metadata for pool management.
 #[derive(Debug, Clone)]
@@ -20,10 +21,16 @@ pub struct OrderedTransaction {
     pub timestamp: u64,
     /// The decoded transaction envelope.
     pub envelope: TxEnvelope,
+    /// Pre-computed domain `TxId`, cached at insertion time from original bytes.
+    pub tx_id: TxId,
+    /// Original raw transaction bytes (2718-encoded), kept for faithful `Tx`
+    /// reconstruction without re-encoding.
+    pub raw_bytes: Bytes,
 }
 
 impl OrderedTransaction {
     /// Creates a new ordered transaction.
+    #[allow(clippy::too_many_arguments)]
     pub const fn new(
         hash: B256,
         sender: Address,
@@ -31,8 +38,10 @@ impl OrderedTransaction {
         effective_gas_price: u128,
         timestamp: u64,
         envelope: TxEnvelope,
+        tx_id: TxId,
+        raw_bytes: Bytes,
     ) -> Self {
-        Self { hash, sender, nonce, effective_gas_price, timestamp, envelope }
+        Self { hash, sender, nonce, effective_gas_price, timestamp, envelope, tx_id, raw_bytes }
     }
 
     /// Calculates the effective tip given a base fee.
@@ -193,7 +202,9 @@ impl SenderQueue {
 #[cfg(test)]
 mod tests {
     use alloy_consensus::{SignableTransaction as _, TxEip1559};
+    use alloy_eips::eip2718::Encodable2718 as _;
     use alloy_primitives::{Address, Bytes, Signature, TxKind, U256};
+    use kora_domain::Tx;
     use rand::Rng;
 
     use super::*;
@@ -229,7 +240,20 @@ mod tests {
         );
         let signed = inner.into_signed(sig);
         let envelope = TxEnvelope::from(signed);
-        OrderedTransaction::new(random_b256(), random_address(), nonce, gas_price, 0, envelope)
+        let mut raw = Vec::new();
+        envelope.encode_2718(&mut raw);
+        let raw_bytes = Bytes::from(raw);
+        let tx_id = Tx::new(raw_bytes.clone()).id();
+        OrderedTransaction::new(
+            random_b256(),
+            random_address(),
+            nonce,
+            gas_price,
+            0,
+            envelope,
+            tx_id,
+            raw_bytes,
+        )
     }
 
     #[test]

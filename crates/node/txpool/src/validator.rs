@@ -2,7 +2,7 @@
 
 use alloy_consensus::{Transaction, TxEnvelope};
 use alloy_eips::eip2718::Decodable2718;
-use alloy_primitives::{Address, B256, U256, keccak256};
+use alloy_primitives::{Address, B256, U256};
 use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
 use kora_domain::Tx;
 use kora_traits::StateDbRead;
@@ -83,10 +83,11 @@ impl<S: StateDbRead> TransactionValidator<S> {
         let (sender, hash) = recover_sender_and_hash(&envelope)?;
 
         let effective_gas_price = effective_gas_price(&envelope);
-        if effective_gas_price < self.config.min_gas_price {
+        let min_gas_price = u128::from(self.config.min_gas_price);
+        if effective_gas_price < min_gas_price {
             return Err(TxPoolError::GasPriceTooLow {
                 price: effective_gas_price,
-                min: self.config.min_gas_price,
+                min: min_gas_price,
             });
         }
 
@@ -110,13 +111,22 @@ impl<S: StateDbRead> TransactionValidator<S> {
             return Err(TxPoolError::NonceGap { got: nonce, expected: state_nonce });
         }
 
-        // Reject if the pool already contains a transaction from this sender
-        // with the same nonce.  This prevents same-nonce conflicts from
-        // passing validation when only finalized state is checked.
+        // If the pool already contains a transaction from this sender with
+        // the same nonce, allow replacement only when the new tx offers a
+        // sufficient gas-price bump (issue 080).  Without a pool reference
+        // the duplicate check is skipped (stateless validation only).
         if let Some(pool) = &self.pool
             && pool.has_nonce(&sender, nonce)
         {
-            return Err(TxPoolError::NonceAlreadyInPool { sender, nonce });
+            let bump = u128::from(self.config.replacement_bump_percent);
+            if let Some(existing_price) = pool.gas_price_for_nonce(&sender, nonce) {
+                let min_replacement_price = existing_price + (existing_price * bump / 100);
+                if effective_gas_price < min_replacement_price {
+                    return Err(TxPoolError::ReplacementUnderpriced);
+                }
+            } else {
+                return Err(TxPoolError::NonceAlreadyInPool { sender, nonce });
+            }
         }
 
         let max_cost = max_tx_cost(&envelope);
@@ -127,6 +137,16 @@ impl<S: StateDbRead> TransactionValidator<S> {
             .map_err(|e| TxPoolError::StateError(e.to_string()))?;
         if balance < max_cost {
             return Err(TxPoolError::InsufficientBalance { need: max_cost, have: balance });
+        }
+
+        // Check cumulative pending cost: the sender's balance must cover this
+        // transaction *plus* all already-pending transactions (issue 028).
+        if let Some(pool) = &self.pool {
+            let existing_cost = pool.pending_cost(&sender);
+            let total = existing_cost + max_cost;
+            if balance < total {
+                return Err(TxPoolError::InsufficientBalance { need: total, have: balance });
+            }
         }
 
         Ok(ValidatedTransaction {
@@ -145,6 +165,8 @@ impl<S: StateDbRead> TransactionValidator<S> {
 impl ValidatedTransaction {
     /// Converts this validated transaction into an ordered transaction for pool insertion.
     pub fn into_ordered(self, timestamp: u64) -> OrderedTransaction {
+        let raw_bytes = self.raw.bytes.clone();
+        let tx_id = self.raw.id();
         OrderedTransaction::new(
             self.hash,
             self.sender,
@@ -152,6 +174,8 @@ impl ValidatedTransaction {
             self.effective_gas_price,
             timestamp,
             self.envelope,
+            tx_id,
+            raw_bytes,
         )
     }
 }
@@ -162,7 +186,8 @@ pub fn recover_sender_from_envelope(envelope: &TxEnvelope) -> Result<Address, Tx
 }
 
 fn recover_sender_and_hash(envelope: &TxEnvelope) -> Result<(Address, B256), TxPoolError> {
-    let hash = keccak256(alloy_rlp::encode(envelope));
+    // Use canonical Ethereum tx hash: keccak256 of 2718-encoded envelope.
+    let hash = *envelope.tx_hash();
 
     let signature = envelope.signature();
     let r_be = B256::from_slice(&signature.r().to_be_bytes::<32>());
@@ -953,12 +978,13 @@ mod tests {
         let validated = validator.validate(raw_tx1).await.unwrap();
         pool.add(validated.into_ordered(0)).unwrap();
 
-        // The second tx with the same sender+nonce should be rejected.
+        // The second tx with the same sender+nonce and same gas price should
+        // be rejected as underpriced (needs a bump to replace).
         let validator2 = TransactionValidator::new(chain_id, state, config).with_pool(pool);
         let result = validator2.validate(raw_tx2).await;
         assert!(
-            matches!(result, Err(TxPoolError::NonceAlreadyInPool { nonce: 0, .. })),
-            "expected NonceAlreadyInPool, got: {:?}",
+            matches!(result, Err(TxPoolError::ReplacementUnderpriced)),
+            "expected ReplacementUnderpriced, got: {:?}",
             result,
         );
     }

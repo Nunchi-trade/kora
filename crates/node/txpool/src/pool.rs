@@ -7,8 +7,8 @@ use std::{
 };
 
 use alloy_consensus::{Transaction, TxEnvelope};
-use alloy_eips::eip2718::{Decodable2718, Encodable2718};
-use alloy_primitives::{Address, B256, Bytes, U256};
+use alloy_eips::eip2718::Decodable2718;
+use alloy_primitives::{Address, B256, U256};
 use kora_domain::{MempoolEvent, Tx, TxId};
 use kora_metrics::{AppMetrics, ReasonLabel};
 use parking_lot::RwLock;
@@ -87,7 +87,7 @@ impl PoolInner {
 
     fn remove_by_hash(&mut self, hash: &B256) -> Option<OrderedTransaction> {
         let tx = self.by_hash.remove(hash)?;
-        self.by_id.remove(&ordered_tx_id(&tx));
+        self.by_id.remove(&tx.tx_id);
 
         if let Some(queue) = self.by_sender.get_mut(&tx.sender) {
             queue.remove_by_hash(hash);
@@ -133,7 +133,11 @@ pub struct TransactionPool {
     inner: Arc<RwLock<PoolInner>>,
     config: PoolConfig,
     events: Option<broadcast::Sender<MempoolEvent>>,
-    metrics: Arc<RwLock<Option<AppMetrics>>>,
+    /// Metrics handle -- set once via `set_metrics`, lock-free reads thereafter.
+    metrics: Arc<std::sync::OnceLock<AppMetrics>>,
+    /// Dynamic minimum gas price that tracks the EIP-1559 base fee.
+    /// Updated via `update_base_fee()` after each finalized block.
+    dynamic_min_gas_price: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl TransactionPool {
@@ -142,9 +146,12 @@ impl TransactionPool {
     pub fn new(config: PoolConfig) -> Self {
         Self {
             inner: Arc::new(RwLock::new(PoolInner::new())),
+            dynamic_min_gas_price: Arc::new(std::sync::atomic::AtomicU64::new(
+                config.min_gas_price,
+            )),
             config,
             events: None,
-            metrics: Arc::new(RwLock::new(None)),
+            metrics: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -153,18 +160,20 @@ impl TransactionPool {
     pub fn new_with_events(config: PoolConfig, events: broadcast::Sender<MempoolEvent>) -> Self {
         Self {
             inner: Arc::new(RwLock::new(PoolInner::new())),
+            dynamic_min_gas_price: Arc::new(std::sync::atomic::AtomicU64::new(
+                config.min_gas_price,
+            )),
             config,
             events: Some(events),
-            metrics: Arc::new(RwLock::new(None)),
+            metrics: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
     /// Attach application-level metrics to this pool.
     ///
-    /// Because the metrics handle is shared across all clones of this pool,
-    /// this method affects every clone that shares the same backing store.
+    /// This must be called at most once; subsequent calls are ignored.
     pub fn set_metrics(&self, metrics: AppMetrics) {
-        *self.metrics.write() = Some(metrics);
+        let _ = self.metrics.set(metrics);
     }
 
     /// Update gauge metrics to reflect current pool state.
@@ -172,8 +181,7 @@ impl TransactionPool {
     /// Must be called while the caller does NOT hold the inner lock (it takes
     /// a read lock internally).
     fn sync_metrics(&self) {
-        let metrics_guard = self.metrics.read();
-        if let Some(ref m) = *metrics_guard {
+        if let Some(m) = self.metrics.get() {
             let inner = self.inner.read();
             m.txpool_size.set(inner.by_hash.len() as i64);
             m.txpool_pending.set(inner.pending_count as i64);
@@ -183,8 +191,7 @@ impl TransactionPool {
 
     /// Record a rejected transaction metric.
     fn record_rejection(&self, reason: &str) {
-        let metrics_guard = self.metrics.read();
-        if let Some(ref m) = *metrics_guard {
+        if let Some(m) = self.metrics.get() {
             m.txpool_rejected.get_or_create(&ReasonLabel { reason: reason.to_string() }).inc();
         }
     }
@@ -361,12 +368,19 @@ impl TransactionPool {
     }
 
     fn evict_lowest_pending(inner: &mut PoolInner) -> Option<OrderedTransaction> {
-        let hash = inner
+        // Find the sender whose cheapest pending tx has the lowest gas price,
+        // then evict their *tail* (highest nonce) to avoid creating a nonce gap
+        // that would cascade-demote dependent high-fee transactions (issue 042).
+        let cheapest_sender = inner
             .by_sender
-            .values()
-            .flat_map(|queue| queue.pending.iter())
-            .min_by_key(|tx| (tx.effective_gas_price, std::cmp::Reverse(tx.timestamp), tx.hash))
-            .map(|tx| tx.hash)?;
+            .iter()
+            .filter(|(_, queue)| !queue.pending.is_empty())
+            .min_by_key(|(_, queue)| {
+                queue.pending.iter().map(|tx| tx.effective_gas_price).min().unwrap_or(u128::MAX)
+            })
+            .map(|(sender, _)| *sender)?;
+
+        let hash = inner.by_sender[&cheapest_sender].pending.last().map(|tx| tx.hash)?;
         let removed = inner.remove_by_hash(&hash);
         inner.update_counts();
         removed
@@ -513,6 +527,34 @@ impl TransactionPool {
         queue.pending.iter().chain(queue.queued.iter()).any(|tx| tx.nonce == nonce)
     }
 
+    /// Returns the effective gas price of the existing transaction from `sender`
+    /// with the given `nonce`, or `None` if no such transaction exists.
+    pub fn gas_price_for_nonce(&self, sender: &Address, nonce: u64) -> Option<u128> {
+        let inner = self.inner.read();
+        let queue = inner.by_sender.get(sender)?;
+        queue
+            .pending
+            .iter()
+            .chain(queue.queued.iter())
+            .find(|tx| tx.nonce == nonce)
+            .map(|tx| tx.effective_gas_price)
+    }
+
+    /// Returns the cumulative maximum cost of all pending transactions from
+    /// `sender`.  Used by the validator to prevent a single sender from
+    /// submitting transactions whose aggregate cost exceeds their balance.
+    pub fn pending_cost(&self, sender: &Address) -> U256 {
+        let inner = self.inner.read();
+        let Some(queue) = inner.by_sender.get(sender) else {
+            return U256::ZERO;
+        };
+        queue.pending.iter().fold(U256::ZERO, |acc, tx| {
+            let gas_cost = U256::from(tx.envelope.gas_limit()) * U256::from(tx.effective_gas_price);
+            let value = tx.envelope.value();
+            acc + gas_cost + value
+        })
+    }
+
     /// Returns all sender queues for pool introspection.
     pub fn snapshot(&self) -> HashMap<Address, (Vec<OrderedTransaction>, Vec<OrderedTransaction>)> {
         self.inner
@@ -543,23 +585,47 @@ impl TransactionPool {
             })
             .collect();
 
-        let mut removed = 0;
+        let mut removed_hashes = Vec::new();
         for hash in expired {
             if inner.remove_by_hash(&hash).is_some() {
-                removed += 1;
+                removed_hashes.push(hash);
             }
         }
         inner.update_counts();
         drop(inner);
-        if removed > 0 {
+
+        // Emit eviction events outside the lock (issue 201)
+        if let Some(events) = &self.events {
+            for hash in &removed_hashes {
+                let _ = events
+                    .send(MempoolEvent::TxEvicted { hash: *hash, reason: "expired".to_string() });
+            }
+        }
+
+        if !removed_hashes.is_empty() {
             self.sync_metrics();
         }
-        removed
+        removed_hashes.len()
     }
 
     /// Returns the pool configuration.
     pub const fn config(&self) -> &PoolConfig {
         &self.config
+    }
+
+    /// Update the dynamic minimum gas price to track the current EIP-1559 base
+    /// fee.  The floor is the static `config.min_gas_price`.  Validators should
+    /// call this after each finalized block.
+    pub fn update_base_fee(&self, base_fee: u128) {
+        let floor = self.config.min_gas_price;
+        let dynamic = (base_fee as u64).max(floor);
+        self.dynamic_min_gas_price.store(dynamic, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Returns the current effective minimum gas price (the higher of the
+    /// static config value and the dynamic base-fee tracking value).
+    pub fn current_min_gas_price(&self) -> u128 {
+        u128::from(self.dynamic_min_gas_price.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     /// Removes all transactions from the pool.
@@ -581,7 +647,8 @@ impl Clone for TransactionPool {
             inner: self.inner.clone(),
             config: self.config.clone(),
             events: self.events.clone(),
-            metrics: self.metrics.clone(), // Arc clone: all clones share the same metrics handle
+            metrics: self.metrics.clone(),
+            dynamic_min_gas_price: self.dynamic_min_gas_price.clone(),
         }
     }
 }
@@ -602,13 +669,11 @@ fn current_timestamp() -> u64 {
 }
 
 fn ordered_to_tx(tx: &OrderedTransaction) -> Tx {
-    let mut raw = Vec::new();
-    tx.envelope.encode_2718(&mut raw);
-    Tx::new(Bytes::from(raw))
+    Tx::new(tx.raw_bytes.clone())
 }
 
-fn ordered_tx_id(tx: &OrderedTransaction) -> TxId {
-    ordered_to_tx(tx).id()
+const fn ordered_tx_id(tx: &OrderedTransaction) -> TxId {
+    tx.tx_id
 }
 
 /// Map a [`TxPoolError`] to a short label suitable for the `reason`
@@ -634,9 +699,12 @@ fn rejection_reason(err: &TxPoolError) -> String {
 }
 
 fn tx_to_ordered(tx: &Tx) -> Option<OrderedTransaction> {
+    let raw_bytes = tx.bytes.clone();
+    let tx_id = tx.id();
     let envelope = TxEnvelope::decode_2718(&mut tx.bytes.as_ref()).ok()?;
     let sender = recover_sender_from_envelope(&envelope).ok()?;
-    let hash = alloy_primitives::keccak256(&tx.bytes);
+    // Use canonical Ethereum tx hash (keccak256 of 2718-encoded bytes)
+    let hash = *envelope.tx_hash();
     let nonce = envelope.nonce();
     let effective_gas_price = match &envelope {
         TxEnvelope::Legacy(tx) => tx.tx().gas_price,
@@ -653,6 +721,8 @@ fn tx_to_ordered(tx: &Tx) -> Option<OrderedTransaction> {
         effective_gas_price,
         current_timestamp(),
         envelope,
+        tx_id,
+        raw_bytes,
     ))
 }
 
@@ -772,7 +842,8 @@ impl Mempool for TransactionPool {
 #[cfg(test)]
 mod tests {
     use alloy_consensus::{SignableTransaction as _, TxEip1559};
-    use alloy_primitives::{Signature, TxKind, U256};
+    use alloy_eips::eip2718::Encodable2718 as _;
+    use alloy_primitives::{Bytes, Signature, TxKind, U256};
     use rand::Rng;
 
     use super::*;
@@ -804,7 +875,20 @@ mod tests {
         let sig = Signature::from_scalars_and_parity(B256::ZERO, B256::ZERO, false);
         let signed = inner.into_signed(sig);
         let envelope = TxEnvelope::from(signed);
-        OrderedTransaction::new(random_b256(), sender, nonce, gas_price, 0, envelope)
+        let mut raw = Vec::new();
+        envelope.encode_2718(&mut raw);
+        let raw_bytes = Bytes::from(raw);
+        let tx_id = Tx::new(raw_bytes.clone()).id();
+        OrderedTransaction::new(
+            random_b256(),
+            sender,
+            nonce,
+            gas_price,
+            0,
+            envelope,
+            tx_id,
+            raw_bytes,
+        )
     }
 
     fn tx_nonce(tx: &Tx) -> u64 {
@@ -988,8 +1072,11 @@ mod tests {
         assert_eq!(pool.queued_count(), 1);
     }
 
+    /// Eviction now targets the tail (highest nonce) of the cheapest sender
+    /// to avoid creating a nonce gap that would cascade-demote dependent
+    /// high-fee transactions (issue 042).
     #[test]
-    fn pool_eviction_preserves_sender_nonce_gap() {
+    fn pool_eviction_targets_tail_of_cheapest_sender() {
         let config = PoolConfig::default().with_max_pending_txs(2);
         let pool = TransactionPool::new(config);
         let sender = random_address();
@@ -1000,24 +1087,14 @@ mod tests {
 
         pool.add(tx0_low.clone()).unwrap();
         pool.add(tx1_high.clone()).unwrap();
+        // This triggers eviction: cheapest sender is `sender` (min=10),
+        // so the tail (tx1_high, nonce=1) is evicted -- NOT tx0_low.
         pool.add(other.clone()).unwrap();
 
-        assert!(!pool.contains(&tx0_low.hash));
-        assert!(pool.contains(&tx1_high.hash));
-        assert_eq!(pool.pending_count(), 1);
-        assert_eq!(pool.queued_count(), 1);
-
-        let built = pool.build(10, &BTreeSet::new());
-        assert_eq!(built.len(), 1);
-        assert_eq!(tx_nonce(&built[0]), other.nonce);
-
-        let tx0_replacement = make_ordered_tx(sender, 0, 200);
-        pool.add(tx0_replacement.clone()).unwrap();
-
-        let built = pool.build(10, &BTreeSet::new());
-        assert_eq!(built.len(), 2);
-        assert_eq!(tx_nonce(&built[0]), tx0_replacement.nonce);
-        assert_eq!(tx_nonce(&built[1]), tx1_high.nonce);
+        // tx0_low remains (base of nonce chain), tx1_high evicted from tail
+        assert!(pool.contains(&tx0_low.hash));
+        assert!(!pool.contains(&tx1_high.hash));
+        assert_eq!(pool.pending_count(), 2);
     }
 
     #[test]

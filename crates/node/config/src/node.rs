@@ -49,6 +49,10 @@ pub struct NodeConfig {
     /// RPC configuration.
     #[serde(default)]
     pub rpc: RpcConfig,
+
+    /// Transaction pool configuration.
+    #[serde(default)]
+    pub txpool: kora_txpool::PoolConfig,
 }
 
 impl Default for NodeConfig {
@@ -61,6 +65,7 @@ impl Default for NodeConfig {
             network: NetworkConfig::default(),
             execution: ExecutionConfig::default(),
             rpc: RpcConfig::default(),
+            txpool: kora_txpool::PoolConfig::default(),
         }
     }
 }

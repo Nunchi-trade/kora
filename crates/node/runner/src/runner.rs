@@ -843,6 +843,8 @@ pub struct ProductionRunner {
     pub metrics_addr: Option<std::net::SocketAddr>,
     /// Secondary peers authorized to follow validator traffic without participating in consensus.
     pub secondary_peers: Vec<Peer>,
+    /// Transaction pool configuration (issue 204).
+    pub pool_config: PoolConfig,
 }
 
 impl ProductionRunner {
@@ -859,6 +861,7 @@ impl ProductionRunner {
             rpc_config: None,
             metrics_addr: None,
             secondary_peers: Vec::new(),
+            pool_config: PoolConfig::default(),
         }
     }
 
@@ -880,6 +883,13 @@ impl ProductionRunner {
     #[must_use]
     pub fn with_secondary_peers(mut self, peers: Vec<Peer>) -> Self {
         self.secondary_peers = peers;
+        self
+    }
+
+    /// Configure the transaction pool parameters (issue 204).
+    #[must_use]
+    pub const fn with_pool_config(mut self, pool_config: PoolConfig) -> Self {
+        self.pool_config = pool_config;
         self
     }
 }
@@ -1079,6 +1089,7 @@ impl NodeRunner for ProductionRunner {
             // Inbound: read from P2P, validate, insert into local pool.
             {
                 let seen = seen.clone();
+                let gossip_pool_config = self.pool_config.clone();
                 let gossip_ledger = ledger.clone();
                 let gossip_chain_id = self.chain_id;
                 let gossip_pool = txpool.clone();
@@ -1113,7 +1124,7 @@ impl NodeRunner for ProductionRunner {
                         let validator = TransactionValidator::new(
                             gossip_chain_id,
                             current_state,
-                            PoolConfig::default(),
+                            gossip_pool_config.clone(),
                         )
                         .with_pool(gossip_pool.clone());
                         if let Err(e) = validator.validate(tx.clone()).await {
@@ -1197,6 +1208,7 @@ impl NodeRunner for ProductionRunner {
             );
             let tx_ledger = ledger.clone();
             let chain_id = self.chain_id;
+            let rpc_pool_config = self.pool_config.clone();
             let tx_pool = txpool.clone();
             let gossip_tx = gossip_outbound_tx.clone();
             let gossip_seen_rpc = gossip_seen.clone();
@@ -1205,12 +1217,13 @@ impl NodeRunner for ProductionRunner {
                 let pool = tx_pool.clone();
                 let gossip = gossip_tx.clone();
                 let seen = gossip_seen_rpc.clone();
+                let pool_cfg = rpc_pool_config.clone();
                 Box::pin(async move {
                     let tx = Tx::new(data.clone());
                     let tx_id = tx.id();
                     let state = ledger.latest_state().await;
                     let validator =
-                        TransactionValidator::new(chain_id, state, PoolConfig::default())
+                        TransactionValidator::new(chain_id, state, pool_cfg)
                             .with_pool(pool);
                     validator.validate(tx.clone()).await.map_err(|err| {
                         warn!(?tx_id, error = %err, "rpc submit: validator rejected tx");

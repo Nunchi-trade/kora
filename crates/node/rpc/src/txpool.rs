@@ -203,7 +203,9 @@ const fn max_priority_fee_per_gas(envelope: &TxEnvelope) -> Option<u128> {
 #[cfg(test)]
 mod tests {
     use alloy_consensus::{SignableTransaction as _, TxEip1559};
+    use alloy_eips::eip2718::Encodable2718 as _;
     use alloy_primitives::{B256, Bytes, Signature, TxKind};
+    use kora_domain::Tx;
     use kora_txpool::PoolConfig;
 
     use super::*;
@@ -223,12 +225,16 @@ mod tests {
         let sig = Signature::from_scalars_and_parity(B256::ZERO, B256::ZERO, false);
         let signed = inner.into_signed(sig);
         let envelope = TxEnvelope::from(signed);
+        let mut raw = Vec::new();
+        envelope.encode_2718(&mut raw);
+        let raw_bytes = Bytes::from(raw);
+        let tx_id = Tx::new(raw_bytes.clone()).id();
         let mut hash = [0u8; 32];
         hash[..20].copy_from_slice(sender.as_slice());
         hash[20..28].copy_from_slice(&nonce.to_be_bytes());
         hash[28..].copy_from_slice(&(gas_price as u32).to_be_bytes());
         let hash = B256::from(hash);
-        OrderedTransaction::new(hash, sender, nonce, gas_price, 0, envelope)
+        OrderedTransaction::new(hash, sender, nonce, gas_price, 0, envelope, tx_id, raw_bytes)
     }
 
     #[tokio::test]
