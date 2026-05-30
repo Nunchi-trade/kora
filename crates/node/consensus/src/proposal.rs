@@ -425,6 +425,7 @@ mod tests {
                 changes: ChangeSet::new(),
                 receipts: Vec::new(),
                 gas_used: txs.len() as u64 * 21000,
+                included_tx_count: txs.len(),
                 selfdestructed_addresses: Vec::new(),
             })
         }

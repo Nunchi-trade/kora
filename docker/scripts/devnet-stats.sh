@@ -14,7 +14,11 @@ NC='\033[0m'
 
 REFRESH_INTERVAL=${1:-0.3}
 CHAIN_ID="${CHAIN_ID:-1337}"
-RPC_PORTS=(8545 8546 8547 8548)
+VALIDATOR_COUNT="${VALIDATOR_COUNT:-4}"
+RPC_PORTS=()
+for _i in $(seq 0 $((VALIDATOR_COUNT - 1))); do
+    RPC_PORTS+=($((8545 + _i)))
+done
 FOLLOWER_SERVICE="secondary-node0"
 FOLLOWER_P2P_PORT=30500
 declare -a PREV_FINALIZED=()
@@ -52,7 +56,7 @@ fetch_all_statuses() {
     local tmpdir=$(mktemp -d)
     
     # Launch parallel fetches using JSON-RPC POST to get node status.
-    for i in 0 1 2 3; do
+    for i in $(seq 0 $((VALIDATOR_COUNT - 1))); do
         (
             status=$(curl -s --max-time 0.2 -X POST -H "Content-Type: application/json" \
                 -d '{"jsonrpc":"2.0","method":"kora_nodeStatus","params":[],"id":1}' \
@@ -65,7 +69,7 @@ fetch_all_statuses() {
     wait
     
     # Read results
-    for i in 0 1 2 3; do
+    for i in $(seq 0 $((VALIDATOR_COUNT - 1))); do
         cat "$tmpdir/$i"
         echo  # newline separator
     done
@@ -225,11 +229,11 @@ render() {
     echo -e "${BOLD}${CYAN}Summary${NC}"
     
     local health_color=$GREEN
-    [[ $healthy_count -lt 4 ]] && health_color=$YELLOW
-    [[ $healthy_count -lt 3 ]] && health_color=$RED
+    [[ $healthy_count -lt $VALIDATOR_COUNT ]] && health_color=$YELLOW
+    [[ $healthy_count -lt $(( (2 * VALIDATOR_COUNT) / 3 + 1 )) ]] && health_color=$RED
     
     local threshold="${GREEN}✓ Met${NC}"
-    [[ $healthy_count -lt 3 ]] && threshold="${RED}✗ Not met${NC}"
+    [[ $healthy_count -lt $(( (2 * VALIDATOR_COUNT) / 3 + 1 )) ]] && threshold="${RED}✗ Not met${NC}"
     
     local uptime_str="0s"
     [[ $max_uptime -gt 0 ]] && uptime_str=$(format_uptime "$max_uptime")
@@ -240,7 +244,7 @@ render() {
         blocks_per_sec_str=$(awk -v bps="$max_blocks_per_sec" 'BEGIN {printf "%.2f b/s", bps / 100}')
     fi
     
-    echo -e "  ${DIM}Consensus:${NC} ${health_color}${healthy_count}/4${NC}  │  ${DIM}RPC:${NC} ${GREEN}${rpc_count}/4${NC}  │  ${DIM}Follower:${NC} ${follower_color}${follower_status}${NC}  │  ${DIM}Stalled:${NC} ${YELLOW}${stalled_count}${NC}  │  ${DIM}Threshold:${NC} $threshold  │  ${DIM}View:${NC} ${CYAN}$max_view${NC}  │  ${DIM}Finalized:${NC} ${GREEN}$total_finalized${NC}  │  ${DIM}Blocks/s:${NC} ${CYAN}$blocks_per_sec_str${NC}  │  ${DIM}Uptime:${NC} $uptime_str"
+    echo -e "  ${DIM}Consensus:${NC} ${health_color}${healthy_count}/${VALIDATOR_COUNT}${NC}  │  ${DIM}RPC:${NC} ${GREEN}${rpc_count}/${VALIDATOR_COUNT}${NC}  │  ${DIM}Follower:${NC} ${follower_color}${follower_status}${NC}  │  ${DIM}Stalled:${NC} ${YELLOW}${stalled_count}${NC}  │  ${DIM}Threshold:${NC} $threshold  │  ${DIM}View:${NC} ${CYAN}$max_view${NC}  │  ${DIM}Finalized:${NC} ${GREEN}$total_finalized${NC}  │  ${DIM}Blocks/s:${NC} ${CYAN}$blocks_per_sec_str${NC}  │  ${DIM}Uptime:${NC} $uptime_str"
 
     echo ""
     echo -e "${BOLD}${CYAN}Follower Node${NC}"

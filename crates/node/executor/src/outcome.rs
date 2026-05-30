@@ -13,6 +13,14 @@ pub struct ExecutionOutcome {
     pub receipts: Vec<ExecutionReceipt>,
     /// Total gas used by all transactions.
     pub gas_used: u64,
+    /// Number of transactions that were actually processed (attempted).
+    ///
+    /// When the block gas limit causes an early break, the remaining
+    /// transactions are not included. `included_tx_count` records how many
+    /// transactions from the input slice were processed, so that downstream
+    /// consumers (indexer, RPC) can pair `receipts[i]` with `txs[i]` for
+    /// `i < included_tx_count` without silent misalignment.
+    pub included_tx_count: usize,
     /// Addresses that were selfdestructed during block execution.
     ///
     /// These addresses had their code and balance removed, but their storage
@@ -30,6 +38,7 @@ impl ExecutionOutcome {
             changes: ChangeSet::new(),
             receipts: Vec::new(),
             gas_used: 0,
+            included_tx_count: 0,
             selfdestructed_addresses: Vec::new(),
         }
     }

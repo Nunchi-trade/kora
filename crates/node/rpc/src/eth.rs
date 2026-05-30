@@ -1728,10 +1728,11 @@ mod tests {
         async fn insert_block(&self, number: u64, hash: B256) {
             let mut inner = self.inner.write().await;
             inner.head = inner.head.max(number);
-            inner.blocks.insert(
-                number,
-                RpcBlock { hash, number: U64::from(number), ..RpcBlock::default() },
-            );
+            inner.blocks.insert(number, RpcBlock {
+                hash,
+                number: U64::from(number),
+                ..RpcBlock::default()
+            });
         }
 
         async fn insert_log(
@@ -1975,13 +1976,11 @@ mod tests {
 
     #[tokio::test]
     async fn fee_history_rewards_reflect_actual_tips() {
-        let provider = MockFeeStateProvider::new(vec![make_fee_block(
-            0,
-            gwei(1),
-            42_000,
-            30_000_000,
-            vec![gwei(3), gwei(5)],
-        )]);
+        let provider =
+            MockFeeStateProvider::new(vec![make_fee_block(0, gwei(1), 42_000, 30_000_000, vec![
+                gwei(3),
+                gwei(5),
+            ])]);
         let api = EthApiImpl::new(1, provider);
 
         let history = EthApiServer::fee_history(
@@ -2293,13 +2292,10 @@ mod tests {
         };
         // base_fee = 8 gwei, tx gas_price = 12 gwei
         // Without fix: min_gas_price = base_fee + priority_fee could exceed max_price
-        let provider = MockFeeStateProvider::new(vec![make_fee_block(
-            0,
-            gwei(8),
-            21_000,
-            30_000_000,
-            vec![gwei(12)],
-        )]);
+        let provider =
+            MockFeeStateProvider::new(vec![make_fee_block(0, gwei(8), 21_000, 30_000_000, vec![
+                gwei(12),
+            ])]);
         let api = EthApiImpl::new(1, provider).with_gas_oracle_config(config);
 
         let gas_price = EthApiServer::gas_price(&api).await.unwrap();
@@ -2318,13 +2314,10 @@ mod tests {
             min_priority_fee: U256::from(GWEI),
         };
         // base_fee = 10 gwei (above max_price of 5 gwei)
-        let provider = MockFeeStateProvider::new(vec![make_fee_block(
-            0,
-            gwei(10),
-            21_000,
-            30_000_000,
-            vec![gwei(12)],
-        )]);
+        let provider =
+            MockFeeStateProvider::new(vec![make_fee_block(0, gwei(10), 21_000, 30_000_000, vec![
+                gwei(12),
+            ])]);
         let api = EthApiImpl::new(1, provider).with_gas_oracle_config(config);
 
         let gas_price = EthApiServer::gas_price(&api).await.unwrap();
@@ -2509,14 +2502,11 @@ mod tests {
         provider.insert_block(1, B256::repeat_byte(1)).await;
         provider.insert_log(1, target, vec![topic]).await;
         let api = EthApiImpl::new(1, provider.clone());
-        let filter_id = EthApiServer::new_filter(
-            &api,
-            RpcLogFilter {
-                address: Some(AddressFilter::Single(target)),
-                topics: Some(vec![Some(TopicFilter::Single(topic))]),
-                ..RpcLogFilter::default()
-            },
-        )
+        let filter_id = EthApiServer::new_filter(&api, RpcLogFilter {
+            address: Some(AddressFilter::Single(target)),
+            topics: Some(vec![Some(TopicFilter::Single(topic))]),
+            ..RpcLogFilter::default()
+        })
         .await
         .unwrap();
 
@@ -2577,10 +2567,10 @@ mod tests {
         provider.insert_log(1, target, vec![topic]).await;
 
         let api = EthApiImpl::new(1, provider.clone());
-        let filter_id = EthApiServer::new_filter(
-            &api,
-            RpcLogFilter { block_hash: Some(block_hash), ..RpcLogFilter::default() },
-        )
+        let filter_id = EthApiServer::new_filter(&api, RpcLogFilter {
+            block_hash: Some(block_hash),
+            ..RpcLogFilter::default()
+        })
         .await
         .unwrap();
 

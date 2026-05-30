@@ -230,18 +230,15 @@ where
 
             let code = account.info.code.as_ref().map(|c| c.bytes().to_vec());
 
-            changeset.accounts.insert(
-                address,
-                AccountUpdate {
-                    created: account.is_created(),
-                    selfdestructed: account.is_selfdestructed(),
-                    nonce: account.info.nonce,
-                    balance: account.info.balance,
-                    code_hash: account.info.code_hash,
-                    code,
-                    storage,
-                },
-            );
+            changeset.accounts.insert(address, AccountUpdate {
+                created: account.is_created(),
+                selfdestructed: account.is_selfdestructed(),
+                nonce: account.info.nonce,
+                balance: account.info.balance,
+                code_hash: account.info.code_hash,
+                code,
+                storage,
+            });
         }
 
         // REVM's `DatabaseCommit::commit` returns `()`, so we cannot propagate

@@ -10,3 +10,7 @@
       - "--exclude=.DS_Store"
       - "--exclude=testnet-artifacts/"
       - "--exclude=ansible/"
+      - "--exclude=tmp/"
+      - "--exclude=.env"
+      - "--exclude=*.override.yaml"
+      - "--exclude=docker/compose/devnet-*node*.yaml"

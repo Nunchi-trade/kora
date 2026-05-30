@@ -106,32 +106,26 @@ mod tests {
     #[test]
     fn merge_overwrites_nonce_and_balance() {
         let mut cs1 = ChangeSet::new();
-        cs1.accounts.insert(
-            Address::ZERO,
-            AccountUpdate {
-                created: false,
-                selfdestructed: false,
-                nonce: 1,
-                balance: U256::from(100),
-                code_hash: B256::ZERO,
-                code: None,
-                storage: BTreeMap::new(),
-            },
-        );
+        cs1.accounts.insert(Address::ZERO, AccountUpdate {
+            created: false,
+            selfdestructed: false,
+            nonce: 1,
+            balance: U256::from(100),
+            code_hash: B256::ZERO,
+            code: None,
+            storage: BTreeMap::new(),
+        });
 
         let mut cs2 = ChangeSet::new();
-        cs2.accounts.insert(
-            Address::ZERO,
-            AccountUpdate {
-                created: false,
-                selfdestructed: false,
-                nonce: 5,
-                balance: U256::from(500),
-                code_hash: B256::ZERO,
-                code: None,
-                storage: BTreeMap::new(),
-            },
-        );
+        cs2.accounts.insert(Address::ZERO, AccountUpdate {
+            created: false,
+            selfdestructed: false,
+            nonce: 5,
+            balance: U256::from(500),
+            code_hash: B256::ZERO,
+            code: None,
+            storage: BTreeMap::new(),
+        });
 
         cs1.merge(cs2);
         let update = cs1.accounts.get(&Address::ZERO).unwrap();

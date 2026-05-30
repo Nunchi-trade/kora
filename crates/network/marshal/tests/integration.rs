@@ -207,14 +207,11 @@ fn test_start_marshal_and_finalize_block() {
     let runner = deterministic::Runner::timed(Duration::from_secs(60));
     runner.start(|mut context| async move {
         // Setup network
-        let (network, mut oracle) = Network::new(
-            context.child("network"),
-            simulated::Config {
-                max_size: 1024 * 1024,
-                disconnect_on_block: true,
-                tracked_peer_sets: NZUsize!(1),
-            },
-        );
+        let (network, mut oracle) = Network::new(context.child("network"), simulated::Config {
+            max_size: 1024 * 1024,
+            disconnect_on_block: true,
+            tracked_peer_sets: NZUsize!(1),
+        });
         network.start();
 
         // Create cryptographic fixtures
@@ -285,14 +282,11 @@ fn test_start_marshal_multiple_validators() {
     let runner = deterministic::Runner::timed(Duration::from_secs(60));
     runner.start(|mut context| async move {
         // Setup network
-        let (network, mut oracle) = Network::new(
-            context.child("network"),
-            simulated::Config {
-                max_size: 1024 * 1024,
-                disconnect_on_block: true,
-                tracked_peer_sets: NZUsize!(3),
-            },
-        );
+        let (network, mut oracle) = Network::new(context.child("network"), simulated::Config {
+            max_size: 1024 * 1024,
+            disconnect_on_block: true,
+            tracked_peer_sets: NZUsize!(3),
+        });
         network.start();
 
         // Create cryptographic fixtures

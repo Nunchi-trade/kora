@@ -99,6 +99,44 @@ impl<S: StateDbRead> TransactionValidator<S> {
             });
         }
 
+        // EIP-4844 blob transaction validation
+        if let TxEnvelope::Eip4844(ref signed) = envelope {
+            let tx = signed.tx().tx();
+            let blob_count = tx.blob_versioned_hashes.len();
+
+            // Must have at least one blob
+            if blob_count == 0 {
+                return Err(TxPoolError::BlobValidation(
+                    "blob transaction must contain at least one blob".into(),
+                ));
+            }
+
+            // Maximum 6 blobs per transaction (MAX_BLOB_GAS_PER_BLOCK / DATA_GAS_PER_BLOB = 6)
+            if blob_count > 6 {
+                return Err(TxPoolError::BlobValidation(format!(
+                    "blob transaction contains {} blobs, maximum is 6",
+                    blob_count,
+                )));
+            }
+
+            // Versioned hash version byte must be 0x01
+            for (i, hash) in tx.blob_versioned_hashes.iter().enumerate() {
+                if hash[0] != 0x01 {
+                    return Err(TxPoolError::BlobValidation(format!(
+                        "blob {} has invalid version byte 0x{:02x}, expected 0x01",
+                        i, hash[0],
+                    )));
+                }
+            }
+
+            // Blob transactions cannot create contracts
+            if envelope.to().is_none() {
+                return Err(TxPoolError::BlobValidation(
+                    "blob transactions cannot create contracts".into(),
+                ));
+            }
+        }
+
         let nonce = envelope.nonce();
         let state_nonce =
             self.state.nonce(&sender).await.map_err(|e| TxPoolError::StateError(e.to_string()))?;
@@ -243,7 +281,22 @@ fn max_tx_cost(envelope: &TxEnvelope) -> U256 {
     let max_fee = U256::from(effective_gas_price(envelope));
     let value = envelope.value();
 
-    gas_limit * max_fee + value
+    let mut cost = gas_limit * max_fee + value;
+
+    // EIP-4844: include blob gas cost in the maximum transaction cost.
+    // Each blob consumes DATA_GAS_PER_BLOB (131072) gas units, charged at
+    // the sender's max_fee_per_blob_gas rate.
+    if let TxEnvelope::Eip4844(signed) = envelope {
+        let tx = signed.tx().tx();
+        let blob_count = tx.blob_versioned_hashes.len() as u64;
+        // DATA_GAS_PER_BLOB = 131072 (2^17)
+        const DATA_GAS_PER_BLOB: u64 = 131_072;
+        let blob_gas = U256::from(blob_count * DATA_GAS_PER_BLOB);
+        let max_blob_fee = U256::from(tx.max_fee_per_blob_gas);
+        cost += blob_gas * max_blob_fee;
+    }
+
+    cost
 }
 
 #[cfg(test)]
