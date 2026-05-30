@@ -4,7 +4,7 @@ use std::{
     collections::{BTreeSet, HashMap},
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant, UNIX_EPOCH},
 };
@@ -29,6 +29,8 @@ use kora_rpc::NodeState;
 use parking_lot::RwLock;
 use rand::Rng;
 use tracing::{debug, error, info, trace, warn};
+
+use crate::fees::indexed_parent_base_fee;
 
 /// Maximum time to wait for a parent snapshot to become available before
 /// giving up and nullifying the view.  Uses event-driven notification
@@ -89,6 +91,45 @@ fn unix_timestamp_secs<Env: Clock>(env: &Env) -> u64 {
 /// execution, NOT by certificate trust) reaches `recovered_height + 64`.
 const CATCH_UP_THRESHOLD: u64 = 64;
 
+/// Number of parent-fee entries retained by height.
+///
+/// This covers the proposal lag window, the catch-up window, and the EVM
+/// BLOCKHASH lookback with extra room for short forks.
+const BLOCK_FEE_CACHE_RETAIN_HEIGHTS: u64 = 512;
+
+/// Absolute cap on cached block-fee entries across forks.
+const BLOCK_FEE_CACHE_MAX_ENTRIES: usize = 4096;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BlockFeeEntry {
+    height: u64,
+    gas_used: u64,
+    gas_limit: u64,
+    base_fee_per_gas: u64,
+}
+
+const fn catch_up_blocker_active(recovered_height: u64, last_verified_height: u64) -> bool {
+    recovered_height != 0
+        && last_verified_height < recovered_height.saturating_add(CATCH_UP_THRESHOLD)
+}
+
+fn prune_block_fee_cache(fees: &mut HashMap<ConsensusDigest, BlockFeeEntry>, current_height: u64) {
+    let min_height = current_height.saturating_sub(BLOCK_FEE_CACHE_RETAIN_HEIGHTS);
+    fees.retain(|_, entry| entry.height >= min_height);
+
+    if fees.len() <= BLOCK_FEE_CACHE_MAX_ENTRIES {
+        return;
+    }
+
+    let mut by_height: Vec<_> =
+        fees.iter().map(|(digest, entry)| (*digest, entry.height)).collect();
+    by_height.sort_unstable_by_key(|(_, height)| *height);
+    let remove_count = fees.len() - BLOCK_FEE_CACHE_MAX_ENTRIES;
+    for (digest, _) in by_height.into_iter().take(remove_count) {
+        fees.remove(&digest);
+    }
+}
+
 /// REVM-based consensus application.
 #[derive(Clone)]
 pub struct RevmApplication<S, E> {
@@ -115,17 +156,19 @@ pub struct RevmApplication<S, E> {
     /// previously processed blocks (including certificate-trusted ones).
     /// Used to determine when the catch-up window should close.
     last_verified_height: Arc<AtomicU64>,
-    /// Per-block `(gas_used, base_fee_per_gas)` cache, keyed by consensus
-    /// digest.  Populated when a block is built or verified so that the
-    /// *next* block can compute its EIP-1559 base fee from the parent's
-    /// gas usage.  Entries are small (32 + 16 bytes) and the map is bounded
-    /// by the number of unfinalized blocks.
-    block_fees: Arc<RwLock<HashMap<ConsensusDigest, (u64, u64)>>>,
+    /// Per-block fee cache, keyed by consensus digest. Populated when a
+    /// block is built or verified so the next block can compute its EIP-1559
+    /// base fee from the exact parent's gas usage.
+    block_fees: Arc<RwLock<HashMap<ConsensusDigest, BlockFeeEntry>>>,
     /// Persistent block index used as a fallback when the in-memory
     /// `block_fees` cache misses.  This ensures the proposal/verification
     /// path computes the same base fee as the finalization replay path,
     /// preventing state-root divergence after restarts.
     block_index: Arc<BlockIndex>,
+    /// Shared flag used by the resolver blocker. It is set while catch-up
+    /// trust is active and cleared once full verification reaches the catch-up
+    /// target, re-enabling normal peer blocking.
+    catch_up_blocker: Option<Arc<AtomicBool>>,
     _scheme: std::marker::PhantomData<S>,
 }
 
@@ -157,7 +200,15 @@ where
         block_index: Arc<BlockIndex>,
     ) -> Self {
         let mut block_fees = HashMap::new();
-        block_fees.insert(ledger.genesis_block().commitment(), (0, kora_config::INITIAL_BASE_FEE));
+        block_fees.insert(
+            ledger.genesis_block().commitment(),
+            BlockFeeEntry {
+                height: 0,
+                gas_used: 0,
+                gas_limit,
+                base_fee_per_gas: kora_config::INITIAL_BASE_FEE,
+            },
+        );
 
         Self {
             ledger,
@@ -171,6 +222,7 @@ where
             last_verified_height: Arc::new(AtomicU64::new(0)),
             block_fees: Arc::new(RwLock::new(block_fees)),
             block_index,
+            catch_up_blocker: None,
             _scheme: std::marker::PhantomData,
         }
     }
@@ -202,6 +254,15 @@ where
         // height at startup -- prepopulated snapshots cover everything up
         // to this point.
         self.last_verified_height.store(height, Ordering::Relaxed);
+        self.update_catch_up_blocker_flag();
+        self
+    }
+
+    /// Attach the resolver catch-up blocker flag.
+    #[must_use]
+    pub fn with_catch_up_blocker_flag(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.catch_up_blocker = Some(flag);
+        self.update_catch_up_blocker_flag();
         self
     }
 
@@ -211,13 +272,17 @@ where
     /// `INITIAL_BASE_FEE` for any parent whose fee data was not in the
     /// in-memory cache.
     ///
-    /// `entries` should contain `(digest, gas_used, base_fee_per_gas)` for
-    /// recent blocks (at minimum the HEAD block).
-    pub fn seed_block_fees(&self, entries: &[(ConsensusDigest, u64, u64)]) {
+    /// `entries` should contain
+    /// `(digest, height, gas_used, gas_limit, base_fee_per_gas)` for recent
+    /// blocks (at minimum the HEAD block).
+    pub fn seed_block_fees(&self, entries: &[(ConsensusDigest, u64, u64, u64, u64)]) {
         let mut fees = self.block_fees.write();
-        for &(digest, gas_used, base_fee) in entries {
-            fees.insert(digest, (gas_used, base_fee));
+        let mut max_height = 0;
+        for &(digest, height, gas_used, gas_limit, base_fee_per_gas) in entries {
+            max_height = max_height.max(height);
+            fees.insert(digest, BlockFeeEntry { height, gas_used, gas_limit, base_fee_per_gas });
         }
+        prune_block_fee_cache(&mut fees, max_height);
     }
 
     /// Compute the base fee for a new block from the parent's gas usage
@@ -232,40 +297,35 @@ where
     fn compute_base_fee(&self, parent_digest: ConsensusDigest, parent_height: u64) -> u64 {
         // Fast path: in-memory cache.
         let fees = self.block_fees.read();
-        if let Some(&(parent_gas_used, parent_base_fee)) = fees.get(&parent_digest) {
+        if let Some(parent) = fees.get(&parent_digest) {
             return calculate_base_fee(
-                parent_base_fee,
-                parent_gas_used,
-                self.gas_limit,
+                parent.base_fee_per_gas,
+                parent.gas_used,
+                parent.gas_limit,
                 &BaseFeeParams::DEFAULT,
             );
         }
         drop(fees);
 
-        // Slow path: fall back to persistent block index.  This matches
-        // the logic in `RevmContextProvider::context()` used during
-        // finalization replay, preventing base-fee divergence after
-        // restarts.
-        if parent_height == 0 {
-            return kora_config::INITIAL_BASE_FEE;
-        }
-        self.block_index
-            .get_block_by_number(parent_height)
-            .map(|parent| {
-                calculate_base_fee(
-                    parent.base_fee_per_gas.unwrap_or(kora_config::INITIAL_BASE_FEE),
-                    parent.gas_used,
-                    parent.gas_limit,
-                    &BaseFeeParams::DEFAULT,
-                )
-            })
+        // Slow path: fall back to persistent block index, but only if the
+        // height-keyed index entry matches the expected consensus digest.
+        indexed_parent_base_fee(&self.block_index, parent_digest, parent_height)
             .unwrap_or(kora_config::INITIAL_BASE_FEE)
     }
 
     /// Record a block's gas usage and base fee so that the next block can
     /// derive its own base fee via [`Self::compute_base_fee`].
-    fn record_block_fees(&self, digest: ConsensusDigest, gas_used: u64, base_fee: u64) {
-        self.block_fees.write().insert(digest, (gas_used, base_fee));
+    fn record_block_fees(
+        &self,
+        digest: ConsensusDigest,
+        height: u64,
+        gas_used: u64,
+        gas_limit: u64,
+        base_fee_per_gas: u64,
+    ) {
+        let mut fees = self.block_fees.write();
+        fees.insert(digest, BlockFeeEntry { height, gas_used, gas_limit, base_fee_per_gas });
+        prune_block_fee_cache(&mut fees, height);
     }
 
     fn block_context(
@@ -381,6 +441,7 @@ where
         let height = parent.height + 1;
         let context = self.block_context(height, timestamp, prevrandao, parent_digest);
         let base_fee = context.header.base_fee_per_gas.unwrap_or(kora_config::INITIAL_BASE_FEE);
+        let block_gas_limit = context.header.gas_limit;
         let txs_bytes: Vec<Bytes> = txs.iter().map(|tx| tx.bytes.clone()).collect();
 
         let exec_start = Instant::now();
@@ -445,7 +506,7 @@ where
         let block_digest = block.commitment();
 
         // Cache gas usage so that the next block can derive its base fee.
-        self.record_block_fees(block_digest, outcome.gas_used, base_fee);
+        self.record_block_fees(block_digest, height, outcome.gas_used, block_gas_limit, base_fee);
 
         let total_elapsed = start.elapsed();
 
@@ -501,7 +562,30 @@ where
         // Check whether full-execution verification has advanced far enough
         // past the recovery point.  If it has, catch-up is over.
         let verified = self.last_verified_height.load(Ordering::Relaxed);
-        verified < recovered.saturating_add(CATCH_UP_THRESHOLD)
+        catch_up_blocker_active(recovered, verified)
+    }
+
+    fn advance_last_verified_height(&self, height: u64) -> u64 {
+        let previous = self.last_verified_height.fetch_max(height, Ordering::Relaxed);
+        self.update_catch_up_blocker_flag();
+        previous
+    }
+
+    fn update_catch_up_blocker_flag(&self) {
+        let Some(flag) = &self.catch_up_blocker else {
+            return;
+        };
+        let recovered = self.recovered_height.load(Ordering::Relaxed);
+        let verified = self.last_verified_height.load(Ordering::Relaxed);
+        let active = catch_up_blocker_active(recovered, verified);
+        let was_active = flag.swap(active, Ordering::Relaxed);
+        if was_active && !active {
+            info!(
+                recovered_height = recovered,
+                last_verified_height = verified,
+                "catch-up complete; resolver peer blocking re-enabled"
+            );
+        }
     }
 
     async fn verify_block(
@@ -525,7 +609,7 @@ where
             // at the certificate-trusted block (its state_root is in the
             // store), so the full-execution path is never reached for that
             // height, and `last_verified_height` never advances past it.
-            self.last_verified_height.fetch_max(block.height, Ordering::Relaxed);
+            self.advance_last_verified_height(block.height);
             if let Some(ref state) = self.node_state {
                 state.set_last_verified_height(block.height);
             }
@@ -711,7 +795,13 @@ where
         }
 
         // Cache gas usage so the next block can derive its base fee.
-        self.record_block_fees(digest, execution.outcome.gas_used, base_fee);
+        self.record_block_fees(
+            digest,
+            block.height,
+            execution.outcome.gas_used,
+            context.header.gas_limit,
+            base_fee,
+        );
 
         let merged_changes = parent_snapshot.state.merge_changes(execution.outcome.changes.clone());
         let next_state = OverlayState::new(parent_snapshot.state.base(), merged_changes);
@@ -730,7 +820,7 @@ where
         // Full execution verification succeeded.  Advance the verified
         // height so that the catch-up window eventually closes once we
         // have verified blocks past the recovery point.
-        let prev_verified = self.last_verified_height.fetch_max(block.height, Ordering::Relaxed);
+        let prev_verified = self.advance_last_verified_height(block.height);
         if let Some(ref state) = self.node_state {
             state.set_last_verified_height(block.height);
         }
@@ -949,5 +1039,65 @@ where
 
             true
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy_primitives::B256;
+
+    use super::*;
+    use crate::fees::consensus_digest_for_hash;
+
+    fn digest(byte: u8) -> ConsensusDigest {
+        consensus_digest_for_hash(B256::repeat_byte(byte))
+    }
+
+    fn digest_u64(value: u64) -> ConsensusDigest {
+        let mut bytes = [0u8; 32];
+        bytes[..8].copy_from_slice(&value.to_le_bytes());
+        consensus_digest_for_hash(B256::from(bytes))
+    }
+
+    fn fee_entry(height: u64) -> BlockFeeEntry {
+        BlockFeeEntry {
+            height,
+            gas_used: 21_000,
+            gas_limit: 30_000_000,
+            base_fee_per_gas: kora_config::INITIAL_BASE_FEE,
+        }
+    }
+
+    #[test]
+    fn catch_up_blocker_active_until_verified_threshold() {
+        assert!(!catch_up_blocker_active(0, 0));
+        assert!(catch_up_blocker_active(100, 100 + CATCH_UP_THRESHOLD - 1));
+        assert!(!catch_up_blocker_active(100, 100 + CATCH_UP_THRESHOLD));
+    }
+
+    #[test]
+    fn prune_block_fee_cache_removes_entries_outside_height_window() {
+        let mut fees = HashMap::new();
+        fees.insert(digest(1), fee_entry(1));
+        fees.insert(digest(2), fee_entry(2));
+        fees.insert(digest(3), fee_entry(BLOCK_FEE_CACHE_RETAIN_HEIGHTS + 2));
+
+        prune_block_fee_cache(&mut fees, BLOCK_FEE_CACHE_RETAIN_HEIGHTS + 2);
+
+        assert!(!fees.contains_key(&digest(1)));
+        assert!(fees.contains_key(&digest(2)));
+        assert!(fees.contains_key(&digest(3)));
+    }
+
+    #[test]
+    fn prune_block_fee_cache_caps_total_entries() {
+        let mut fees = HashMap::new();
+        for i in 0..(BLOCK_FEE_CACHE_MAX_ENTRIES + 8) {
+            fees.insert(digest_u64(i as u64), fee_entry(i as u64));
+        }
+
+        prune_block_fee_cache(&mut fees, BLOCK_FEE_CACHE_RETAIN_HEIGHTS);
+
+        assert!(fees.len() <= BLOCK_FEE_CACHE_MAX_ENTRIES);
     }
 }

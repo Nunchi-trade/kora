@@ -24,9 +24,7 @@ use commonware_consensus::{
     },
     types::{Epoch, FixedEpocher, ViewDelta},
 };
-use commonware_cryptography::{
-    Committable as _, Hasher as _, Sha256, bls12381::primitives::variant::MinSig, ed25519,
-};
+use commonware_cryptography::{Committable as _, bls12381::primitives::variant::MinSig, ed25519};
 use commonware_p2p::{Blocker, Manager, Receiver as _, Recipients, Sender as _, TrackedPeers};
 use commonware_runtime::{
     Clock as _, Handle as RuntimeHandle, Metrics as _, Spawner, Supervisor as _, ThreadPooler as _,
@@ -37,7 +35,7 @@ use commonware_utils::{NZU64, NZUsize, acknowledgement::Exact, ordered::Set};
 use futures::StreamExt;
 use kora_consensus::BlockExecution;
 use kora_domain::{Block, BlockCfg, BootstrapConfig, ConsensusDigest, LedgerEvent, Tx, TxCfg};
-use kora_executor::{BaseFeeParams, BlockContext, RevmExecutor, calculate_base_fee};
+use kora_executor::{BlockContext, RevmExecutor};
 use kora_indexer::{BlockIndex, EMPTY_ROOT_HASH, IndexedBlock};
 use kora_ledger::{LedgerService, LedgerView, LiveState};
 use kora_marshal::{ArchiveInitializer, BroadcastInitializer, PeerInitializer};
@@ -50,7 +48,10 @@ use kora_txpool::{PoolConfig, TransactionPool, TransactionValidator};
 use tracing::{debug, error, info, trace, warn};
 
 use crate::{
-    RevmApplication, RunnerError, no_sync_storage::NoSyncStorage, scheme::ThresholdScheme,
+    RevmApplication, RunnerError,
+    fees::{consensus_digest_for_hash, indexed_parent_base_fee},
+    no_sync_storage::NoSyncStorage,
+    scheme::ThresholdScheme,
 };
 
 /// Adapter that bridges `kora_metrics::MetricsRegister` to the commonware
@@ -203,15 +204,6 @@ fn seed_genesis_block_index(index: &BlockIndex, genesis: &Block, gas_limit: u64)
     );
 }
 
-/// Compute the consensus digest for a block hash (BlockId).
-///
-/// Mirrors `digest_for_block_id` in `kora_domain::block` which is private.
-fn consensus_digest_for_hash(block_hash: B256) -> ConsensusDigest {
-    let mut hasher = Sha256::default();
-    hasher.update(block_hash.as_slice());
-    hasher.finalize()
-}
-
 /// Seed the [`RevmApplication`] block-fee cache with entries from the
 /// [`BlockIndex`] so that the first blocks after restart derive a correct
 /// EIP-1559 base fee.
@@ -230,7 +222,7 @@ fn seed_block_fee_cache(
         if let Some(indexed) = block_index.get_block_by_number(h) {
             let digest = consensus_digest_for_hash(indexed.hash);
             let base_fee = indexed.base_fee_per_gas.unwrap_or(kora_config::INITIAL_BASE_FEE);
-            entries.push((digest, indexed.gas_used, base_fee));
+            entries.push((digest, h, indexed.gas_used, indexed.gas_limit, base_fee));
         }
     }
     if !entries.is_empty() {
@@ -632,21 +624,12 @@ impl BlockContextProvider for RevmContextProvider {
     fn context(&self, block: &Block) -> BlockContext {
         // Compute EIP-1559 base fee from the parent block's gas usage.
         // The parent should already be indexed when finalizing in order.
-        // Fall back to INITIAL_BASE_FEE for genesis (height 0) or if the
-        // parent is not yet indexed (e.g. during catch-up).
+        // Only use the height-keyed index when the indexed block hash maps
+        // back to the expected consensus parent digest.
         let base_fee = if block.height == 0 {
             kora_config::INITIAL_BASE_FEE
         } else {
-            self.block_index
-                .get_block_by_number(block.height - 1)
-                .map(|parent| {
-                    calculate_base_fee(
-                        parent.base_fee_per_gas.unwrap_or(kora_config::INITIAL_BASE_FEE),
-                        parent.gas_used,
-                        parent.gas_limit,
-                        &BaseFeeParams::DEFAULT,
-                    )
-                })
+            indexed_parent_base_fee(&self.block_index, block.parent(), block.height - 1)
                 .unwrap_or(kora_config::INITIAL_BASE_FEE)
         };
 
@@ -1358,7 +1341,7 @@ impl NodeRunner for ProductionRunner {
         // blocker unconditionally since it only bans for genuine equivocation.
         let resolver_catching_up = Arc::new(AtomicBool::new(recovered_head_height.is_some()));
         let resolver_blocker =
-            GraduatedBlocker::new(transport.oracle.clone(), resolver_catching_up);
+            GraduatedBlocker::new(transport.oracle.clone(), resolver_catching_up.clone());
 
         let resolver = PeerInitializer::init::<_, _, _, Block, _, _, _>(
             context.child("resolver"),
@@ -1413,6 +1396,7 @@ impl NodeRunner for ProductionRunner {
                 state.set_recovered_height(height);
             }
         }
+        app = app.with_catch_up_blocker_flag(resolver_catching_up);
         if let Some((state, _)) = &self.rpc_config {
             app = app.with_node_state(state.clone());
         }
