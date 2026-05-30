@@ -6,6 +6,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tracing::{error, info, warn};
 
+#[allow(deprecated)]
 use crate::{
     DkgConfig, DkgError, DkgOutput, DkgPhase, PersistedDkgState,
     network::DkgNetwork,

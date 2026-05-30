@@ -18,6 +18,7 @@ mod error;
 pub use error::DkgError;
 
 mod network;
+#[allow(deprecated)]
 pub use network::DkgNetwork;
 
 mod output;
