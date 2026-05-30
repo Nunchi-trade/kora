@@ -19,8 +19,8 @@ use crate::{
 ///
 /// Once more than this many snapshots have been persisted, the oldest are
 /// evicted from the in-memory store along with their `persisted` markers.
-/// Chain-walking algorithms treat a missing snapshot with no persisted marker
-/// as an already-persisted-and-evicted boundary.
+/// Chain-walking algorithms require a retained persisted marker to terminate;
+/// a missing unmarked snapshot is treated as a safety error.
 const DEFAULT_MAX_PERSISTED_RETAINED: usize = 256;
 
 /// In-memory snapshot store with bounded retention of persisted snapshots.
@@ -130,11 +130,10 @@ impl<S> InMemorySnapshotStore<S> {
     /// to the persistent store (QMDB).
     ///
     /// Both the snapshot data and its `persisted` marker are removed for
-    /// evicted digests.  Chain-walking algorithms (`merged_changes`,
-    /// `changes_for_persist`) treat a missing snapshot whose digest is also
-    /// absent from the `persisted` set as an already-persisted-and-evicted
-    /// boundary, so removing the marker is safe and prevents the `persisted`
-    /// `BTreeSet` from growing without bound.
+    /// evicted digests. Chain-walking algorithms (`merged_changes`,
+    /// `changes_for_persist`) still fail closed on a missing unmarked
+    /// snapshot, so a genuine gap cannot be silently treated as a persisted
+    /// boundary.
     ///
     /// Returns the number of snapshots evicted.
     pub fn evict_persisted(&self) -> usize {
@@ -211,10 +210,9 @@ impl<S: StateDb> SnapshotStore<S> for InMemorySnapshotStore<S> {
         let snapshots = self.snapshots.read();
         let persisted = self.persisted.read();
 
-        // Walk back to find all unpersisted ancestors.
-        // The walk terminates when we hit a digest that is either in the
-        // `persisted` set or is missing from both `snapshots` and `persisted`
-        // (i.e., it was persisted and later evicted).
+        // Walk back to find all unpersisted ancestors. The walk terminates
+        // only when it hits a retained persisted marker; a missing unmarked
+        // snapshot is a gap and must not be treated as a persisted boundary.
         let mut chain = Vec::new();
         let mut current = Some(parent);
 
@@ -223,12 +221,8 @@ impl<S: StateDb> SnapshotStore<S> for InMemorySnapshotStore<S> {
                 break;
             }
 
-            let Some(snapshot) = snapshots.get(&digest) else {
-                // Snapshot is absent and not marked persisted -- it was
-                // persisted previously and its marker was evicted.  Treat
-                // this as a persisted boundary.
-                break;
-            };
+            let snapshot =
+                snapshots.get(&digest).ok_or(ConsensusError::SnapshotNotFound(digest))?;
 
             chain.push(snapshot.changes.clone());
             current = snapshot.parent;
@@ -260,10 +254,7 @@ impl<S: StateDb> SnapshotStore<S> for InMemorySnapshotStore<S> {
                 break;
             }
 
-            let Some(snapshot) = snapshots.get(&d) else {
-                // Already persisted and evicted -- treat as boundary.
-                break;
-            };
+            let snapshot = snapshots.get(&d).ok_or(ConsensusError::SnapshotNotFound(d))?;
 
             chain.push(d);
             changes_chain.push(snapshot.changes.clone());
@@ -560,6 +551,32 @@ mod tests {
         assert_eq!(store.persisted_count(), 1);
         // Eviction with only 1 persisted and limit 1 should evict nothing.
         assert_eq!(store.evict_persisted(), 0);
+    }
+
+    #[test]
+    fn changes_for_persist_errors_on_missing_unpersisted_ancestor() {
+        let store = InMemorySnapshotStore::<MockStateDb>::with_max_persisted_retained(4);
+
+        let missing_parent = make_digest(0x01);
+        let child = make_digest(0x02);
+        store.insert(child, make_snapshot(Some(missing_parent)));
+
+        let err = store.changes_for_persist(child).expect_err("missing parent must fail closed");
+        assert!(matches!(err, ConsensusError::SnapshotNotFound(d) if d == missing_parent));
+    }
+
+    #[test]
+    fn merged_changes_errors_on_missing_unpersisted_ancestor() {
+        let store = InMemorySnapshotStore::<MockStateDb>::with_max_persisted_retained(4);
+
+        let missing_parent = make_digest(0x01);
+        let child = make_digest(0x02);
+        store.insert(child, make_snapshot(Some(missing_parent)));
+
+        let err = store
+            .merged_changes(child, ChangeSet::new())
+            .expect_err("missing parent must fail closed");
+        assert!(matches!(err, ConsensusError::SnapshotNotFound(d) if d == missing_parent));
     }
 
     #[test]

@@ -93,6 +93,49 @@ const CATCH_UP_THRESHOLD: u64 = 64;
 /// base fee falls back to [`kora_config::INITIAL_BASE_FEE`].
 const MAX_BLOCK_FEES_CACHED: usize = 128;
 
+const fn catch_up_complete(recovered_height: u64, verified_height: u64) -> bool {
+    recovered_height > 0 && verified_height >= recovered_height.saturating_add(CATCH_UP_THRESHOLD)
+}
+
+fn clear_resolver_catching_up_flag(
+    flag: Option<&AtomicBool>,
+    recovered_height: u64,
+    verified_height: u64,
+) -> bool {
+    if !catch_up_complete(recovered_height, verified_height) {
+        return false;
+    }
+
+    flag.is_some_and(|flag| flag.swap(false, Ordering::AcqRel))
+}
+
+fn collect_pending_tx_ids(
+    snapshots: &InMemorySnapshotStore<OverlayState<QmdbState>>,
+    from: ConsensusDigest,
+) -> Option<BTreeSet<kora_consensus::TxId>> {
+    let mut excluded = BTreeSet::new();
+    let mut current = Some(from);
+
+    while let Some(digest) = current {
+        if snapshots.is_persisted(&digest) {
+            break;
+        }
+        let Some(snapshot) = snapshots.get(&digest) else {
+            warn!(
+                ?digest,
+                collected_so_far = excluded.len(),
+                "snapshot chain gap during tx exclusion collection -- \
+                 refusing to build block to prevent duplicate transactions"
+            );
+            return None;
+        };
+        excluded.extend(snapshot.tx_ids.iter().copied());
+        current = snapshot.parent;
+    }
+
+    Some(excluded)
+}
+
 /// REVM-based consensus application.
 #[derive(Clone)]
 pub struct RevmApplication<S, E> {
@@ -347,7 +390,7 @@ where
         let snapshot_elapsed = start.elapsed();
 
         let (_, mempool, snapshots) = self.ledger.proposal_components().await;
-        let excluded = match self.collect_pending_tx_ids(&snapshots, parent_digest) {
+        let excluded = match collect_pending_tx_ids(&snapshots, parent_digest) {
             Some(ids) => ids,
             None => {
                 // The snapshot chain has a gap -- we cannot determine which
@@ -506,7 +549,24 @@ where
         // Check whether full-execution verification has advanced far enough
         // past the recovery point.  If it has, catch-up is over.
         let verified = self.last_verified_height.load(Ordering::Relaxed);
-        verified < recovered.saturating_add(CATCH_UP_THRESHOLD)
+        !catch_up_complete(recovered, verified)
+    }
+
+    fn maybe_clear_resolver_catching_up(&self) {
+        let recovered = self.recovered_height.load(Ordering::Relaxed);
+        let verified = self.last_verified_height.load(Ordering::Relaxed);
+        if clear_resolver_catching_up_flag(
+            self.resolver_catching_up.as_deref(),
+            recovered,
+            verified,
+        ) {
+            info!(
+                recovered_height = recovered,
+                verified_height = verified,
+                threshold = CATCH_UP_THRESHOLD,
+                "catch-up: verification threshold reached, enabling peer banning"
+            );
+        }
     }
 
     async fn verify_block(
@@ -534,6 +594,7 @@ where
             if let Some(ref state) = self.node_state {
                 state.set_last_verified_height(block.height);
             }
+            self.maybe_clear_resolver_catching_up();
             trace!(?digest, height = block.height, "block already verified");
             return true;
         }
@@ -745,15 +806,10 @@ where
             info!(
                 height = block.height,
                 recovered_height = self.recovered_height.load(Ordering::Relaxed),
-                "catch-up: first full-execution verification past recovery point, \
-                 enabling peer banning"
+                "catch-up: first full-execution verification past recovery point"
             );
-            // Clear the GraduatedBlocker's catch-up flag so that Byzantine
-            // peers can be banned again now that catch-up is complete.
-            if let Some(ref flag) = self.resolver_catching_up {
-                flag.store(false, Ordering::Release);
-            }
         }
+        self.maybe_clear_resolver_catching_up();
 
         if let Some(ref m) = self.metrics {
             m.evm_execution_seconds.observe(exec_elapsed.as_secs_f64());
@@ -771,42 +827,6 @@ where
             "verified block"
         );
         true
-    }
-
-    /// Collect transaction IDs from unpersisted ancestor snapshots.
-    ///
-    /// Returns `None` if the snapshot chain has a genuine gap (a snapshot
-    /// should exist but doesn't). In that case the caller **must not** build
-    /// a block, because we cannot guarantee the excluded set is complete and
-    /// would risk including duplicate transactions.
-    ///
-    /// A missing snapshot whose digest is also absent from the persisted set
-    /// is treated as an already-persisted-and-evicted boundary (the walk
-    /// terminates normally).
-    fn collect_pending_tx_ids(
-        &self,
-        snapshots: &InMemorySnapshotStore<OverlayState<QmdbState>>,
-        from: ConsensusDigest,
-    ) -> Option<BTreeSet<kora_consensus::TxId>> {
-        let mut excluded = BTreeSet::new();
-        let mut current = Some(from);
-
-        while let Some(digest) = current {
-            if snapshots.is_persisted(&digest) {
-                break;
-            }
-            let Some(snapshot) = snapshots.get(&digest) else {
-                // Snapshot is missing. If it is also absent from the
-                // persisted set, it was persisted and later evicted --
-                // treat as a normal boundary.  Otherwise it is a genuine
-                // gap in the unpersisted chain.
-                break;
-            };
-            excluded.extend(snapshot.tx_ids.iter().copied());
-            current = snapshot.parent;
-        }
-
-        Some(excluded)
     }
 }
 
@@ -962,5 +982,55 @@ where
 
             true
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn digest(byte: u8) -> ConsensusDigest {
+        ConsensusDigest::from([byte; 32])
+    }
+
+    #[test]
+    fn collect_pending_tx_ids_returns_none_on_missing_snapshot() {
+        let snapshots = InMemorySnapshotStore::<OverlayState<QmdbState>>::new();
+        let missing = digest(0x02);
+
+        assert!(
+            collect_pending_tx_ids(&snapshots, missing).is_none(),
+            "missing snapshot must nullify proposal instead of using a partial excluded set"
+        );
+    }
+
+    #[test]
+    fn collect_pending_tx_ids_stops_at_persisted_boundary() {
+        let snapshots = InMemorySnapshotStore::<OverlayState<QmdbState>>::new();
+        let persisted = digest(0x01);
+        snapshots.mark_persisted(&[persisted]);
+
+        let excluded = collect_pending_tx_ids(&snapshots, persisted).expect("complete chain");
+        assert!(excluded.is_empty());
+    }
+
+    #[test]
+    fn resolver_catching_up_flag_clears_at_verification_threshold() {
+        let recovered = 100;
+        let flag = AtomicBool::new(true);
+
+        assert!(!clear_resolver_catching_up_flag(
+            Some(&flag),
+            recovered,
+            recovered + CATCH_UP_THRESHOLD - 1
+        ));
+        assert!(flag.load(Ordering::Relaxed));
+
+        assert!(clear_resolver_catching_up_flag(
+            Some(&flag),
+            recovered,
+            recovered + CATCH_UP_THRESHOLD
+        ));
+        assert!(!flag.load(Ordering::Relaxed));
     }
 }
