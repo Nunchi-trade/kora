@@ -34,11 +34,13 @@ use tracing::{debug, error, info, trace, warn};
 /// (via [`LedgerService::wait_for_snapshot`]) so the wake-up is immediate
 /// once the snapshot is inserted, with this timeout as the upper bound.
 ///
-/// Under CPU contention (e.g. 23 threads on 0.75 cores), the finalization
-/// reporter may need more time to produce the parent snapshot.  100 ms
-/// provides ample budget; in the common case the Notify fires within the
-/// first few milliseconds.
-const SNAPSHOT_WAIT_TIMEOUT: Duration = Duration::from_millis(100);
+/// Under CPU contention (e.g. Docker containers with 1.2 cores), the
+/// finalization pipeline may need more than 100ms to produce the parent
+/// snapshot, especially when QMDB persistence is I/O-bound.  500ms is
+/// still well within `leader_timeout` (1s) and `certification_timeout`
+/// (2s), so it does not risk stalling consensus.  In the common case the
+/// Notify fires within the first few milliseconds.
+const SNAPSHOT_WAIT_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Maximum number of seconds a block timestamp may be ahead of the
 /// validator's wall-clock time.  Blocks with timestamps further in the
@@ -85,6 +87,14 @@ fn unix_timestamp_secs<Env: Clock>(env: &Env) -> u64 {
 /// execution, NOT by certificate trust) reaches `recovered_height + 64`.
 const CATCH_UP_THRESHOLD: u64 = 64;
 
+/// Hard upper bound on catch-up mode duration, measured in blocks past the
+/// recovered height.  If the node has been running for more than this many
+/// blocks since restart and `last_verified_height` still has not closed the
+/// catch-up window (e.g. because ancestry walks never revisit certificate-
+/// trusted blocks), catch-up mode exits unconditionally.  This prevents an
+/// edge case where the node permanently operates in degraded mode.
+const MAX_CATCH_UP_WINDOW: u64 = 256;
+
 /// REVM-based consensus application.
 #[derive(Clone)]
 pub struct RevmApplication<S, E> {
@@ -117,6 +127,11 @@ pub struct RevmApplication<S, E> {
     /// gas usage.  Entries are small (32 + 16 bytes) and the map is bounded
     /// by the number of unfinalized blocks.
     block_fees: Arc<RwLock<HashMap<ConsensusDigest, (u64, u64)>>>,
+    /// Number of blocks that were certificate-trusted during catch-up
+    /// without full re-execution (empty changeset snapshots).  Emitted as
+    /// a warning when catch-up ends so operators are aware of potential
+    /// state divergence.
+    cert_trusted_blocks: Arc<AtomicU64>,
     _scheme: std::marker::PhantomData<S>,
 }
 
@@ -160,6 +175,7 @@ where
             recovered_height: Arc::new(AtomicU64::new(0)),
             last_verified_height: Arc::new(AtomicU64::new(0)),
             block_fees: Arc::new(RwLock::new(block_fees)),
+            cert_trusted_blocks: Arc::new(AtomicU64::new(0)),
             _scheme: std::marker::PhantomData,
         }
     }
@@ -237,9 +253,11 @@ where
         timestamp: u64,
         prevrandao: B256,
         parent_digest: ConsensusDigest,
+        parent_hash: B256,
     ) -> BlockContext {
         let base_fee = self.compute_base_fee(parent_digest);
         let header = Header {
+            parent_hash,
             number: height,
             timestamp,
             gas_limit: self.gas_limit,
@@ -247,7 +265,7 @@ where
             base_fee_per_gas: Some(base_fee),
             ..Default::default()
         };
-        BlockContext::new(header, B256::ZERO, prevrandao)
+        BlockContext::new(header, parent_hash, prevrandao)
     }
 
     async fn get_prevrandao(&self, parent_digest: ConsensusDigest) -> B256 {
@@ -341,7 +359,8 @@ where
 
         let prevrandao = self.get_prevrandao(parent_digest).await;
         let height = parent.height + 1;
-        let context = self.block_context(height, timestamp, prevrandao, parent_digest);
+        let context =
+            self.block_context(height, timestamp, prevrandao, parent_digest, parent.id().0);
         let base_fee = context.header.base_fee_per_gas.unwrap_or(kora_config::INITIAL_BASE_FEE);
         let txs_bytes: Vec<Bytes> = txs.iter().map(|tx| tx.bytes.clone()).collect();
 
@@ -460,6 +479,14 @@ where
         if block_height <= recovered {
             return false;
         }
+        // Secondary exit: if the network has advanced far enough past the
+        // recovered height, exit catch-up unconditionally.  This prevents
+        // the edge case where `last_verified_height` never catches up
+        // because ancestry walks do not revisit certificate-trusted blocks.
+        let elapsed = block_height.saturating_sub(recovered);
+        if elapsed >= MAX_CATCH_UP_WINDOW {
+            return false;
+        }
         // Check whether full-execution verification has advanced far enough
         // past the recovery point.  If it has, catch-up is over.
         let verified = self.last_verified_height.load(Ordering::Relaxed);
@@ -469,12 +496,29 @@ where
     async fn verify_block(
         &self,
         block: &Block,
+        parent_height: Option<u64>,
         parent_timestamp: Option<u64>,
         now_secs: u64,
     ) -> bool {
         let start = Instant::now();
         let digest = block.commitment();
         let parent_digest = block.parent();
+
+        // Height contiguity: verify that block height is exactly parent + 1.
+        // This is a defense-in-depth check -- the consensus engine should
+        // enforce this, but the application layer independently validates it.
+        if let Some(ph) = parent_height {
+            if block.height != ph + 1 {
+                warn!(
+                    ?digest,
+                    block_height = block.height,
+                    parent_height = ph,
+                    expected_height = ph + 1,
+                    "verify_block: height not contiguous with parent"
+                );
+                return false;
+            }
+        }
 
         if self.ledger.query_state_root(digest).await.is_some() {
             // Block is already in the snapshot store.  This can happen either
@@ -564,6 +608,7 @@ where
                     // re-execute and properly persist the block when it
                     // arrives through the finalization pipeline.
                     self.ledger.restore_persisted_snapshot(block).await;
+                    self.cert_trusted_blocks.fetch_add(1, Ordering::Relaxed);
                     // We do NOT update last_verified_height here because
                     // certificate-trust is not full verification.  However,
                     // the "already verified" early-return path at the top of
@@ -586,8 +631,13 @@ where
         };
         let snapshot_elapsed = start.elapsed();
 
-        let context =
-            self.block_context(block.height, block.timestamp, block.prevrandao, parent_digest);
+        let context = self.block_context(
+            block.height,
+            block.timestamp,
+            block.prevrandao,
+            parent_digest,
+            block.parent.0,
+        );
         let base_fee = context.header.base_fee_per_gas.unwrap_or(kora_config::INITIAL_BASE_FEE);
         let exec_start = Instant::now();
         let execution =
@@ -609,6 +659,7 @@ where
                              falling back to certificate trust"
                         );
                         self.ledger.restore_persisted_snapshot(block).await;
+                        self.cert_trusted_blocks.fetch_add(1, Ordering::Relaxed);
                         return true;
                     }
                     warn!(?digest, error = ?err, "execution failed");
@@ -634,6 +685,7 @@ where
                          falling back to certificate trust"
                     );
                     self.ledger.restore_persisted_snapshot(block).await;
+                    self.cert_trusted_blocks.fetch_add(1, Ordering::Relaxed);
                     return true;
                 }
                 warn!(?digest, error = ?err, "compute root failed");
@@ -661,6 +713,7 @@ where
                      (parent snapshot likely has empty changeset from prior trust)"
                 );
                 self.ledger.restore_persisted_snapshot(block).await;
+                self.cert_trusted_blocks.fetch_add(1, Ordering::Relaxed);
                 return true;
             }
             warn!(
@@ -696,14 +749,25 @@ where
         if let Some(ref state) = self.node_state {
             state.set_last_verified_height(block.height);
         }
-        if prev_verified < self.recovered_height.load(Ordering::Relaxed)
-            && block.height >= self.recovered_height.load(Ordering::Relaxed)
-        {
-            info!(
-                height = block.height,
-                recovered_height = self.recovered_height.load(Ordering::Relaxed),
-                "catch-up: first full-execution verification past recovery point"
-            );
+        let recovered = self.recovered_height.load(Ordering::Relaxed);
+        if prev_verified < recovered && block.height >= recovered {
+            let trusted = self.cert_trusted_blocks.load(Ordering::Relaxed);
+            if trusted > 0 {
+                warn!(
+                    height = block.height,
+                    recovered_height = recovered,
+                    cert_trusted_blocks = trusted,
+                    "catch-up ending: {trusted} blocks were certificate-trusted \
+                     with empty changesets -- QMDB state may have diverged for \
+                     those blocks; the finalization pipeline will re-execute them"
+                );
+            } else {
+                info!(
+                    height = block.height,
+                    recovered_height = recovered,
+                    "catch-up: first full-execution verification past recovery point"
+                );
+            }
         }
 
         if let Some(ref m) = self.metrics {
@@ -866,11 +930,13 @@ where
             // the oldest unverified block.
             let mut blocks_to_verify = Vec::new();
             let mut verified_parent_timestamp: Option<u64> = None;
+            let mut verified_parent_height: Option<u64> = None;
             while let Some(block) = ancestry.next().await {
                 let digest = block.commitment();
                 // Stop if we've already verified this block
                 if self.ledger.query_state_root(digest).await.is_some() {
                     verified_parent_timestamp = Some(block.timestamp);
+                    verified_parent_height = Some(block.height);
                     break;
                 }
                 blocks_to_verify.push(block);
@@ -887,15 +953,18 @@ where
             let tip_height = blocks_to_verify.first().map(|b| b.height).unwrap_or(0);
 
             // Verify from oldest (parent) to newest (tip).
-            // Track the parent timestamp across the chain so each block's
-            // timestamp monotonicity can be validated.
+            // Track the parent timestamp and height across the chain so each
+            // block's timestamp monotonicity and height contiguity can be
+            // validated.
             let verify_start = Instant::now();
             let mut parent_ts = verified_parent_timestamp;
+            let mut parent_h = verified_parent_height;
             for block in blocks_to_verify.into_iter().rev() {
-                if !self.verify_block(&block, parent_ts, now_secs).await {
+                if !self.verify_block(&block, parent_h, parent_ts, now_secs).await {
                     return false;
                 }
                 parent_ts = Some(block.timestamp);
+                parent_h = Some(block.height);
             }
             let verify_elapsed = verify_start.elapsed();
             let total_elapsed = start.elapsed();

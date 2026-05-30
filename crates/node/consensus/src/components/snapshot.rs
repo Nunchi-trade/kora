@@ -159,6 +159,9 @@ impl<S> InMemorySnapshotStore<S> {
         }
 
         if evicted > 0 {
+            // Reclaim excess VecDeque capacity after eviction to prevent
+            // the underlying allocation from ratcheting upward indefinitely.
+            order.shrink_to_fit();
             debug!(
                 evicted,
                 retained = snapshots.len(),

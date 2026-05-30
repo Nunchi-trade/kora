@@ -301,6 +301,24 @@ where
     let block_ranges: Vec<_> = finalized_blocks.ranges().collect();
     let finalization_ranges: Vec<_> = finalizations_by_height.ranges().collect();
 
+    // Cross-validate archive coverage: warn when the finalization archive
+    // is shorter than the block archive, which means seed data will be
+    // missing for some recovered blocks and prevrandao will fall back to
+    // B256::ZERO for those heights.
+    if let (Some(&(_, block_end)), Some(&(_, fin_end))) =
+        (block_ranges.last(), finalization_ranges.last())
+    {
+        if fin_end < block_end {
+            warn!(
+                block_archive_end = block_end,
+                finalization_archive_end = fin_end,
+                gap = block_end - fin_end,
+                "finalization archive is shorter than block archive; \
+                 seed data may be missing for recovered blocks in the gap"
+            );
+        }
+    }
+
     for (start, end) in finalization_ranges {
         for height in start..=end {
             if let Some(finalization) = finalizations_by_height
@@ -650,7 +668,16 @@ impl BlockContextProvider for RevmContextProvider {
                 .unwrap_or(kora_config::INITIAL_BASE_FEE)
         };
 
+        let parent_hash = if block.height == 0 {
+            B256::ZERO
+        } else {
+            self.block_index
+                .get_block_by_number(block.height - 1)
+                .map(|b| b.hash)
+                .unwrap_or(B256::ZERO)
+        };
         let header = Header {
+            parent_hash,
             number: block.height,
             timestamp: block.timestamp,
             gas_limit: self.gas_limit,
@@ -659,7 +686,7 @@ impl BlockContextProvider for RevmContextProvider {
             ..Default::default()
         };
         let recent_hashes = self.recent_block_hashes(block.height);
-        BlockContext::new(header, B256::ZERO, block.prevrandao)
+        BlockContext::new(header, parent_hash, block.prevrandao)
             .with_recent_block_hashes(recent_hashes)
     }
 }
@@ -1365,6 +1392,34 @@ impl NodeRunner for ProductionRunner {
         );
         let broadcast_handle = broadcast_engine.start(transport.marshal.blocks);
 
+        // Retrieve the last finalization certificate from the archive before
+        // it is consumed by the marshal actor.  When recovering from a prior
+        // run, we use this certificate to set the simplex engine floor and
+        // marshal start so that consensus resumes from the finalized tip
+        // instead of genesis (issue #109).
+        let last_finalization: Option<CertArchive> =
+            if let Some(last_height) = finalizations_by_height.last_index() {
+                match finalizations_by_height.get(ArchiveId::Index(last_height)).await {
+                    Ok(f) => f,
+                    Err(e) => {
+                        warn!(
+                            height = last_height,
+                            error = %e,
+                            "failed to load last finalization certificate; falling back to genesis"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+        let marshal_start = if let Some(ref fin) = last_finalization {
+            commonware_consensus::marshal::Start::Floor(fin.clone())
+        } else {
+            commonware_consensus::marshal::Start::Genesis(ledger.genesis_block())
+        };
+
         let scratch_context = NoSyncStorage::new(context.child("scratch"), checkpoint_interval);
         let (actor, marshal_mailbox, _last_processed_height) =
             kora_marshal::ActorInitializer::init_with_strategy::<_, Block, _, _, _, Exact, _>(
@@ -1372,7 +1427,7 @@ impl NodeRunner for ProductionRunner {
                 finalizations_by_height,
                 finalized_blocks,
                 scheme_provider,
-                commonware_consensus::marshal::Start::Genesis(ledger.genesis_block()),
+                marshal_start,
                 page_cache.clone(),
                 block_cfg,
                 strategy.clone(),
@@ -1408,8 +1463,29 @@ impl NodeRunner for ProductionRunner {
             Inline::new(scratch_context.child("marshaled"), app, marshal_mailbox.clone(), epocher);
 
         let seed_reporter = SeedReporter::<MinSig>::new(ledger.clone());
+        let equivocation_log = match kora_reporters::EquivocationLog::open(&config.data_dir) {
+            Ok(log) => {
+                info!(
+                    path = %config.data_dir.display(),
+                    "Opened equivocation proof log"
+                );
+                Some(Arc::new(log))
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "Failed to open equivocation log; proofs will not be persisted"
+                );
+                None
+            }
+        };
         let node_state_reporter = self.rpc_config.as_ref().map(|(state, _)| {
-            NodeStateReporter::<ThresholdScheme>::new(state.clone()).with_metrics(app_metrics)
+            let mut reporter =
+                NodeStateReporter::<ThresholdScheme>::new(state.clone()).with_metrics(app_metrics);
+            if let Some(ref log) = equivocation_log {
+                reporter = reporter.with_equivocation_log(Arc::clone(log));
+            }
+            reporter
         });
         let inner_reporters: Reporters<_, MarshalMailbox, Option<NodeStateRptr>> =
             Reporters::from((marshal_mailbox.clone(), node_state_reporter));
@@ -1434,7 +1510,11 @@ impl NodeRunner for ProductionRunner {
                 partition: self.partition_prefix.clone(),
                 mailbox_size: NZUsize!(MAILBOX_SIZE),
                 epoch: Epoch::zero(),
-                floor: simplex::Floor::Genesis(ledger.genesis_block().commitment()),
+                floor: if let Some(ref fin) = last_finalization {
+                    simplex::Floor::Finalized(fin.clone())
+                } else {
+                    simplex::Floor::Genesis(ledger.genesis_block().commitment())
+                },
                 replay_buffer: simplex_config.replay_buffer_bytes,
                 write_buffer: simplex_config.write_buffer_bytes,
                 leader_timeout: Duration::from_secs(simplex_config.leader_timeout_secs.get()),
