@@ -1322,4 +1322,42 @@ mod tests {
             .unwrap();
         assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
     }
+
+    #[tokio::test]
+    async fn health_returns_service_unavailable_when_partitioned() {
+        let node_state = NodeState::new(1, 0);
+        let app = build_http_router(
+            Arc::new(node_state),
+            build_cors_layer(&CorsConfig::none()),
+            10,
+            SharedRateLimiter::new(RateLimitConfig::disabled()),
+        );
+
+        let response = app
+            .oneshot(HttpRequest::builder().uri("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn health_returns_service_unavailable_when_syncing() {
+        let node_state = NodeState::new(1, 0);
+        node_state.set_peer_count(3);
+        node_state.set_recovered_height(100);
+        let app = build_http_router(
+            Arc::new(node_state),
+            build_cors_layer(&CorsConfig::none()),
+            10,
+            SharedRateLimiter::new(RateLimitConfig::disabled()),
+        );
+
+        let response = app
+            .oneshot(HttpRequest::builder().uri("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
 }

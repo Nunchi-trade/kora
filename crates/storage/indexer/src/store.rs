@@ -221,9 +221,8 @@ impl BlockIndex {
 
     /// Gets logs matching the given filter.
     ///
-    /// Returns at most [`Self::MAX_LOG_RESULTS`] entries. When the limit is
-    /// reached the second element of the tuple is `true`, indicating that the
-    /// result set was truncated.
+    /// Returns at most [`Self::MAX_LOG_RESULTS`] entries. When more matching
+    /// logs exist beyond that limit, the second element of the tuple is `true`.
     pub fn get_logs(&self, filter: &LogFilter) -> (Vec<IndexedLog>, bool) {
         let head = self.head_block_number();
         let from_block = filter.from_block.unwrap_or(0);
@@ -248,11 +247,11 @@ impl BlockIndex {
                 if !Self::matches_filter(log, filter) {
                     continue;
                 }
-                result.push(log.clone());
                 if result.len() >= Self::MAX_LOG_RESULTS {
                     truncated = true;
                     break 'outer;
                 }
+                result.push(log.clone());
             }
         }
 
@@ -497,6 +496,62 @@ mod tests {
         let filter = LogFilter::new().address(vec![Address::repeat_byte(0xFF)]);
         let (logs, _) = index.get_logs(&filter);
         assert!(logs.is_empty());
+    }
+
+    #[test]
+    fn test_get_logs_exact_limit_is_not_truncated() {
+        let index = BlockIndex::new();
+        let block_hash = B256::repeat_byte(1);
+        let contract_addr = Address::repeat_byte(0xAB);
+        let tx_hash = B256::repeat_byte(2);
+        let logs = (0..BlockIndex::MAX_LOG_RESULTS)
+            .map(|i| IndexedLog {
+                address: contract_addr,
+                topics: vec![],
+                data: Bytes::new(),
+                log_index: i as u64,
+                block_number: 1,
+                block_hash,
+                transaction_hash: tx_hash,
+                transaction_index: 0,
+            })
+            .collect();
+        let mut receipt = create_test_receipt(tx_hash, block_hash, 1);
+        receipt.logs = logs;
+
+        index.insert_block(create_test_block(1, block_hash), vec![], vec![receipt]);
+
+        let (logs, truncated) = index.get_logs(&LogFilter::new().address(vec![contract_addr]));
+        assert_eq!(logs.len(), BlockIndex::MAX_LOG_RESULTS);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn test_get_logs_over_limit_is_truncated() {
+        let index = BlockIndex::new();
+        let block_hash = B256::repeat_byte(1);
+        let contract_addr = Address::repeat_byte(0xAB);
+        let tx_hash = B256::repeat_byte(2);
+        let logs = (0..=BlockIndex::MAX_LOG_RESULTS)
+            .map(|i| IndexedLog {
+                address: contract_addr,
+                topics: vec![],
+                data: Bytes::new(),
+                log_index: i as u64,
+                block_number: 1,
+                block_hash,
+                transaction_hash: tx_hash,
+                transaction_index: 0,
+            })
+            .collect();
+        let mut receipt = create_test_receipt(tx_hash, block_hash, 1);
+        receipt.logs = logs;
+
+        index.insert_block(create_test_block(1, block_hash), vec![], vec![receipt]);
+
+        let (logs, truncated) = index.get_logs(&LogFilter::new().address(vec![contract_addr]));
+        assert_eq!(logs.len(), BlockIndex::MAX_LOG_RESULTS);
+        assert!(truncated);
     }
 
     #[test]
