@@ -235,8 +235,7 @@ where
 }
 
 /// Outcome of `handle_finalized_update` with info needed for post-lock
-/// cleanup (mempool pruning).  `None` for `Update::Tip` which has no
-/// block to process.
+/// notifications.  `None` for `Update::Tip` which has no block to process.
 struct FinalizeOutcome {
     block: Block,
     mempool_broadcast: Option<MempoolEventSender>,
@@ -341,6 +340,8 @@ where
                 }
             }
 
+            state.prune_mempool(&block.txs).await;
+            state.prune_stale_nonces().await;
             acknowledge_checkpoint(pending_acks, block.height, checkpoint_interval, ack).await;
 
             Some(FinalizeOutcome { block, mempool_broadcast })
@@ -881,14 +882,9 @@ mod finalize_success_tests {
             )
             .await;
 
-            // Mempool pruning is now the caller's responsibility (outside
-            // the finalize lock), mirroring how FinalizedReporter::report()
-            // does it.
-            if let Some(outcome) = outcome {
-                service.prune_mempool(&outcome.block.txs).await;
-            }
+            assert!(outcome.is_some(), "finalized block should produce an outcome");
 
-            // -- assert: mempool was pruned --
+            // -- assert: mempool was pruned before acknowledgement is observed --
             assert_eq!(pool.len(), 0, "mempool must be pruned after successful finalization");
 
             // -- assert: acknowledgement was delivered --
@@ -1469,10 +1465,8 @@ where
         let node_state = self.node_state.clone();
         let task_counter = self.outstanding_tasks.clone();
         self.context.child("report_task").spawn(move |_| async move {
-            // Hold `finalize_lock` only for the ordering-sensitive part:
-            // finalization, persistence, acknowledgment.  Mempool pruning is
-            // released to run concurrently with the next block's finalization,
-            // reducing contention with the proposal path.
+            // Hold `finalize_lock` for the ordering-sensitive part:
+            // finalization, persistence, mempool pruning, and acknowledgment.
             let outcome = {
                 let _guard = finalize_lock.lock().await;
                 handle_finalized_update(
@@ -1491,11 +1485,7 @@ where
                 )
                 .await
             };
-            // Mempool pruning outside the lock -- idempotent and does not
-            // affect acknowledgment ordering.
             if let Some(outcome) = outcome {
-                state.prune_mempool(&outcome.block.txs).await;
-                state.prune_stale_nonces().await;
                 publish_mempool_inclusions(outcome.mempool_broadcast.as_ref(), &outcome.block);
             }
             task_counter.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
