@@ -1,5 +1,6 @@
 //! End-to-end testing framework for Kora consensus network.
 
+#![recursion_limit = "256"]
 #![doc = include_str!("../README.md")]
 #![doc(issue_tracker_base_url = "https://github.com/refcell/kora/issues/")]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
