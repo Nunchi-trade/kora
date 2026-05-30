@@ -527,13 +527,13 @@ fn decode_tx_env(tx_bytes: &Bytes, chain_id: u64) -> Result<revm::context::TxEnv
         TxEnvelope::Eip7702(signed) => Some(signed.tx().chain_id),
     };
 
-    if let Some(tx_cid) = tx_chain_id {
-        if tx_cid != chain_id {
-            return Err(ExecutionError::InvalidTx(format!(
-                "chain ID mismatch: expected {}, got {}",
-                chain_id, tx_cid
-            )));
-        }
+    if let Some(tx_cid) = tx_chain_id
+        && tx_cid != chain_id
+    {
+        return Err(ExecutionError::InvalidTx(format!(
+            "chain ID mismatch: expected {}, got {}",
+            chain_id, tx_cid
+        )));
     }
 
     // Build TxEnv using the builder pattern
