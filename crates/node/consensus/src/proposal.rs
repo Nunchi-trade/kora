@@ -208,8 +208,8 @@ where
         block.txs.iter().map(Tx::id).collect()
     }
 
-    fn collect_pending_tx_ids(&self, from: Digest) -> Result<BTreeSet<TxId>, ConsensusError> {
-        let mut excluded = BTreeSet::new();
+    fn collect_pending_tx_ids(&self, from: Digest) -> Result<HashSet<TxId>, ConsensusError> {
+        let mut excluded = HashSet::new();
         let mut current = Some(from);
 
         while let Some(digest) = current {
@@ -236,7 +236,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, sync::Arc};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        sync::Arc,
+    };
 
     use alloy_primitives::{Address, Bytes, U256};
     use kora_executor::ExecutionOutcome;

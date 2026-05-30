@@ -390,6 +390,7 @@ async fn acknowledge_checkpoint(
 /// Non-retryable errors (state root mismatch, evicted parent snapshot) are
 /// returned immediately. Transient errors are retried up to
 /// [`MAX_FINALIZATION_ATTEMPTS`] times with delays of 100ms, 200ms, 400ms, etc.
+#[allow(clippy::too_many_arguments)]
 async fn finalize_with_retry<E, P>(
     state: &LedgerService,
     context: &tokio::Context,
@@ -487,6 +488,7 @@ where
 /// inner `Option`s may be `None` when a cached snapshot was reused without
 /// re-execution. Returns a typed [`FinalizationError`] on failure so the
 /// caller can decide whether to retry.
+#[allow(clippy::too_many_arguments)]
 async fn finalize_block<E, P>(
     state: &LedgerService,
     context: &tokio::Context,
@@ -627,7 +629,7 @@ where
         }
         // Record persist duration for Prometheus so operators can detect
         // I/O contention on shared storage (see issue #069).
-        if let Some(ref m) = metrics {
+        if let Some(m) = metrics {
             m.persist_duration_seconds.observe(persist_start.elapsed().as_secs_f64());
         }
     }
@@ -777,6 +779,7 @@ mod finalize_error_tests {
                 None,
                 &block,
                 true,
+                None,
             )
             .await;
 

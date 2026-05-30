@@ -733,6 +733,14 @@ impl LedgerService {
         self.view.compute_root_from_store(parent, changes).await
     }
 
+    /// Compute the state root given a known parent root and changeset.
+    ///
+    /// This avoids re-acquiring the inner lock when the caller already
+    /// has the parent snapshot's state root.
+    pub fn compute_root_with_parent(parent_root: StateRoot, changes: &QmdbChangeSet) -> StateRoot {
+        LedgerView::compute_root_with_parent(parent_root, changes)
+    }
+
     /// Persist a snapshot and publish an event if a new commit occurs.
     pub async fn persist_snapshot(&self, digest: ConsensusDigest) -> LedgerResult<()> {
         let persisted = self.view.persist_snapshot(digest).await?;
@@ -977,7 +985,7 @@ mod tests {
             assert!(persisted);
             let state_root =
                 setup.ledger.query_state_root(block2.digest).await.expect("state root");
-            let qmdb = setup.ledger.inner.lock().await.qmdb.clone();
+            let qmdb = setup.ledger.inner.read().await.qmdb.clone();
             let result = qmdb.state().balance(&to).await.expect("balance");
             assert_eq!(result, U256::from(TRANSFER_ONE + TRANSFER_TWO));
             assert_eq!(state_root, block2.block.state_root);
@@ -1198,7 +1206,7 @@ mod tests {
             assert!(persisted);
 
             // Assert
-            let qmdb = setup.ledger.inner.lock().await.qmdb.clone();
+            let qmdb = setup.ledger.inner.read().await.qmdb.clone();
             for recipient in recipients {
                 let result = qmdb.state().balance(&recipient).await.expect("balance");
                 assert_eq!(result, U256::from(TRANSFER_DUPLICATE));
@@ -1266,7 +1274,7 @@ mod tests {
             // Assert
             assert!(persisted_1);
             assert!(persisted_2);
-            let qmdb = setup.ledger.inner.lock().await.qmdb.clone();
+            let qmdb = setup.ledger.inner.read().await.qmdb.clone();
             assert_eq!(
                 qmdb.state().balance(&to_a).await.expect("balance"),
                 U256::from(TRANSFER_ONE)

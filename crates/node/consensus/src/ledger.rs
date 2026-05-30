@@ -1,6 +1,6 @@
 //! Ledger view aggregate for state management.
 
-use std::collections::BTreeSet;
+use std::collections::HashSet;
 
 use alloy_primitives::B256;
 use kora_domain::{StateRoot, Tx};
@@ -101,8 +101,8 @@ where
     /// Currently returns an empty set since `Snapshot<S>` does not contain
     /// transaction data. Transaction deduplication relies on the mempool's
     /// prune mechanism after finalization.
-    fn collect_ancestor_tx_ids(&self, _parent: Option<Digest>) -> BTreeSet<TxId> {
-        let mut excluded = BTreeSet::new();
+    fn collect_ancestor_tx_ids(&self, _parent: Option<Digest>) -> HashSet<TxId> {
+        let mut excluded = HashSet::new();
         let mut current = _parent;
 
         while let Some(digest) = current {
@@ -212,6 +212,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use alloy_primitives::U256;
     use kora_domain::{StateRoot, Tx};
     use kora_qmdb::ChangeSet;
