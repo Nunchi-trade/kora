@@ -99,7 +99,11 @@ impl QmdbBatchable for StorageStore {
             .merkleize(guard.as_ref(), None)
             .await
             .map_err(|e| BackendError::Storage(e.to_string()))?;
-        guard.as_mut().apply_batch(merkleized).await.map_err(|e| BackendError::Storage(e.to_string()))?;
+        guard
+            .as_mut()
+            .apply_batch(merkleized)
+            .await
+            .map_err(|e| BackendError::Storage(e.to_string()))?;
         guard.as_ref().commit().await.map_err(|e| BackendError::Storage(e.to_string()))?;
         guard.as_ref().sync().await.map_err(|e| BackendError::Storage(e.to_string()))?;
         Ok(())
