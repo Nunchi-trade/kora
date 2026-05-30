@@ -1212,7 +1212,7 @@ impl NodeRunner for ProductionRunner {
                     let validator =
                         TransactionValidator::new(chain_id, state, PoolConfig::default())
                             .with_pool(pool);
-                    validator.validate(tx.clone()).await.map_err(|err| {
+                    let validated = validator.validate(tx.clone()).await.map_err(|err| {
                         warn!(?tx_id, error = %err, "rpc submit: validator rejected tx");
                         kora_rpc::RpcError::InvalidTransaction(err.to_string())
                     })?;
@@ -1220,7 +1220,7 @@ impl NodeRunner for ProductionRunner {
                         debug!(?tx_id, "rpc submit: tx inserted into mempool");
                         // Forward to gossip if enabled.
                         if let (Some(gossip), Some(seen)) = (&gossip, &seen) {
-                            let hash = keccak256(&data);
+                            let hash = validated.hash;
                             mark_seen(seen, hash);
                             if let Err(e) = gossip.try_send(data) {
                                 warn!(error = %e, "tx gossip: outbound channel full, skipping broadcast");

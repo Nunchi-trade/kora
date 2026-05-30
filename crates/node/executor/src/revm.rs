@@ -507,7 +507,7 @@ fn decode_tx_env(tx_bytes: &Bytes, _chain_id: u64) -> Result<revm::context::TxEn
     use alloy_eips::eip2718::Decodable2718 as _;
 
     // Decode both legacy RLP transactions and typed EIP-2718 envelopes.
-    let envelope = TxEnvelope::decode_2718(&mut tx_bytes.as_ref())
+    let envelope = TxEnvelope::decode_2718_exact(tx_bytes.as_ref())
         .map_err(|e| ExecutionError::TxDecode(format!("{}", e)))?;
 
     // Build TxEnv using the builder pattern

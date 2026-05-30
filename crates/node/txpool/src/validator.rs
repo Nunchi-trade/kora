@@ -72,8 +72,7 @@ impl<S: StateDbRead> TransactionValidator<S> {
             });
         }
 
-        let envelope = TxEnvelope::decode_2718(&mut tx.bytes.as_ref())
-            .map_err(|e| TxPoolError::DecodeError(e.to_string()))?;
+        let envelope = decode_envelope_exact(tx.bytes.as_ref())?;
 
         let tx_chain_id = envelope.chain_id().unwrap_or(self.chain_id);
         if tx_chain_id != self.chain_id {
@@ -159,6 +158,10 @@ impl ValidatedTransaction {
 /// Recovers the sender address from a transaction envelope.
 pub fn recover_sender_from_envelope(envelope: &TxEnvelope) -> Result<Address, TxPoolError> {
     recover_sender_and_hash(envelope).map(|(addr, _)| addr)
+}
+
+pub(crate) fn decode_envelope_exact(bytes: &[u8]) -> Result<TxEnvelope, TxPoolError> {
+    TxEnvelope::decode_2718_exact(bytes).map_err(|e| TxPoolError::DecodeError(e.to_string()))
 }
 
 fn recover_sender_and_hash(envelope: &TxEnvelope) -> Result<(Address, B256), TxPoolError> {
@@ -253,12 +256,12 @@ fn max_tx_cost(envelope: &TxEnvelope) -> U256 {
 mod tests {
     use std::{collections::HashMap, sync::Arc};
 
-    use alloy_consensus::{SignableTransaction as _, TxEip1559, TxLegacy};
+    use alloy_consensus::{SignableTransaction as _, TxEip1559, TxEip7702, TxLegacy};
     use alloy_eips::{
         eip2718::Encodable2718,
         eip2930::{AccessList, AccessListItem},
     };
-    use alloy_primitives::{Bytes, Signature, TxKind};
+    use alloy_primitives::{Bytes, Signature, TxKind, keccak256};
     use k256::{ecdsa::SigningKey, elliptic_curve::rand_core::OsRng};
     use parking_lot::RwLock;
 
@@ -391,6 +394,59 @@ mod tests {
         (sender, envelope, Tx::new(raw_bytes.into()))
     }
 
+    fn sign_eip7702_tx(
+        chain_id: u64,
+        nonce: u64,
+        gas_limit: u64,
+        max_fee_per_gas: u128,
+        value: U256,
+        to: Address,
+    ) -> (Address, TxEnvelope, Tx) {
+        let signing_key = SigningKey::random(&mut OsRng);
+        let verifying_key = signing_key.verifying_key();
+        let pubkey = verifying_key.to_encoded_point(false);
+        let pubkey_bytes = pubkey.as_bytes();
+        let pubkey_hash = sha3::Keccak256::digest(&pubkey_bytes[1..]);
+        let sender = Address::from_slice(&pubkey_hash[12..]);
+
+        let tx = TxEip7702 {
+            chain_id,
+            nonce,
+            gas_limit,
+            max_fee_per_gas,
+            max_priority_fee_per_gas: max_fee_per_gas,
+            to,
+            value,
+            access_list: Default::default(),
+            authorization_list: Vec::new(),
+            input: Bytes::new(),
+        };
+
+        let sig_hash = tx.signature_hash();
+        let (sig, recovery_id) = signing_key.sign_prehash_recoverable(sig_hash.as_slice()).unwrap();
+        let r = U256::from_be_slice(&sig.r().to_bytes());
+        let s = U256::from_be_slice(&sig.s().to_bytes());
+        let v = recovery_id.is_y_odd();
+        let signature = Signature::new(r, s, v);
+
+        let signed = tx.into_signed(signature);
+        let envelope = TxEnvelope::from(signed);
+        let mut raw_bytes = Vec::new();
+        envelope.encode_2718(&mut raw_bytes);
+
+        (sender, envelope, Tx::new(raw_bytes.into()))
+    }
+
+    fn high_s_signature() -> Signature {
+        // secp256k1n - 1, still a valid scalar but non-canonical after EIP-2.
+        let high_s = U256::from_be_slice(&[
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xfe, 0xba, 0xae, 0xdc, 0xe6, 0xaf, 0x48, 0xa0, 0x3b, 0xbf, 0xd2, 0x5e, 0x8c,
+            0xd0, 0x36, 0x41, 0x40,
+        ]);
+        Signature::new(U256::from(1), high_s, false)
+    }
+
     #[tokio::test]
     async fn validate_valid_eip1559_transaction() {
         let chain_id = 1u64;
@@ -436,6 +492,71 @@ mod tests {
 
         let result = validator.validate(raw_tx).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn validate_valid_eip7702_transaction() {
+        let chain_id = 1u64;
+        let (sender, _, raw_tx) =
+            sign_eip7702_tx(chain_id, 0, 21000, 1_000_000_000, U256::from(1000), Address::ZERO);
+
+        let state =
+            MockState::new().with_account(sender, 0, U256::from(1_000_000_000_000_000_000u64));
+        let config = PoolConfig::default();
+        let validator = TransactionValidator::new(chain_id, state, config);
+
+        let result = validator.validate(raw_tx).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn validated_hash_matches_canonical_hash_for_legacy_eip1559_and_eip7702() {
+        let chain_id = 1u64;
+        let txs = vec![
+            sign_legacy_tx(
+                chain_id,
+                0,
+                21000,
+                1_000_000_000,
+                U256::from(1000),
+                Some(Address::ZERO),
+            ),
+            sign_eip1559_tx(
+                chain_id,
+                0,
+                21000,
+                1_000_000_000,
+                U256::from(1000),
+                Some(Address::ZERO),
+            ),
+            sign_eip7702_tx(chain_id, 0, 21000, 1_000_000_000, U256::from(1000), Address::ZERO),
+        ];
+
+        for (sender, envelope, raw_tx) in txs {
+            let state =
+                MockState::new().with_account(sender, 0, U256::from(1_000_000_000_000_000_000u64));
+            let validator = TransactionValidator::new(chain_id, state, PoolConfig::default());
+
+            let validated = validator.validate(raw_tx.clone()).await.unwrap();
+            assert_eq!(validated.hash, *envelope.tx_hash());
+            assert_eq!(validated.hash, keccak256(raw_tx.bytes.as_ref()));
+        }
+    }
+
+    #[tokio::test]
+    async fn reject_transaction_with_trailing_bytes() {
+        let chain_id = 1u64;
+        let (sender, _, raw_tx) =
+            sign_eip1559_tx(chain_id, 0, 21000, 1_000_000_000, U256::ZERO, Some(Address::ZERO));
+        let mut tx_bytes = raw_tx.bytes.to_vec();
+        tx_bytes.push(0);
+
+        let state =
+            MockState::new().with_account(sender, 0, U256::from(1_000_000_000_000_000_000u64));
+        let validator = TransactionValidator::new(chain_id, state, PoolConfig::default());
+
+        let result = validator.validate(Tx::new(tx_bytes.into())).await;
+        assert!(matches!(result, Err(TxPoolError::DecodeError(_))));
     }
 
     #[tokio::test]
@@ -864,6 +985,68 @@ mod tests {
 
         let recovered = recover_sender_from_envelope(&envelope).unwrap();
         assert_eq!(recovered, expected_sender);
+    }
+
+    #[test]
+    fn reject_high_s_legacy_signature() {
+        let tx = TxLegacy {
+            chain_id: Some(1),
+            nonce: 0,
+            gas_limit: 21000,
+            gas_price: 1_000_000_000,
+            to: TxKind::Call(Address::ZERO),
+            value: U256::ZERO,
+            input: Bytes::new(),
+        };
+        let envelope = TxEnvelope::from(tx.into_signed(high_s_signature()));
+
+        assert!(matches!(
+            recover_sender_from_envelope(&envelope),
+            Err(TxPoolError::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn reject_high_s_eip1559_signature() {
+        let tx = TxEip1559 {
+            chain_id: 1,
+            nonce: 0,
+            gas_limit: 21000,
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+            to: TxKind::Call(Address::ZERO),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            input: Bytes::new(),
+        };
+        let envelope = TxEnvelope::from(tx.into_signed(high_s_signature()));
+
+        assert!(matches!(
+            recover_sender_from_envelope(&envelope),
+            Err(TxPoolError::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn reject_high_s_eip7702_signature() {
+        let tx = TxEip7702 {
+            chain_id: 1,
+            nonce: 0,
+            gas_limit: 21000,
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+            to: Address::ZERO,
+            value: U256::ZERO,
+            access_list: Default::default(),
+            authorization_list: Vec::new(),
+            input: Bytes::new(),
+        };
+        let envelope = TxEnvelope::from(tx.into_signed(high_s_signature()));
+
+        assert!(matches!(
+            recover_sender_from_envelope(&envelope),
+            Err(TxPoolError::InvalidSignature)
+        ));
     }
 
     #[tokio::test]

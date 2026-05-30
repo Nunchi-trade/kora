@@ -502,8 +502,8 @@ impl<S: StateProvider + 'static> EthApiServer for EthApiImpl<S> {
     }
 
     async fn send_raw_transaction(&self, data: Bytes) -> RpcResult<B256> {
-        let tx_hash = alloy_primitives::keccak256(&data);
         let pending_tx = raw_tx_to_pending_rpc(&data)?;
+        let tx_hash = pending_tx.hash;
 
         let accepted = if let Some(ref submit) = self.tx_submit {
             submit(data).await?;
@@ -1304,13 +1304,13 @@ fn calculate_next_base_fee(
 }
 
 fn raw_tx_to_pending_rpc(data: &Bytes) -> Result<RpcTransaction, RpcError> {
-    let envelope = TxEnvelope::decode_2718(&mut data.as_ref())
+    let envelope = TxEnvelope::decode_2718_exact(data.as_ref())
         .map_err(|err| RpcError::InvalidTransaction(format!("failed to decode: {err}")))?;
     let from = envelope
         .recover_signer()
         .map_err(|err| RpcError::InvalidTransaction(format!("failed to recover signer: {err}")))?;
     let signature = envelope.signature();
-    let hash = alloy_primitives::keccak256(data);
+    let hash = *envelope.tx_hash();
 
     Ok(RpcTransaction {
         hash,
@@ -1388,7 +1388,7 @@ mod tests {
     use std::collections::HashMap;
 
     use alloy_consensus::{SignableTransaction as _, TxEip1559};
-    use alloy_eips::eip2718::Encodable2718 as _;
+    use alloy_eips::eip2718::{Decodable2718 as _, Encodable2718 as _};
     use alloy_primitives::{Signature, TxKind};
     use async_trait::async_trait;
     use k256::ecdsa::SigningKey;
@@ -2355,9 +2355,10 @@ mod tests {
         let tx_data = signed_test_tx(1, 0);
         let result = EthApiServer::send_raw_transaction(&api, tx_data.clone()).await;
 
+        let envelope = TxEnvelope::decode_2718_exact(tx_data.as_ref()).unwrap();
         assert!(result.is_ok());
         assert!(submitted.load(std::sync::atomic::Ordering::Relaxed));
-        assert_eq!(result.unwrap(), alloy_primitives::keccak256(&tx_data));
+        assert_eq!(result.unwrap(), *envelope.tx_hash());
     }
 
     #[tokio::test]
@@ -2396,6 +2397,24 @@ mod tests {
         assert!(result.is_err());
         assert!(pending_rx.try_recv().is_err());
         assert!(mempool_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn raw_transaction_with_trailing_bytes_is_rejected() {
+        let submitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let submitted_clone = submitted.clone();
+        let callback: TxSubmitCallback = Arc::new(move |_| {
+            submitted_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+            Box::pin(async { Ok(()) })
+        });
+        let api = EthApiImpl::with_tx_submit(1, NoopStateProvider, callback);
+        let mut tx_data = signed_test_tx(1, 0).to_vec();
+        tx_data.push(0);
+
+        let result = EthApiServer::send_raw_transaction(&api, tx_data.into()).await;
+
+        assert!(result.is_err());
+        assert!(!submitted.load(std::sync::atomic::Ordering::Relaxed));
     }
 
     #[tokio::test]

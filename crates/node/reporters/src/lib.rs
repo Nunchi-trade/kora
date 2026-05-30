@@ -1064,7 +1064,7 @@ fn index_finalized_block(
     let tx_envelopes: Vec<TxEnvelope> = block
         .txs
         .iter()
-        .filter_map(|tx| TxEnvelope::decode_2718(&mut tx.bytes.as_ref()).ok())
+        .filter_map(|tx| TxEnvelope::decode_2718_exact(tx.bytes.as_ref()).ok())
         .collect();
     let transactions_root = calculate_transaction_root(&tx_envelopes);
 
@@ -1197,7 +1197,7 @@ fn index_finalized_block(
 }
 
 fn decode_tx_metadata(tx_bytes: &Bytes) -> Option<TxMetadata> {
-    let envelope = match TxEnvelope::decode_2718(&mut tx_bytes.as_ref()) {
+    let envelope = match TxEnvelope::decode_2718_exact(tx_bytes.as_ref()) {
         Ok(envelope) => envelope,
         Err(err) => {
             warn!(error = %err, "failed to decode finalized transaction for indexing");
