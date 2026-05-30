@@ -7,6 +7,15 @@
   changed_when: true
   failed_when: false
 
+- name: Check if peer config exists
+  ansible.builtin.shell: |
+    docker volume inspect "{{ compose_project_name }}_shared_config" >/dev/null 2>&1 || exit 1
+    docker run --rm -v "{{ compose_project_name }}_shared_config:/shared" alpine \
+      test -f /shared/peers.json || exit 1
+  register: config_check
+  changed_when: false
+  failed_when: false
+
 - name: Check if DKG shares exist
   ansible.builtin.shell: |
     for i in 0 1 2 3; do
@@ -19,13 +28,22 @@
   changed_when: false
   failed_when: false
 
-- name: Run init-config (trusted dealer DKG)
+- name: Run init-config (trusted dealer - full setup + DKG)
   ansible.builtin.command:
     cmd: docker compose -f {{ compose_file }} run --rm init-config
   environment:
     RUST_LOG: "{{ rust_log }}"
     CHAIN_ID: "{{ chain_id }}"
-  when: dkg_check.rc != 0 and dkg_mode == "trusted"
+  when: dkg_check.rc != 0 and config_check.rc != 0 and dkg_mode == "trusted"
+  changed_when: true
+
+- name: Run init-dkg-deal (trusted dealer - shares only, config cached)
+  ansible.builtin.command:
+    cmd: docker compose -f {{ compose_file }} run --rm init-dkg-deal
+  environment:
+    RUST_LOG: "{{ rust_log }}"
+    CHAIN_ID: "{{ chain_id }}"
+  when: dkg_check.rc != 0 and config_check.rc == 0 and dkg_mode == "trusted"
   changed_when: true
 
 - name: Run init-setup (interactive DKG - setup only)
@@ -83,6 +101,7 @@
       docker run --rm -v "${volume}:/data" alpine rm -rf /data/runtime 2>/dev/null || true
     done
   changed_when: true
+  when: devnet_keep_state | default(false) | bool == false
 
 - name: Clear startup barrier
   ansible.builtin.shell: |

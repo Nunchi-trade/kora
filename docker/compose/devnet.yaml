@@ -133,6 +133,33 @@ services:
       - data_secondary0:/shared/secondary0
       - startup_barrier:/barrier
 
+  # DKG-deal only: generates threshold shares without re-running setup.
+  # Used when peer config already exists but shares are missing or cleared.
+  init-dkg-deal:
+    <<: *node-common
+    user: root
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        if [ -f /shared/node0/share.key ] && [ -f /shared/node0/output.json ]; then
+            echo "[init] DKG already completed, skipping"
+            exit 0
+        fi
+        echo "[init] Running trusted dealer DKG (setup already exists)..." && \
+        /usr/local/bin/keygen dkg-deal \
+          --validators=4 \
+          --output-dir=/shared && \
+        echo "[init] Setting permissions..." && \
+        chown -R 1000:1000 /shared/node0 /shared/node1 /shared/node2 /shared/node3 /shared/secondary0 && \
+        echo "[init] DKG-deal complete"
+    volumes:
+      - shared_config:/shared
+      - data_node0:/shared/node0
+      - data_node1:/shared/node1
+      - data_node2:/shared/node2
+      - data_node3:/shared/node3
+      - data_secondary0:/shared/secondary0
+
   # Interactive DKG nodes - run ceremony then exit
   dkg-node0:
     <<: *node-common

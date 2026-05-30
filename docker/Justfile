@@ -4,9 +4,15 @@ default:
     @just --list
 
 build:
+    GIT_SHA=$(git -C .. rev-parse HEAD 2>/dev/null || echo "unknown") \
+    GIT_SHA_SHORT=$(git -C .. rev-parse --short HEAD 2>/dev/null || echo "unknown") \
+    BUILD_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ") \
     docker buildx bake --allow=fs.read=.. -f docker-bake.hcl kora-local
 
 build-fresh:
+    GIT_SHA=$(git -C .. rev-parse HEAD 2>/dev/null || echo "unknown") \
+    GIT_SHA_SHORT=$(git -C .. rev-parse --short HEAD 2>/dev/null || echo "unknown") \
+    BUILD_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ") \
     docker buildx bake --allow=fs.read=.. -f docker-bake.hcl kora-local --no-cache
 
 # Start devnet with interactive DKG (production-like)
@@ -32,6 +38,14 @@ down:
 reset:
     docker compose -f compose/devnet.yaml --profile observability --profile interactive-dkg down -v
     @echo "Devnet reset. Next 'just devnet' runs fresh DKG."
+
+# Restart devnet preserving runtime state (QMDB, archives)
+restart-keep-state:
+    ./scripts/devnet-run.sh --interactive-dkg --keep-state
+
+# Restart devnet with forced state wipe
+restart-clean:
+    ./scripts/devnet-run.sh --interactive-dkg --force-clean
 
 restart: down devnet
 

@@ -3,5 +3,6 @@
 - name: Start observability
   hosts: devnet
   become: true
+  become_user: "{{ kora_user }}"
   roles:
     - observe
