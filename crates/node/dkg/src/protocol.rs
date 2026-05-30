@@ -896,7 +896,10 @@ impl DkgParticipant {
     /// Re-queue messages that failed to send so they can be retried on the
     /// next call to [`Self::take_outgoing`].  Messages are prepended so they
     /// are attempted before any newly generated messages.
-    pub fn requeue_messages(&mut self, mut msgs: Vec<(Option<ed25519::PublicKey>, ProtocolMessage)>) {
+    pub fn requeue_messages(
+        &mut self,
+        mut msgs: Vec<(Option<ed25519::PublicKey>, ProtocolMessage)>,
+    ) {
         msgs.append(&mut self.outgoing);
         self.outgoing = msgs;
     }
