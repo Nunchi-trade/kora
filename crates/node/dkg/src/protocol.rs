@@ -138,12 +138,11 @@ pub enum ProtocolMessageKind {
 
 /// Message envelope that wraps protocol messages with session binding.
 ///
-/// All messages include a session_id for anti-replay protection, except for
-/// legacy messages which have `session_id` set to `None` for backward compatibility.
+/// All messages must include a session_id for anti-replay protection.
 #[derive(Debug, Clone)]
 pub struct ProtocolMessage {
     /// Session ID binding this message to a specific ceremony.
-    /// `None` indicates a legacy message without session binding (logged as warning).
+    /// `None` indicates a legacy message without session binding (rejected on receipt).
     pub session_id: Option<[u8; 32]>,
     /// The actual protocol message content.
     pub kind: ProtocolMessageKind,
@@ -153,11 +152,6 @@ impl ProtocolMessage {
     /// Create a new message with session binding.
     pub const fn new(session_id: [u8; 32], kind: ProtocolMessageKind) -> Self {
         Self { session_id: Some(session_id), kind }
-    }
-
-    /// Create a legacy message without session binding (for backward compatibility).
-    pub const fn legacy(kind: ProtocolMessageKind) -> Self {
-        Self { session_id: None, kind }
     }
 
     /// Serialize the message to bytes.
@@ -501,6 +495,13 @@ impl DkgParticipant {
         let msg = ProtocolMessage::from_bytes(bytes, self.config.n() as u32)
             .map_err(|e| DkgError::InvalidMessage(format!("Failed to decode: {:?}", e)))?;
 
+        // Validate sender is a known participant before inserting into
+        // seen_messages to prevent non-participants from exhausting memory.
+        if !self.is_participant(from) {
+            warn!(?from, "Rejecting message from non-participant (pre-dedup)");
+            return Err(DkgError::UnknownSender { sender: format!("{:?}", from) });
+        }
+
         match &msg.session_id {
             Some(session_id) => {
                 if *session_id != self.session.ceremony_id {
@@ -517,11 +518,20 @@ impl DkgParticipant {
                 }
             }
             None => {
-                warn!(
-                    ?from,
-                    "Received legacy message without session ID - accepting for backward compatibility"
-                );
+                warn!(?from, "Rejecting message without session ID");
+                return Err(DkgError::SessionMismatch {
+                    expected: hex::encode(self.session.ceremony_id),
+                    received: String::from("<none>"),
+                });
             }
+        }
+
+        // Cap seen_messages to prevent unbounded growth under adversarial conditions.
+        // With N participants, legitimate messages are bounded by ~30*N per phase.
+        const MAX_SEEN_MESSAGES: usize = 10_000;
+        if self.seen_messages.len() >= MAX_SEEN_MESSAGES {
+            warn!("seen_messages capacity reached, rejecting message");
+            return Err(DkgError::InvalidMessage("deduplication set full".into()));
         }
 
         self.seen_messages.insert(message_hash);
@@ -906,9 +916,28 @@ impl DkgParticipant {
         self.config.participants.contains(pk)
     }
 
-    /// Get the leader (participant at index 0).
+    /// Get the leader for this ceremony.
+    ///
+    /// The leader is derived from the ceremony_id so that different ceremonies
+    /// rotate the coordinator role across participants, avoiding a single point
+    /// of failure at `participants[0]`.
     fn leader(&self) -> &ed25519::PublicKey {
-        &self.config.participants[0]
+        let leader_idx = self.leader_index();
+        &self.config.participants[leader_idx]
+    }
+
+    /// Public accessor for the leader's public key (used by ceremony runner).
+    pub fn leader_pk(&self) -> &ed25519::PublicKey {
+        self.leader()
+    }
+
+    /// Compute the leader index from the ceremony_id.
+    fn leader_index(&self) -> usize {
+        // Use the first 8 bytes of ceremony_id as a u64 seed for rotation.
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&self.session.ceremony_id[..8]);
+        let seed = u64::from_le_bytes(bytes);
+        (seed as usize) % self.config.participants.len()
     }
 
     /// Count of dealers we've received both pub and priv messages from.

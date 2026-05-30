@@ -124,8 +124,20 @@ pub(crate) fn run(args: DkgDealArgs) -> Result<()> {
             participants: args.validators,
             participant_keys: participant_keys.clone(),
         };
+        // Write output.json with explicit 0640 permissions for defense-in-depth.
         let output_path = node_dir.join("output.json");
-        fs::write(&output_path, serde_json::to_string_pretty(&output_json)?)?;
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut f = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o640)
+                .open(&output_path)
+                .wrap_err_with(|| format!("Failed to create output.json for node{}", i))?;
+            f.write_all(serde_json::to_string_pretty(&output_json)?.as_bytes())
+                .wrap_err_with(|| format!("Failed to write output.json for node{}", i))?;
+        }
 
         let share_json = ShareJson { index: share.index.get(), secret: hex::encode(&share_bytes) };
         let share_path = node_dir.join("share.key");

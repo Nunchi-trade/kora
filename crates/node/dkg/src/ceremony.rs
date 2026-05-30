@@ -49,7 +49,6 @@ impl DkgCeremony {
             validator_index = self.config.validator_index,
             n = self.config.n(),
             quorum = self.config.t(),
-            is_leader = self.is_leader(),
             force_restart = self.force_restart,
             "Starting interactive DKG ceremony (quorum determined by N3f1)"
         );
@@ -73,12 +72,27 @@ impl DkgCeremony {
         self.wait_for_peers(&network).await?;
 
         // Generate a deterministic timestamp for the ceremony.
-        // In production, this should be coordinated via the leader or a shared clock.
-        // For now, we round down to 5-minute intervals for coordination tolerance.
+        // We round down to 15-minute intervals for coordination tolerance.
+        // If we are within 30 seconds of a boundary, wait until the next interval
+        // starts so that peers with slight clock skew land in the same window.
         let timestamp_nanos = {
+            let interval = 15 * 60 * 1_000_000_000u64; // 15 minutes in nanos
+            let grace = 30 * 1_000_000_000u64; // 30 seconds in nanos
             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64;
-            let interval = 5 * 60 * 1_000_000_000u64; // 5 minutes in nanos
-            (now / interval) * interval
+            let offset = now % interval;
+            if offset > interval - grace {
+                // Too close to the next boundary -- wait and use the next interval.
+                let wait = interval - offset;
+                info!(
+                    wait_ms = wait / 1_000_000,
+                    "Near timestamp boundary, waiting for next interval"
+                );
+                tokio::time::sleep(Duration::from_nanos(wait)).await;
+                let now2 = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64;
+                (now2 / interval) * interval
+            } else {
+                (now / interval) * interval
+            }
         };
 
         // Try to restore from persisted state, or create new participant
@@ -353,11 +367,13 @@ impl DkgCeremony {
                 return Ok(());
             }
 
-            // Request logs from leader if we don't have enough and haven't requested recently
-            if !self.is_leader()
+            // Request logs from leader if we don't have enough and haven't requested recently.
+            // The leader is derived from ceremony_id so it rotates per ceremony.
+            let leader_pk = participant.leader_pk();
+            let my_pk = self.config.my_public_key();
+            if my_pk != *leader_pk
                 && logs < required
                 && last_request_time.elapsed() >= Duration::from_secs(5)
-                && let Some(leader_pk) = self.config.participants.first()
             {
                 info!(logs, required, "Requesting dealer logs from leader");
                 let request_msg = ProtocolMessage::new(
@@ -388,20 +404,24 @@ impl DkgCeremony {
         )))
     }
 
-    /// Check if this node is the leader (coordinator).
-    const fn is_leader(&self) -> bool {
-        self.config.validator_index == 0
-    }
-
     /// Wait for peers to be reachable.
+    ///
+    /// The wait duration defaults to 10 seconds but can be overridden via the
+    /// `KORA_DKG_PEER_WAIT_SECS` environment variable for container environments
+    /// where startup takes longer.
     async fn wait_for_peers(&self, _network: &DkgNetwork) -> Result<(), DkgError> {
-        info!("Waiting for peers to be ready...");
+        let wait_secs = std::env::var("KORA_DKG_PEER_WAIT_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(10);
+
+        info!(wait_secs, "Waiting for peers to be ready...");
 
         let start = Instant::now();
 
         // Give all DKG containers time to join the p2p overlay before the phase-1
         // broadcasts, which are not replayed if sent before peers are reachable.
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        tokio::time::sleep(Duration::from_secs(wait_secs)).await;
 
         info!(elapsed = ?start.elapsed(), "Peer initialization complete");
         Ok(())

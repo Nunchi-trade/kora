@@ -127,16 +127,26 @@ fn test_protocol_message_serialization() {
 }
 
 #[test]
-fn test_legacy_message_serialization() {
-    // Test that legacy messages (without session_id) can be serialized and deserialized
-    let legacy_msg = ProtocolMessage::legacy(ProtocolMessageKind::RequestLogs);
+fn test_legacy_message_rejected() {
+    // Legacy messages (without session_id) can still be deserialized at the wire level,
+    // but handle_message_bytes must reject them to prevent replay attacks.
+    let legacy_msg = ProtocolMessage { session_id: None, kind: ProtocolMessageKind::RequestLogs };
     let bytes = legacy_msg.to_bytes();
 
     let max_degree = 3;
     let decoded = ProtocolMessage::from_bytes(&bytes, max_degree).expect("should decode legacy");
-
     assert!(decoded.session_id.is_none(), "legacy message should have no session_id");
-    assert!(matches!(decoded.kind, ProtocolMessageKind::RequestLogs));
+
+    // Verify that a participant rejects the legacy message
+    let keys = generate_test_keys(4, 42);
+    let config = make_test_config(&keys, 0, 40250);
+    let mut participant =
+        DkgParticipant::new(config, TEST_TIMESTAMP).expect("should create participant");
+
+    let from_pk = keys[1].public_key();
+    let result = participant.handle_message_bytes(&from_pk, &bytes);
+    assert!(result.is_err(), "legacy messages should be rejected");
+    assert!(matches!(result.unwrap_err(), crate::DkgError::SessionMismatch { .. }));
 }
 
 #[test]
