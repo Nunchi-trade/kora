@@ -307,16 +307,15 @@ where
     // B256::ZERO for those heights.
     if let (Some(&(_, block_end)), Some(&(_, fin_end))) =
         (block_ranges.last(), finalization_ranges.last())
+        && fin_end < block_end
     {
-        if fin_end < block_end {
-            warn!(
-                block_archive_end = block_end,
-                finalization_archive_end = fin_end,
-                gap = block_end - fin_end,
-                "finalization archive is shorter than block archive; \
-                 seed data may be missing for recovered blocks in the gap"
-            );
-        }
+        warn!(
+            block_archive_end = block_end,
+            finalization_archive_end = fin_end,
+            gap = block_end - fin_end,
+            "finalization archive is shorter than block archive; \
+             seed data may be missing for recovered blocks in the gap"
+        );
     }
 
     for (start, end) in finalization_ranges {
@@ -1414,11 +1413,10 @@ impl NodeRunner for ProductionRunner {
                 None
             };
 
-        let marshal_start = if let Some(ref fin) = last_finalization {
-            commonware_consensus::marshal::Start::Floor(fin.clone())
-        } else {
-            commonware_consensus::marshal::Start::Genesis(ledger.genesis_block())
-        };
+        let marshal_start = last_finalization.as_ref().map_or_else(
+            || commonware_consensus::marshal::Start::Genesis(ledger.genesis_block()),
+            |fin| commonware_consensus::marshal::Start::Floor(fin.clone()),
+        );
 
         let scratch_context = NoSyncStorage::new(context.child("scratch"), checkpoint_interval);
         let (actor, marshal_mailbox, _last_processed_height) =
@@ -1510,11 +1508,10 @@ impl NodeRunner for ProductionRunner {
                 partition: self.partition_prefix.clone(),
                 mailbox_size: NZUsize!(MAILBOX_SIZE),
                 epoch: Epoch::zero(),
-                floor: if let Some(ref fin) = last_finalization {
-                    simplex::Floor::Finalized(fin.clone())
-                } else {
-                    simplex::Floor::Genesis(ledger.genesis_block().commitment())
-                },
+                floor: last_finalization.as_ref().map_or_else(
+                    || simplex::Floor::Genesis(ledger.genesis_block().commitment()),
+                    |fin| simplex::Floor::Finalized(fin.clone()),
+                ),
                 replay_buffer: simplex_config.replay_buffer_bytes,
                 write_buffer: simplex_config.write_buffer_bytes,
                 leader_timeout: Duration::from_secs(simplex_config.leader_timeout_secs.get()),

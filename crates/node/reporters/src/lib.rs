@@ -865,7 +865,7 @@ mod finalize_success_tests {
 
             let (ack, waiter) = Exact::handle();
 
-            handle_finalized_update(
+            let outcome = handle_finalized_update(
                 service.clone(),
                 context,
                 EmptySuccessExecutor,
@@ -880,6 +880,13 @@ mod finalize_success_tests {
                 Update::Block(block.clone(), ack),
             )
             .await;
+
+            // Mempool pruning is now the caller's responsibility (outside
+            // the finalize lock), mirroring how FinalizedReporter::report()
+            // does it.
+            if let Some(outcome) = outcome {
+                service.prune_mempool(&outcome.block.txs).await;
+            }
 
             // -- assert: mempool was pruned --
             assert_eq!(pool.len(), 0, "mempool must be pruned after successful finalization");

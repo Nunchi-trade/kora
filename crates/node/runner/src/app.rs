@@ -507,17 +507,17 @@ where
         // Height contiguity: verify that block height is exactly parent + 1.
         // This is a defense-in-depth check -- the consensus engine should
         // enforce this, but the application layer independently validates it.
-        if let Some(ph) = parent_height {
-            if block.height != ph + 1 {
-                warn!(
-                    ?digest,
-                    block_height = block.height,
-                    parent_height = ph,
-                    expected_height = ph + 1,
-                    "verify_block: height not contiguous with parent"
-                );
-                return false;
-            }
+        if let Some(ph) = parent_height
+            && block.height != ph + 1
+        {
+            warn!(
+                ?digest,
+                block_height = block.height,
+                parent_height = ph,
+                expected_height = ph + 1,
+                "verify_block: height not contiguous with parent"
+            );
+            return false;
         }
 
         if self.ledger.query_state_root(digest).await.is_some() {
