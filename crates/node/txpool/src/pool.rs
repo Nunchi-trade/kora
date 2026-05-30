@@ -300,6 +300,16 @@ impl TransactionPool {
             }
         }
 
+        let evicted_count = evicted_hashes.len();
+        if evicted_count > 0 {
+            let metrics_guard = self.metrics.read();
+            if let Some(ref m) = *metrics_guard {
+                for _ in 0..evicted_count {
+                    m.txpool_evicted.inc();
+                }
+            }
+        }
+
         self.sync_metrics();
 
         if inserted_evicted {
@@ -552,6 +562,14 @@ impl TransactionPool {
         inner.update_counts();
         drop(inner);
         if removed > 0 {
+            {
+                let metrics_guard = self.metrics.read();
+                if let Some(ref m) = *metrics_guard {
+                    for _ in 0..removed {
+                        m.txpool_expired.inc();
+                    }
+                }
+            }
             self.sync_metrics();
         }
         removed

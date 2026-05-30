@@ -436,6 +436,10 @@ where
             m.block_build_time.observe(total_elapsed.as_secs_f64());
             m.evm_execution_seconds.observe(exec_elapsed.as_secs_f64());
             m.block_txs_included.set(block.txs.len() as i64);
+            m.block_gas_used.observe(outcome.gas_used as f64);
+            if block.txs.is_empty() && mempool_len > excluded_len {
+                m.block_empty_with_pending.inc();
+            }
         }
 
         debug!(
@@ -632,6 +636,9 @@ where
                         self.ledger.restore_persisted_snapshot(block).await;
                         return true;
                     }
+                    if let Some(ref m) = self.metrics {
+                        m.verify_failure.inc();
+                    }
                     warn!(?digest, error = ?err, "execution failed");
                     return false;
                 }
@@ -656,6 +663,9 @@ where
                     );
                     self.ledger.restore_persisted_snapshot(block).await;
                     return true;
+                }
+                if let Some(ref m) = self.metrics {
+                    m.verify_failure.inc();
                 }
                 warn!(?digest, error = ?err, "compute root failed");
                 return false;
@@ -683,6 +693,9 @@ where
                 );
                 self.ledger.restore_persisted_snapshot(block).await;
                 return true;
+            }
+            if let Some(ref m) = self.metrics {
+                m.state_root_mismatch.inc();
             }
             warn!(
                 ?digest,
@@ -727,11 +740,12 @@ where
             );
         }
 
+        let total_elapsed = start.elapsed();
+
         if let Some(ref m) = self.metrics {
             m.evm_execution_seconds.observe(exec_elapsed.as_secs_f64());
+            m.block_verify_time.observe(total_elapsed.as_secs_f64());
         }
-
-        let total_elapsed = start.elapsed();
         debug!(
             ?digest,
             height = block.height,

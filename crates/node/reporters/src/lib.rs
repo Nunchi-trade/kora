@@ -10,7 +10,7 @@ use std::{
     fmt,
     marker::PhantomData,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use alloy_consensus::{
@@ -38,7 +38,7 @@ use kora_domain::{Block, ConsensusDigest, MempoolEvent, PublicKey, StateRoot};
 use kora_executor::{BlockContext, BlockExecutor, ExecutionOutcome};
 use kora_indexer::{BlockIndex, IndexedBlock, IndexedLog, IndexedReceipt, IndexedTransaction};
 use kora_ledger::{LedgerError, LedgerService};
-use kora_metrics::{AppMetrics, EquivocationTypeLabel};
+use kora_metrics::{AppMetrics, CauseLabel, EquivocationTypeLabel};
 use kora_overlay::OverlayState;
 use kora_qmdb_ledger::QmdbState;
 use kora_rpc::{MempoolEventSender, NodeState};
@@ -258,6 +258,7 @@ async fn handle_finalized_update<E, P>(
             }
             let persist_checkpoint =
                 checkpoint_interval <= 1 || block.height.is_multiple_of(checkpoint_interval);
+            let finalize_start = Instant::now();
             let result = finalize_with_retry(
                 &state,
                 &context,
@@ -268,13 +269,20 @@ async fn handle_finalized_update<E, P>(
                 persist_checkpoint,
             )
             .await;
+            let finalize_elapsed = finalize_start.elapsed();
 
             // Record finalization result in metrics.
             if let Some(ref m) = metrics {
                 if result.is_ok() {
                     m.blocks_finalized.inc();
+                    m.finalization_time.observe(finalize_elapsed.as_secs_f64());
                 } else {
                     m.finalization_failures.inc();
+                    if let Err(ref e) = result {
+                        m.finalization_failure_by_cause
+                            .get_or_create(&CauseLabel { cause: e.metric_label().to_string() })
+                            .inc();
+                    }
                 }
 
                 // Update snapshot store depth gauges so operators can detect
@@ -282,6 +290,15 @@ async fn handle_finalized_update<E, P>(
                 let (total, unpersisted) = state.snapshot_store_stats().await;
                 m.snapshot_store_total.set(total as i64);
                 m.unpersisted_snapshot_depth.set(unpersisted as i64);
+
+                // Track execution lag: how far finalized height lags behind
+                // the current consensus view (catchup indicator).
+                let finalized_h = block.height;
+                if let Some(ref ns) = node_state {
+                    let view = ns.view();
+                    let lag = view.saturating_sub(finalized_h);
+                    m.execution_lag.set(lag as i64);
+                }
             }
 
             // If finalization permanently failed, the node's QMDB state has
