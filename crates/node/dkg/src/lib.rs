@@ -26,6 +26,8 @@ pub use output::DkgOutput;
 mod protocol;
 pub use protocol::{CeremonySession, DkgParticipant, ProtocolMessage, ProtocolMessageKind};
 
+mod secret_file;
+
 mod state;
 pub use state::{DkgPhase, PersistedDkgState};
 

@@ -1,10 +1,10 @@
-use std::{path::PathBuf, time::Duration};
+use std::{fmt, path::PathBuf, time::Duration};
 
 use commonware_cryptography::ed25519;
 use commonware_utils::{Faults, N3f1};
 
 /// Configuration for a Distributed Key Generation (DKG) ceremony.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DkgConfig {
     /// The validator's private identity key used for signing and authentication.
     pub identity_key: ed25519::PrivateKey,
@@ -22,6 +22,21 @@ pub struct DkgConfig {
     pub bootstrap_peers: Vec<(ed25519::PublicKey, String)>,
     /// Timeout duration for DKG protocol rounds.
     pub timeout: Duration,
+}
+
+impl fmt::Debug for DkgConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DkgConfig")
+            .field("identity_key", &"<redacted>")
+            .field("validator_index", &self.validator_index)
+            .field("participants", &self.participants)
+            .field("chain_id", &self.chain_id)
+            .field("data_dir", &self.data_dir)
+            .field("listen_addr", &self.listen_addr)
+            .field("bootstrap_peers", &self.bootstrap_peers)
+            .field("timeout", &self.timeout)
+            .finish()
+    }
 }
 
 impl DkgConfig {
@@ -128,5 +143,13 @@ mod tests {
         assert_eq!(config.my_public_key(), cloned.my_public_key());
         assert_eq!(config.chain_id, cloned.chain_id);
         assert_eq!(config.validator_index, cloned.validator_index);
+    }
+
+    #[test]
+    fn test_debug_redacts_identity_key() {
+        let config = test_config();
+        let debug = format!("{config:?}");
+
+        assert!(debug.contains("identity_key: \"<redacted>\""));
     }
 }

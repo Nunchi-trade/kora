@@ -1,11 +1,11 @@
 //! DKG state persistence for crash recovery.
 
-use std::{collections::BTreeMap, io::Write as _, path::Path};
+use std::{collections::BTreeMap, path::Path};
 
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use crate::{CeremonySession, DkgError};
+use crate::{CeremonySession, DkgError, secret_file::write_secret_file};
 
 /// Current phase of the DKG protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,17 +183,4 @@ impl PersistedDkgState {
             })
             .collect()
     }
-}
-
-/// Write `data` to `path` with mode `0600` so DKG state is never world-readable.
-fn write_secret_file(path: &Path, data: &[u8]) -> Result<(), DkgError> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
-    f.write_all(data)?;
-    Ok(())
 }

@@ -3,7 +3,7 @@
 //! Generates all BLS12-381 threshold shares using a single trusted dealer.
 //! This is NOT secure for production but allows testing the validator workflow.
 
-use std::{fs, io::Write as _, path::PathBuf};
+use std::{fs, path::PathBuf};
 
 use clap::Args;
 use commonware_codec::{ReadExt, Write as _};
@@ -15,6 +15,8 @@ use commonware_utils::{Faults, N3f1, TryCollect, ordered::Set};
 use eyre::{Result, WrapErr};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
+
+use crate::secret_file::write_secret_file;
 
 #[derive(Args, Debug)]
 pub(crate) struct DkgDealArgs {
@@ -38,6 +40,12 @@ struct OutputJson {
 struct ShareJson {
     index: u32,
     secret: String,
+}
+
+impl Drop for ShareJson {
+    fn drop(&mut self) {
+        self.secret.zeroize();
+    }
 }
 
 pub(crate) fn run(args: DkgDealArgs) -> Result<()> {
@@ -141,7 +149,9 @@ pub(crate) fn run(args: DkgDealArgs) -> Result<()> {
 
         let share_json = ShareJson { index: share.index.get(), secret: share_hex };
         let share_path = node_dir.join("share.key");
-        write_secret_file(&share_path, serde_json::to_string_pretty(&share_json)?.as_bytes())?;
+        let mut share_content = serde_json::to_string_pretty(&share_json)?;
+        write_secret_file(&share_path, share_content.as_bytes())?;
+        share_content.zeroize();
 
         tracing::info!(node = i, "Wrote DKG output and share");
     }
@@ -156,17 +166,4 @@ pub(crate) fn run(args: DkgDealArgs) -> Result<()> {
     tracing::info!("  Quorum (N3f1): {}", quorum);
 
     Ok(())
-}
-
-/// Write `data` to `path` with mode `0600` so key material is never world-readable.
-fn write_secret_file(path: &std::path::Path, data: &[u8]) -> Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut f = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)
-        .wrap_err_with(|| format!("Failed to create secret file {}", path.display()))?;
-    f.write_all(data).wrap_err_with(|| format!("Failed to write secret file {}", path.display()))
 }

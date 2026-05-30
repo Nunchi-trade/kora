@@ -5,6 +5,7 @@ use eyre::Result;
 use tracing_subscriber::{EnvFilter, fmt};
 
 mod dkg_deal;
+mod secret_file;
 mod setup;
 
 #[derive(Parser, Debug)]
