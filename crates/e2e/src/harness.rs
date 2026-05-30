@@ -152,11 +152,14 @@ impl TestHarness {
         // Start simulated network
         let mut sim_control = start_network(&context, participants_set).await;
         sim_control
-            .connect_all(&participants_vec, SimLinkConfig {
-                latency: config.link.latency,
-                jitter: config.link.jitter,
-                success_rate: config.link.success_rate,
-            })
+            .connect_all(
+                &participants_vec,
+                SimLinkConfig {
+                    latency: config.link.latency,
+                    jitter: config.link.jitter,
+                    success_rate: config.link.success_rate,
+                },
+            )
             .await
             .context("connect_all")?;
         let sim_control = Arc::new(Mutex::new(sim_control));
@@ -216,12 +219,14 @@ async fn start_network(
     context: &tokio::Context,
     participants: Set<ed25519::PublicKey>,
 ) -> SimControl<ed25519::PublicKey> {
-    let (network, oracle) =
-        simulated::Network::new(SimContext::new(context.child("network")), simulated::Config {
+    let (network, oracle) = simulated::Network::new(
+        SimContext::new(context.child("network")),
+        simulated::Config {
             max_size: MAX_MSG_SIZE as u32,
             disconnect_on_block: true,
             tracked_peer_sets: NZUsize!(4),
-        });
+        },
+    );
     network.start();
 
     let control = SimControl::new(oracle);
