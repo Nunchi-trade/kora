@@ -20,6 +20,7 @@ use futures::StreamExt;
 use kora_consensus::{BlockExecution, SnapshotStore, components::InMemorySnapshotStore};
 use kora_domain::{Block, ConsensusDigest};
 use kora_executor::{BaseFeeParams, BlockContext, BlockExecutor, calculate_base_fee};
+use kora_indexer::BlockIndex;
 use kora_ledger::LedgerService;
 use kora_metrics::AppMetrics;
 use kora_overlay::OverlayState;
@@ -90,6 +91,7 @@ const CATCH_UP_THRESHOLD: u64 = 64;
 pub struct RevmApplication<S, E> {
     ledger: LedgerService,
     executor: E,
+    block_index: Arc<BlockIndex>,
     max_txs: usize,
     gas_limit: u64,
     fee_recipient: Address,
@@ -142,6 +144,7 @@ where
     pub fn new(
         ledger: LedgerService,
         executor: E,
+        block_index: Arc<BlockIndex>,
         max_txs: usize,
         gas_limit: u64,
         fee_recipient: Address,
@@ -152,6 +155,7 @@ where
         Self {
             ledger,
             executor,
+            block_index,
             max_txs,
             gas_limit,
             fee_recipient,
@@ -247,7 +251,8 @@ where
             base_fee_per_gas: Some(base_fee),
             ..Default::default()
         };
-        BlockContext::new(header, B256::ZERO, prevrandao)
+        let recent_hashes = self.block_index.recent_block_hashes(height);
+        BlockContext::new(header, B256::ZERO, prevrandao).with_recent_block_hashes(recent_hashes)
     }
 
     async fn get_prevrandao(&self, parent_digest: ConsensusDigest) -> B256 {

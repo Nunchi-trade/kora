@@ -49,10 +49,20 @@ impl BlockContext {
     /// Set the recent block hashes for BLOCKHASH opcode support.
     ///
     /// Retains at most 256 entries (the EVM BLOCKHASH depth limit).
+    /// When more than 256 entries are provided, the 256 entries with the
+    /// highest block numbers (most recent blocks) are retained.  This
+    /// ensures deterministic truncation regardless of `HashMap` iteration
+    /// order, which is randomized per-process.
     #[must_use]
     pub fn with_recent_block_hashes(mut self, hashes: HashMap<u64, B256>) -> Self {
         if hashes.len() > MAX_BLOCK_HASHES {
-            self.recent_block_hashes = hashes.into_iter().take(MAX_BLOCK_HASHES).collect();
+            // Retain only the MAX_BLOCK_HASHES entries with the highest
+            // block numbers.  Computing the cutoff via the max key avoids
+            // a full sort and keeps this O(n).
+            let max_block = hashes.keys().copied().max().unwrap_or(0);
+            let min_block = max_block.saturating_sub(MAX_BLOCK_HASHES as u64 - 1);
+            self.recent_block_hashes =
+                hashes.into_iter().filter(|(k, _)| *k >= min_block).collect();
         } else {
             self.recent_block_hashes = hashes;
         }
@@ -127,7 +137,7 @@ mod tests {
     }
 
     #[test]
-    fn block_context_with_recent_block_hashes_truncates() {
+    fn block_context_with_recent_block_hashes_truncates_to_most_recent() {
         let header = Header::default();
         let hashes: HashMap<u64, B256> =
             (0..300).map(|i| (i, B256::repeat_byte(i as u8))).collect();
@@ -135,6 +145,13 @@ mod tests {
         let context =
             BlockContext::new(header, B256::ZERO, B256::ZERO).with_recent_block_hashes(hashes);
         assert_eq!(context.recent_block_hashes.len(), MAX_BLOCK_HASHES);
+        // Must retain block numbers 44..=299 (the 256 highest)
+        for i in 44..300u64 {
+            assert!(context.recent_block_hashes.contains_key(&i), "missing block {i}");
+        }
+        for i in 0..44u64 {
+            assert!(!context.recent_block_hashes.contains_key(&i), "should not contain block {i}");
+        }
     }
 
     #[test]
