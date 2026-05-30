@@ -1315,12 +1315,8 @@ mod tests {
         // A transaction with the wrong chain_id should be skipped (not crash the block).
         let executor = RevmExecutor::new(42); // executor expects chain_id=42
         let state = MockStateDb;
-        let header = Header {
-            number: 1,
-            timestamp: 1000,
-            gas_limit: 30_000_000,
-            ..Header::default()
-        };
+        let header =
+            Header { number: 1, timestamp: 1000, gas_limit: 30_000_000, ..Header::default() };
         let context = BlockContext::new(header, B256::ZERO, B256::ZERO);
 
         let wrong_chain_tx = build_valid_tx(1, 0); // tx has chain_id=1
