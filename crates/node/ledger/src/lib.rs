@@ -485,10 +485,9 @@ impl LedgerView {
             if chain.is_empty() {
                 return Ok(false);
             }
-            if !inner.snapshots.can_persist_chain(&chain) {
+            if !inner.snapshots.try_mark_persisting_chain(&chain) {
                 return Ok(false);
             }
-            inner.snapshots.mark_persisting_chain(&chain);
             (changes, inner.qmdb.clone(), chain)
         };
 

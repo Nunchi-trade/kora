@@ -56,8 +56,10 @@ pub struct AppMetrics {
     // -- Block Building --
     /// Histogram of block build durations in seconds.
     pub block_build_time: Histogram,
+    /// Number of transactions included in the most recently built block.
+    pub block_txs_included: Gauge,
     /// Distribution of transactions included per block.
-    pub block_txs_included: Histogram,
+    pub block_txs_included_distribution: Histogram,
     /// Gas used in the most recently built block.
     pub block_gas_used: Gauge,
 
@@ -158,7 +160,8 @@ impl AppMetrics {
             txpool_queued: Gauge::default(),
             txpool_rejected: Family::default(),
             block_build_time: Histogram::new(BLOCK_BUILD_BUCKETS),
-            block_txs_included: Histogram::new(BLOCK_TXS_BUCKETS),
+            block_txs_included: Gauge::default(),
+            block_txs_included_distribution: Histogram::new(BLOCK_TXS_BUCKETS),
             block_gas_used: Gauge::default(),
             proposal_snapshot_misses: Counter::default(),
             proposal_lag_skips: Counter::default(),
@@ -217,8 +220,13 @@ impl AppMetrics {
         );
         registry.register(
             "kora_block_txs_included",
-            "Distribution of transactions included per block",
+            "Transactions in the most recently built block",
             self.block_txs_included.clone(),
+        );
+        registry.register(
+            "kora_block_txs_included_distribution",
+            "Distribution of transactions included per block",
+            self.block_txs_included_distribution.clone(),
         );
         registry.register(
             "kora_block_gas_used",
@@ -343,4 +351,56 @@ pub trait MetricsRegister {
         help: H,
         metric: impl prometheus_client::registry::Metric,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use prometheus_client::{encoding::text::encode, registry::Registry};
+
+    use super::*;
+
+    struct TestRegistry(Mutex<Registry>);
+
+    impl TestRegistry {
+        fn new() -> Self {
+            Self(Mutex::new(Registry::default()))
+        }
+
+        fn encode(&self) -> String {
+            let registry = self.0.lock().expect("registry mutex poisoned");
+            let mut output = String::new();
+            encode(&mut output, &registry).expect("encode metrics");
+            output
+        }
+    }
+
+    impl MetricsRegister for TestRegistry {
+        fn register<N: Into<String>, H: Into<String>>(
+            &self,
+            name: N,
+            help: H,
+            metric: impl prometheus_client::registry::Metric,
+        ) {
+            self.0.lock().expect("registry mutex poisoned").register(name, help, metric);
+        }
+    }
+
+    #[test]
+    fn block_txs_included_keeps_gauge_name_and_adds_distribution_histogram() {
+        let metrics = AppMetrics::new();
+        metrics.block_txs_included.set(7);
+        metrics.block_txs_included_distribution.observe(7.0);
+
+        let registry = TestRegistry::new();
+        metrics.register(&registry);
+
+        let output = registry.encode();
+        assert!(output.contains("# TYPE kora_block_txs_included gauge"));
+        assert!(output.contains("kora_block_txs_included 7"));
+        assert!(!output.contains("kora_block_txs_included_bucket"));
+        assert!(output.contains("# TYPE kora_block_txs_included_distribution histogram"));
+        assert!(output.contains("kora_block_txs_included_distribution_bucket"));
+    }
 }

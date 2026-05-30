@@ -43,7 +43,7 @@ use kora_overlay::OverlayState;
 use kora_qmdb_ledger::QmdbState;
 use kora_rpc::{MempoolEventSender, NodeState};
 use thiserror::Error;
-use tracing::{error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 #[cfg(test)]
 fn run_reporter_test<F, Fut>(f: F)
@@ -346,7 +346,7 @@ async fn handle_finalized_update<E, P>(
             publish_mempool_inclusions(mempool_broadcast.as_ref(), &block);
 
             let finalize_elapsed = finalize_start.elapsed();
-            info!(
+            debug!(
                 height = block.height,
                 tx_count = block.txs.len(),
                 finalize_duration_ms = finalize_elapsed.as_millis() as u64,

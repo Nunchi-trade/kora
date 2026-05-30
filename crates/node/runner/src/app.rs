@@ -401,7 +401,8 @@ where
         if let Some(ref m) = self.metrics {
             m.block_build_time.observe(total_elapsed.as_secs_f64());
             m.evm_execution_seconds.observe(exec_elapsed.as_secs_f64());
-            m.block_txs_included.observe(block.txs.len() as f64);
+            m.block_txs_included.set(block.txs.len() as i64);
+            m.block_txs_included_distribution.observe(block.txs.len() as f64);
             m.block_gas_used.set(outcome.gas_used as i64);
         }
 

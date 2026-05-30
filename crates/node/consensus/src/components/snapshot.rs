@@ -107,6 +107,22 @@ impl<S> InMemorySnapshotStore<S> {
         chain.iter().all(|digest| !persisted.contains(digest) && !persisting.contains(digest))
     }
 
+    /// Atomically check whether a chain can be persisted and mark it in-flight.
+    ///
+    /// Returns `false` if any digest is already persisted or being persisted by
+    /// another task.
+    pub fn try_mark_persisting_chain(&self, chain: &[Digest]) -> bool {
+        let persisted = self.persisted.read();
+        let mut persisting = self.persisting.write();
+        if chain.iter().any(|digest| persisted.contains(digest) || persisting.contains(digest)) {
+            return false;
+        }
+        for digest in chain {
+            persisting.insert(*digest);
+        }
+        true
+    }
+
     /// Mark a chain as being persisted.
     pub fn mark_persisting_chain(&self, chain: &[Digest]) {
         let mut persisting = self.persisting.write();
@@ -392,6 +408,33 @@ mod tests {
 
         store.mark_persisted(&[digest]);
         assert!(!store.can_persist_chain(&[digest]));
+    }
+
+    #[test]
+    fn try_mark_persisting_chain_is_atomic_for_competing_schedules() {
+        let store = InMemorySnapshotStore::<MockStateDb>::new();
+
+        let d1 = make_digest(0x01);
+        let d2 = make_digest(0x02);
+        let chain = [d1, d2];
+
+        assert!(store.try_mark_persisting_chain(&chain));
+        assert!(!store.try_mark_persisting_chain(&chain));
+
+        store.clear_persisting_chain(&chain);
+        assert!(store.try_mark_persisting_chain(&chain));
+    }
+
+    #[test]
+    fn try_mark_persisting_chain_rejects_persisted_digest() {
+        let store = InMemorySnapshotStore::<MockStateDb>::new();
+
+        let d1 = make_digest(0x01);
+        let d2 = make_digest(0x02);
+        store.mark_persisted(&[d1]);
+
+        assert!(!store.try_mark_persisting_chain(&[d1, d2]));
+        assert!(store.can_persist_chain(&[d2]));
     }
 
     fn make_digest(byte: u8) -> Digest {
