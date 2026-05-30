@@ -419,17 +419,15 @@ impl<S: StateDb> BlockExecutor<S> for RevmExecutor {
                     }
                 };
 
-                // Enforce block gas limit: if this transaction would exceed the
-                // block's gas capacity we exclude it from execution and emit a
-                // placeholder failed receipt to preserve the invariant that
-                // `receipts[i]` always corresponds to `txs[i]`.  We `continue`
-                // rather than `break` so that every subsequent transaction also
-                // gets a placeholder, keeping `receipts.len() == txs.len()`.
+                // Enforce block gas limit: if this transaction would exceed
+                // the block's gas capacity, the remaining suffix is not part
+                // of the executed block. Downstream code uses
+                // `included_tx_count` to truncate proposals and reject
+                // externally supplied blocks that include such a suffix.
                 let tx_gas_limit = tx_env.gas_limit;
                 if cumulative_gas.saturating_add(tx_gas_limit) > context.header.gas_limit {
                     warn!(hash = ?tx_hash, gas_limit = tx_gas_limit, cumulative = cumulative_gas, block_limit = context.header.gas_limit, "skipping transaction exceeding block gas limit");
-                    outcome.receipts.push(build_skipped_receipt(tx_hash, cumulative_gas));
-                    continue;
+                    break;
                 }
                 evm.set_tx(tx_env);
 
@@ -468,6 +466,7 @@ impl<S: StateDb> BlockExecutor<S> for RevmExecutor {
             }
 
             outcome.gas_used = cumulative_gas;
+            outcome.included_tx_count = outcome.receipts.len();
         }
 
         // Check the side-channel flag for DatabaseCommit failures.
@@ -674,9 +673,9 @@ fn convert_authorization_list(
 
 /// Build a placeholder failed receipt for a skipped transaction.
 ///
-/// This preserves index alignment between transactions and receipts so that
-/// downstream code (e.g. reporters) can use the receipt index as the
-/// transaction index.
+/// This preserves index alignment for transactions that stay in the executed
+/// prefix, such as undecodable or unexecutable inputs. Gas-limit suffixes are
+/// excluded instead of represented by placeholders.
 const fn build_skipped_receipt(tx_hash: B256, cumulative_gas_used: u64) -> ExecutionReceipt {
     ExecutionReceipt::new(tx_hash, false, 0, cumulative_gas_used, Vec::new(), None)
 }

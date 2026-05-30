@@ -18,7 +18,7 @@ use commonware_cryptography::{Committable as _, certificate::Scheme as CertSchem
 use commonware_runtime::{Clock, Metrics, Spawner};
 use futures::StreamExt;
 use kora_consensus::{BlockExecution, SnapshotStore, components::InMemorySnapshotStore};
-use kora_domain::{Block, ConsensusDigest};
+use kora_domain::{Block, ConsensusDigest, Tx};
 use kora_executor::{BaseFeeParams, BlockContext, BlockExecutor, calculate_base_fee};
 use kora_ledger::LedgerService;
 use kora_metrics::AppMetrics;
@@ -64,6 +64,13 @@ const MAX_PROPOSAL_LAG: u64 = 64;
 
 fn unix_timestamp_secs<Env: Clock>(env: &Env) -> u64 {
     env.current().duration_since(UNIX_EPOCH).map(|duration| duration.as_secs()).unwrap_or(0)
+}
+
+fn truncate_txs_to_included_prefix(txs: &mut Vec<Tx>, included_tx_count: usize) -> usize {
+    let original_len = txs.len();
+    let included_len = included_tx_count.min(original_len);
+    txs.truncate(included_len);
+    original_len - included_len
 }
 
 /// Number of blocks the network must advance PAST the recovered height
@@ -316,7 +323,7 @@ where
         };
         let mempool_len = mempool.len();
         let excluded_len = excluded.len();
-        let txs = mempool.build(self.max_txs, &excluded);
+        let mut txs = mempool.build(self.max_txs, &excluded);
 
         // Diagnostic: when the producer builds an empty block while there are
         // unincluded txs in the mempool, something is wrong (e.g. RPC tx_submit
@@ -383,6 +390,18 @@ where
             }
         };
         let exec_elapsed = exec_start.elapsed();
+
+        let dropped_txs = truncate_txs_to_included_prefix(&mut txs, outcome.included_tx_count);
+        if dropped_txs > 0 {
+            warn!(
+                height,
+                included_txs = txs.len(),
+                dropped_txs,
+                gas_limit = self.gas_limit,
+                gas_used = outcome.gas_used,
+                "build_block: truncated gas-skipped transaction suffix"
+            );
+        }
 
         let root_start = Instant::now();
         let state_root =
@@ -616,6 +635,17 @@ where
                 }
             };
         let exec_elapsed = exec_start.elapsed();
+
+        if execution.outcome.included_tx_count != block.txs.len() {
+            warn!(
+                ?digest,
+                height = block.height,
+                block_txs = block.txs.len(),
+                included_txs = execution.outcome.included_tx_count,
+                "verify_block: rejecting block with gas-skipped transaction suffix"
+            );
+            return false;
+        }
 
         let root_start = Instant::now();
         let state_root = match self
@@ -911,5 +941,39 @@ where
 
             true
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy_primitives::Bytes;
+    use kora_domain::Tx;
+
+    use super::truncate_txs_to_included_prefix;
+
+    #[test]
+    fn truncate_txs_to_included_prefix_drops_suffix() {
+        let mut txs = vec![
+            Tx::new(Bytes::from_static(&[0x01])),
+            Tx::new(Bytes::from_static(&[0x02])),
+            Tx::new(Bytes::from_static(&[0x03])),
+        ];
+
+        let dropped = truncate_txs_to_included_prefix(&mut txs, 2);
+
+        assert_eq!(dropped, 1);
+        assert_eq!(txs.len(), 2);
+        assert_eq!(txs[0].bytes, Bytes::from_static(&[0x01]));
+        assert_eq!(txs[1].bytes, Bytes::from_static(&[0x02]));
+    }
+
+    #[test]
+    fn truncate_txs_to_included_prefix_caps_overreported_count() {
+        let mut txs = vec![Tx::new(Bytes::from_static(&[0x01]))];
+
+        let dropped = truncate_txs_to_included_prefix(&mut txs, 2);
+
+        assert_eq!(dropped, 0);
+        assert_eq!(txs.len(), 1);
     }
 }

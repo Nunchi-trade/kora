@@ -677,21 +677,16 @@ fn test_execute_enforces_block_gas_limit() {
     let outcome =
         executor.execute(&state, &context, &[tx1, tx2, tx3]).expect("execution should succeed");
 
-    // All 3 transactions should have receipts to preserve index alignment.
-    // The first 2 succeed; the third gets a placeholder failed receipt because
-    // it exceeds the block gas limit.
+    // Only the gas-fitting prefix is included. The third transaction is a
+    // skipped suffix and must not receive a fabricated receipt.
     assert_eq!(
         outcome.receipts.len(),
-        3,
-        "receipt count must match transaction count for index alignment"
+        2,
+        "receipts must cover only the included transaction prefix"
     );
+    assert_eq!(outcome.included_tx_count, 2, "only the first two transactions are included");
     assert!(outcome.receipts[0].success(), "first transaction should succeed");
     assert!(outcome.receipts[1].success(), "second transaction should succeed");
-    assert!(
-        !outcome.receipts[2].success(),
-        "third transaction should be a failed placeholder (gas limit exceeded)"
-    );
-    assert_eq!(outcome.receipts[2].gas_used, 0, "gas-excluded tx should use no gas");
     assert_eq!(outcome.gas_used, 42_000, "cumulative gas should equal 2 * 21_000");
 }
 
@@ -728,6 +723,7 @@ fn test_execute_within_gas_limit_processes_all_transactions() {
 
     // All 3 transactions should have been executed and all should succeed.
     assert_eq!(outcome.receipts.len(), 3, "all 3 transactions should execute within gas limit");
+    assert_eq!(outcome.included_tx_count, 3, "all transactions should be included");
     assert!(
         outcome.receipts.iter().all(|r| r.success()),
         "all executed transactions should succeed"
@@ -762,18 +758,13 @@ fn test_execute_single_tx_exceeding_block_gas_limit_produces_empty_outcome() {
 
     let outcome = executor.execute(&state, &context, &[tx]).expect("execution should succeed");
 
-    // The transaction should not have been executed, but should still get a
-    // placeholder receipt to preserve receipt-to-transaction index alignment.
+    // The transaction should not have been executed or included.
     assert_eq!(
         outcome.receipts.len(),
-        1,
-        "receipt count must match transaction count for index alignment"
+        0,
+        "a gas-excluded transaction must not have a placeholder receipt"
     );
-    assert!(
-        !outcome.receipts[0].success(),
-        "gas-excluded transaction should have a failed placeholder receipt"
-    );
-    assert_eq!(outcome.receipts[0].gas_used, 0, "gas-excluded tx should use no gas");
+    assert_eq!(outcome.included_tx_count, 0);
     assert_eq!(outcome.gas_used, 0);
 }
 
@@ -819,6 +810,7 @@ fn test_execute_signed_eip1559_transfer_verifies_state_changes() {
 
     // Exactly one receipt produced.
     assert_eq!(outcome.receipts.len(), 1, "should produce exactly one receipt");
+    assert_eq!(outcome.included_tx_count, 1, "the transaction should be included");
 
     // Transaction succeeded.
     assert!(outcome.receipts[0].success(), "transfer should succeed");
@@ -881,6 +873,7 @@ fn test_execute_multiple_signed_transfers_sequential_nonces() {
 
     // Both transactions should succeed.
     assert_eq!(outcome.receipts.len(), 2, "should produce two receipts");
+    assert_eq!(outcome.included_tx_count, 2, "both transactions should be included");
     assert!(outcome.receipts[0].success(), "first transfer should succeed");
     assert!(outcome.receipts[1].success(), "second transfer should succeed");
 

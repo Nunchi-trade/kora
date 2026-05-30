@@ -13,6 +13,12 @@ pub struct ExecutionOutcome {
     pub receipts: Vec<ExecutionReceipt>,
     /// Total gas used by all transactions.
     pub gas_used: u64,
+    /// Number of input transactions that were included in execution.
+    ///
+    /// This is equal to `receipts.len()` for normal execution. It can be
+    /// smaller than the proposed transaction slice when the block gas limit
+    /// truncates a trailing suffix before execution.
+    pub included_tx_count: usize,
     /// Addresses that were selfdestructed during block execution.
     ///
     /// These addresses had their code and balance removed, but their storage
@@ -30,6 +36,7 @@ impl ExecutionOutcome {
             changes: ChangeSet::new(),
             receipts: Vec::new(),
             gas_used: 0,
+            included_tx_count: 0,
             selfdestructed_addresses: Vec::new(),
         }
     }
@@ -95,6 +102,7 @@ mod tests {
         assert!(outcome.changes.is_empty());
         assert!(outcome.receipts.is_empty());
         assert_eq!(outcome.gas_used, 0);
+        assert_eq!(outcome.included_tx_count, 0);
         assert!(outcome.selfdestructed_addresses.is_empty());
     }
 }
