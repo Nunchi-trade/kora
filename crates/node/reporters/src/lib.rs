@@ -280,7 +280,7 @@ async fn handle_finalized_update<E, P>(
                     m.finalization_failures.inc();
                     if let Err(ref e) = result {
                         m.finalization_failure_by_cause
-                            .get_or_create(&CauseLabel { cause: e.metric_label().to_string() })
+                            .get_or_create(&CauseLabel { cause: e.metric_label() })
                             .inc();
                     }
                 }
@@ -1645,9 +1645,7 @@ where
                 self.state.inc_equivocations();
                 if let Some(ref m) = self.metrics {
                     m.equivocations
-                        .get_or_create(&EquivocationTypeLabel {
-                            r#type: "conflicting_notarize".into(),
-                        })
+                        .get_or_create(&EquivocationTypeLabel { r#type: "conflicting_notarize" })
                         .inc();
                 }
             }
@@ -1660,9 +1658,7 @@ where
                 self.state.inc_equivocations();
                 if let Some(ref m) = self.metrics {
                     m.equivocations
-                        .get_or_create(&EquivocationTypeLabel {
-                            r#type: "conflicting_finalize".into(),
-                        })
+                        .get_or_create(&EquivocationTypeLabel { r#type: "conflicting_finalize" })
                         .inc();
                 }
             }
@@ -1675,7 +1671,7 @@ where
                 self.state.inc_equivocations();
                 if let Some(ref m) = self.metrics {
                     m.equivocations
-                        .get_or_create(&EquivocationTypeLabel { r#type: "nullify_finalize".into() })
+                        .get_or_create(&EquivocationTypeLabel { r#type: "nullify_finalize" })
                         .inc();
                 }
             }

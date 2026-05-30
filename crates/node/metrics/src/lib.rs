@@ -15,6 +15,10 @@ use prometheus_client::metrics::{
 /// Default histogram buckets for block build time (seconds).
 const BLOCK_BUILD_BUCKETS: [f64; 9] = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0];
 
+/// Histogram buckets for the number of transactions included in a produced block.
+const BLOCK_TXS_INCLUDED_BUCKETS: [f64; 12] =
+    [0.0, 1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1_000.0, 5_000.0];
+
 /// Default histogram buckets for EVM execution time (seconds).
 ///
 /// Captures the time spent in the EVM executor (`BlockExecutor::execute`)
@@ -79,6 +83,8 @@ pub struct AppMetrics {
     pub block_build_time: Histogram,
     /// Number of transactions included in the most recently built block.
     pub block_txs_included: Gauge,
+    /// Histogram of transactions included per produced block.
+    pub block_txs_included_distribution: Histogram,
     /// Histogram of gas used per produced block.
     pub block_gas_used: Histogram,
     /// Number of empty blocks produced when there were pending transactions.
@@ -166,7 +172,7 @@ pub struct AppMetrics {
 #[derive(Clone, Debug, Hash, PartialEq, Eq, prometheus_client::encoding::EncodeLabelSet)]
 pub struct ReasonLabel {
     /// The rejection / error reason.
-    pub reason: String,
+    pub reason: &'static str,
 }
 
 /// Label set for equivocation metrics, distinguishing the type of Byzantine fault.
@@ -174,14 +180,14 @@ pub struct ReasonLabel {
 pub struct EquivocationTypeLabel {
     /// The equivocation type (`conflicting_notarize`, `conflicting_finalize`,
     /// `nullify_finalize`).
-    pub r#type: String,
+    pub r#type: &'static str,
 }
 
 /// Label set for finalization failure metrics, carrying a cause dimension.
 #[derive(Clone, Debug, Hash, PartialEq, Eq, prometheus_client::encoding::EncodeLabelSet)]
 pub struct CauseLabel {
     /// The cause of the finalization failure.
-    pub cause: String,
+    pub cause: &'static str,
 }
 
 impl AppMetrics {
@@ -197,6 +203,7 @@ impl AppMetrics {
             txpool_expired: Counter::default(),
             block_build_time: Histogram::new(BLOCK_BUILD_BUCKETS),
             block_txs_included: Gauge::default(),
+            block_txs_included_distribution: Histogram::new(BLOCK_TXS_INCLUDED_BUCKETS),
             block_gas_used: Histogram::new(BLOCK_GAS_BUCKETS),
             block_empty_with_pending: Counter::default(),
             block_verify_time: Histogram::new(BLOCK_VERIFY_BUCKETS),
@@ -271,6 +278,11 @@ impl AppMetrics {
             "kora_block_txs_included",
             "Transactions in the most recently built block",
             self.block_txs_included.clone(),
+        );
+        registry.register(
+            "kora_block_txs_included_distribution",
+            "Transactions included per produced block",
+            self.block_txs_included_distribution.clone(),
         );
         registry.register(
             "kora_block_gas_used",
@@ -415,4 +427,73 @@ pub trait MetricsRegister {
         help: H,
         metric: impl prometheus_client::registry::Metric,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use prometheus_client::{encoding::text::encode, registry::Registry};
+
+    use super::*;
+
+    #[derive(Default)]
+    struct TestRegistry(Mutex<Registry>);
+
+    impl TestRegistry {
+        fn encode(&self) -> String {
+            let mut encoded = String::new();
+            encode(&mut encoded, &self.0.lock().expect("registry lock poisoned"))
+                .expect("encode metrics");
+            encoded
+        }
+    }
+
+    impl MetricsRegister for TestRegistry {
+        fn register<N: Into<String>, H: Into<String>>(
+            &self,
+            name: N,
+            help: H,
+            metric: impl prometheus_client::registry::Metric,
+        ) {
+            self.0.lock().expect("registry lock poisoned").register(name, help, metric);
+        }
+    }
+
+    #[test]
+    fn app_metrics_preserve_existing_names_and_types() {
+        let metrics = AppMetrics::new();
+        metrics.block_txs_included.set(3);
+        metrics.block_txs_included_distribution.observe(3.0);
+        metrics.rpc_requests_total.inc();
+        metrics.rpc_rate_limited.inc();
+        metrics.txpool_rejected.get_or_create(&ReasonLabel { reason: "pool_full" }).inc();
+        metrics
+            .finalization_failure_by_cause
+            .get_or_create(&CauseLabel { cause: "persist_failed" })
+            .inc();
+        metrics
+            .equivocations
+            .get_or_create(&EquivocationTypeLabel { r#type: "conflicting_notarize" })
+            .inc();
+
+        let registry = TestRegistry::default();
+        metrics.register(&registry);
+        let encoded = registry.encode();
+
+        assert!(encoded.contains("# TYPE kora_block_txs_included gauge"));
+        assert!(encoded.contains("kora_block_txs_included 3"));
+        assert!(encoded.contains("# TYPE kora_block_txs_included_distribution histogram"));
+        assert!(encoded.contains("kora_block_txs_included_distribution_count 1"));
+        assert!(encoded.contains("# TYPE kora_rpc_requests counter"));
+        assert!(encoded.contains("kora_rpc_requests_total 1"));
+        assert!(encoded.contains("# TYPE kora_rpc_rate_limited counter"));
+        assert!(encoded.contains("kora_rpc_rate_limited_total 1"));
+        assert!(encoded.contains("kora_txpool_rejected_total{reason=\"pool_full\"} 1"));
+        assert!(
+            encoded
+                .contains("kora_finalization_failure_by_cause_total{cause=\"persist_failed\"} 1")
+        );
+        assert!(encoded.contains("kora_equivocations_total{type=\"conflicting_notarize\"} 1"));
+    }
 }

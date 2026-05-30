@@ -435,7 +435,9 @@ where
         if let Some(ref m) = self.metrics {
             m.block_build_time.observe(total_elapsed.as_secs_f64());
             m.evm_execution_seconds.observe(exec_elapsed.as_secs_f64());
-            m.block_txs_included.set(block.txs.len() as i64);
+            let txs_included = block.txs.len();
+            m.block_txs_included.set(txs_included as i64);
+            m.block_txs_included_distribution.observe(txs_included as f64);
             m.block_gas_used.observe(outcome.gas_used as f64);
             if block.txs.is_empty() && mempool_len > excluded_len {
                 m.block_empty_with_pending.inc();
