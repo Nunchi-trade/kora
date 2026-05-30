@@ -419,13 +419,17 @@ impl<S: StateDb> BlockExecutor<S> for RevmExecutor {
                     }
                 };
 
-                // Enforce block gas limit: we `break` (not `continue`) because Ethereum
-                // semantics stop inclusion at the gas limit — remaining txs are simply not
-                // included. Unlike decode failures above, gas-limited txs get no placeholder
-                // receipts, so `receipts.len()` may be less than `txs.len()`.
+                // Enforce block gas limit: if this transaction would exceed the
+                // block's gas capacity we exclude it from execution and emit a
+                // placeholder failed receipt to preserve the invariant that
+                // `receipts[i]` always corresponds to `txs[i]`.  We `continue`
+                // rather than `break` so that every subsequent transaction also
+                // gets a placeholder, keeping `receipts.len() == txs.len()`.
                 let tx_gas_limit = tx_env.gas_limit;
                 if cumulative_gas.saturating_add(tx_gas_limit) > context.header.gas_limit {
-                    break;
+                    warn!(hash = ?tx_hash, gas_limit = tx_gas_limit, cumulative = cumulative_gas, block_limit = context.header.gas_limit, "skipping transaction exceeding block gas limit");
+                    outcome.receipts.push(build_skipped_receipt(tx_hash, cumulative_gas));
+                    continue;
                 }
                 evm.set_tx(tx_env);
 
