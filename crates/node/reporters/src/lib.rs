@@ -1545,6 +1545,7 @@ mod tests {
         outcome.gas_used = 21_000;
         outcome.receipts =
             vec![ExecutionReceipt::new(tx_hash, true, 21_000, 21_000, vec![log], None)];
+        outcome.included_tx_count = 1;
 
         let index = BlockIndex::new();
         index_finalized_block(&index, &block, &block_context, &outcome);
