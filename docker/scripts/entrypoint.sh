@@ -28,6 +28,26 @@ shift || true
 log() { echo "[entrypoint] $*"; }
 error() { echo "[entrypoint] ERROR: $*" >&2; exit 1; }
 
+PRIVATE_IP_FLAG=()
+case "${ALLOW_PRIVATE_IPS:-false}" in
+    true|TRUE|1|yes|YES)
+        PRIVATE_IP_FLAG=(--allow-private-ips)
+        ;;
+    false|FALSE|0|no|NO|"")
+        ;;
+    *)
+        error "ALLOW_PRIVATE_IPS must be true or false"
+        ;;
+esac
+
+log_private_ip_mode() {
+    if [[ ${#PRIVATE_IP_FLAG[@]} -gt 0 ]]; then
+        log "Private IP P2P connections ENABLED"
+    else
+        log "Private IP P2P connections DISABLED (set ALLOW_PRIVATE_IPS=true to enable)"
+    fi
+}
+
 # Wait for at least one bootstrap peer from a comma-separated list to become
 # reachable.  With multi-bootstrap support a node can join the network through
 # any available bootstrapper, removing the single-bootstrap-node SPOF.
@@ -189,20 +209,21 @@ case "$MODE" in
         touch "${DATA_DIR}/.ready"
 
         TX_GOSSIP=${TX_GOSSIP:-false}
-        GOSSIP_FLAG=""
+        GOSSIP_FLAG=()
         if [[ "$TX_GOSSIP" == "true" ]]; then
-            GOSSIP_FLAG="--tx-gossip"
+            GOSSIP_FLAG=(--tx-gossip)
             log "Transaction gossip ENABLED"
         else
             log "Transaction gossip DISABLED (set TX_GOSSIP=true to enable)"
         fi
+        log_private_ip_mode
 
         exec /usr/local/bin/kora validator \
             --data-dir "$DATA_DIR" \
             --peers "${SHARED_DIR}/peers.json" \
             --chain-id "$CHAIN_ID" \
-            --allow-private-ips \
-            $GOSSIP_FLAG \
+            "${PRIVATE_IP_FLAG[@]}" \
+            "${GOSSIP_FLAG[@]}" \
             "$@"
         ;;
 
@@ -224,12 +245,13 @@ case "$MODE" in
         fi
 
         touch "${DATA_DIR}/.ready"
+        log_private_ip_mode
 
         exec /usr/local/bin/kora secondary \
             --data-dir "$DATA_DIR" \
             --peers "${SHARED_DIR}/peers.json" \
             --chain-id "$CHAIN_ID" \
-            --allow-private-ips \
+            "${PRIVATE_IP_FLAG[@]}" \
             "$@"
         ;;
 

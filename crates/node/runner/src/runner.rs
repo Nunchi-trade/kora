@@ -98,6 +98,12 @@ const TX_GOSSIP_VALIDATION_BUFFER: usize = 1024;
 /// Maximum transactions per second accepted from a single peer via gossip.
 const TX_GOSSIP_PER_PEER_RATE_LIMIT: u32 = 100;
 
+/// Maximum raw transaction gossip payload size.
+///
+/// Keep this aligned with the txpool ingress limit so oversized gossip is
+/// dropped before it reaches validation.
+const TX_GOSSIP_MAX_RAW_MESSAGE_SIZE: usize = PoolConfig::new().max_tx_size;
+
 /// Maximum transactions drained from the P2P channel per validation batch.
 const TX_GOSSIP_BATCH_SIZE: usize = 64;
 
@@ -738,9 +744,13 @@ impl GossipSeenSet {
         Self { current: HashSet::with_capacity(capacity / 2), previous: HashSet::new(), capacity }
     }
 
+    fn contains(&self, hash: &B256) -> bool {
+        self.current.contains(hash) || self.previous.contains(hash)
+    }
+
     /// Returns `true` if the hash was **not** previously present (i.e. it is new).
     fn mark_seen(&mut self, hash: B256) -> bool {
-        if self.current.contains(&hash) || self.previous.contains(&hash) {
+        if self.contains(&hash) {
             return false;
         }
         if self.current.len() >= self.capacity / 2 {
@@ -762,6 +772,38 @@ fn new_seen_set() -> SeenSet {
 /// Returns `true` if the hash was **not** previously present (i.e. it is new).
 fn mark_seen(seen: &SeenSet, hash: B256) -> bool {
     seen.lock().mark_seen(hash)
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum GossipValidationEnqueue {
+    Enqueued,
+    AlreadySeen,
+    QueueFull,
+    QueueClosed,
+}
+
+fn try_enqueue_gossip_validation(
+    seen: &SeenSet,
+    validation_tx: &tokio::sync::mpsc::Sender<bytes::Bytes>,
+    hash: B256,
+    raw: bytes::Bytes,
+) -> GossipValidationEnqueue {
+    let mut seen = seen.lock();
+    if seen.contains(&hash) {
+        return GossipValidationEnqueue::AlreadySeen;
+    }
+
+    match validation_tx.try_send(raw) {
+        Ok(()) => {
+            let inserted = seen.mark_seen(hash);
+            debug_assert!(inserted, "hash was checked while holding the seen-set lock");
+            GossipValidationEnqueue::Enqueued
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => GossipValidationEnqueue::QueueFull,
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+            GossipValidationEnqueue::QueueClosed
+        }
+    }
 }
 
 /// Periodically check peer connectivity and log warnings when the network
@@ -1087,7 +1129,7 @@ impl NodeRunner for ProductionRunner {
         app_metrics.register(&RuntimeMetrics(&context));
         txpool.set_metrics(app_metrics.clone());
         // -- Transaction gossip infrastructure --
-        let (gossip_outbound_tx, gossip_seen): (
+        let (gossip_outbound_tx, _gossip_seen): (
             Option<tokio::sync::mpsc::Sender<alloy_primitives::Bytes>>,
             Option<SeenSet>,
         ) = if config.network.tx_gossip {
@@ -1157,6 +1199,17 @@ impl NodeRunner for ProductionRunner {
 
                         in_metrics.gossip_tx_received.inc();
 
+                        if raw.len() > TX_GOSSIP_MAX_RAW_MESSAGE_SIZE {
+                            trace!(
+                                ?peer,
+                                size = raw.len(),
+                                max = TX_GOSSIP_MAX_RAW_MESSAGE_SIZE,
+                                "tx gossip: dropping oversized transaction"
+                            );
+                            in_metrics.gossip_tx_invalid.inc();
+                            continue;
+                        }
+
                         // Per-peer rate limiting (issue #025).
                         if rate_limiter.check_key(&peer).is_err() {
                             trace!(?peer, "tx gossip: rate-limited peer, dropping message");
@@ -1165,17 +1218,26 @@ impl NodeRunner for ProductionRunner {
                         }
 
                         let hash = keccak256(&raw);
-                        if !mark_seen(&seen, hash) {
-                            trace!(?hash, ?peer, "tx gossip: skipping already-seen transaction");
-                            continue;
-                        }
-
                         // Backpressure: if validation queue is full, drop the message
                         // rather than blocking the P2P receive loop (issue #161).
                         let raw_bytes: bytes::Bytes = raw.into();
-                        if validation_tx.try_send(raw_bytes).is_err() {
-                            trace!("tx gossip: validation queue full, dropping transaction");
-                            in_metrics.gossip_tx_invalid.inc();
+                        match try_enqueue_gossip_validation(&seen, &validation_tx, hash, raw_bytes) {
+                            GossipValidationEnqueue::Enqueued => {}
+                            GossipValidationEnqueue::AlreadySeen => {
+                                trace!(
+                                    ?hash,
+                                    ?peer,
+                                    "tx gossip: skipping already-seen transaction"
+                                );
+                            }
+                            GossipValidationEnqueue::QueueFull => {
+                                trace!("tx gossip: validation queue full, dropping transaction");
+                                in_metrics.gossip_tx_invalid.inc();
+                            }
+                            GossipValidationEnqueue::QueueClosed => {
+                                warn!("tx gossip: validation queue closed, stopping inbound handler");
+                                break;
+                            }
                         }
                     }
                 });
@@ -1321,12 +1383,10 @@ impl NodeRunner for ProductionRunner {
             let chain_id = self.chain_id;
             let tx_pool = txpool.clone();
             let gossip_tx = gossip_outbound_tx.clone();
-            let gossip_seen_rpc = gossip_seen.clone();
             let tx_submit: kora_rpc::TxSubmitCallback = Arc::new(move |data| {
                 let ledger = tx_ledger.clone();
                 let pool = tx_pool.clone();
                 let gossip = gossip_tx.clone();
-                let seen = gossip_seen_rpc.clone();
                 Box::pin(async move {
                     let tx = Tx::new(data.clone());
                     let tx_id = tx.id();
@@ -1341,12 +1401,10 @@ impl NodeRunner for ProductionRunner {
                     if ledger.submit_tx(tx).await {
                         debug!(?tx_id, "rpc submit: tx inserted into mempool");
                         // Forward to gossip if enabled.
-                        if let (Some(gossip), Some(seen)) = (&gossip, &seen) {
-                            let hash = keccak256(&data);
-                            mark_seen(seen, hash);
-                            if let Err(e) = gossip.try_send(data) {
-                                warn!(error = %e, "tx gossip: outbound channel full, skipping broadcast");
-                            }
+                        if let Some(gossip) = &gossip
+                            && let Err(e) = gossip.try_send(data)
+                        {
+                            warn!(error = %e, "tx gossip: outbound channel full, skipping broadcast");
                         }
                         Ok(())
                     } else {
@@ -1657,6 +1715,55 @@ mod tests {
 
         assert_eq!(block_cfg.max_txs, 512);
         assert_eq!(block_cfg.tx.max_tx_bytes, 4096);
+    }
+
+    #[test]
+    fn tx_gossip_max_raw_message_size_matches_txpool_default() {
+        assert_eq!(TX_GOSSIP_MAX_RAW_MESSAGE_SIZE, PoolConfig::new().max_tx_size);
+    }
+
+    #[test]
+    fn gossip_validation_enqueue_marks_seen_after_successful_enqueue() {
+        let seen = new_seen_set();
+        let (validation_tx, mut validation_rx) = tokio::sync::mpsc::channel(1);
+        let hash = B256::repeat_byte(0x44);
+        let raw = bytes::Bytes::from_static(b"tx");
+
+        assert_eq!(
+            try_enqueue_gossip_validation(&seen, &validation_tx, hash, raw.clone()),
+            GossipValidationEnqueue::Enqueued
+        );
+        assert!(seen.lock().contains(&hash));
+        assert_eq!(validation_rx.try_recv().expect("queued tx"), raw);
+        assert_eq!(
+            try_enqueue_gossip_validation(
+                &seen,
+                &validation_tx,
+                hash,
+                bytes::Bytes::from_static(b"duplicate")
+            ),
+            GossipValidationEnqueue::AlreadySeen
+        );
+    }
+
+    #[test]
+    fn gossip_validation_enqueue_does_not_mark_seen_when_queue_full() {
+        let seen = new_seen_set();
+        let (validation_tx, _validation_rx) = tokio::sync::mpsc::channel(1);
+        let hash = B256::repeat_byte(0x55);
+
+        validation_tx.try_send(bytes::Bytes::from_static(b"occupied")).expect("fill queue");
+
+        assert_eq!(
+            try_enqueue_gossip_validation(
+                &seen,
+                &validation_tx,
+                hash,
+                bytes::Bytes::from_static(b"tx")
+            ),
+            GossipValidationEnqueue::QueueFull
+        );
+        assert!(!seen.lock().contains(&hash));
     }
 
     #[test]
