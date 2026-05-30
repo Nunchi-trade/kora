@@ -1150,7 +1150,7 @@ fn block_gas_used_ratio(gas_used: u64, gas_limit: u64) -> f64 {
 fn validate_reward_percentiles(percentiles: &[f64]) -> RpcResult<()> {
     for p in percentiles {
         if !p.is_finite() || *p < 0.0 || *p > 100.0 {
-            return Err(RpcError::InvalidTransaction(
+            return Err(RpcError::InvalidParams(
                 "reward percentiles must be in [0, 100]".to_string(),
             )
             .into());
@@ -1158,7 +1158,7 @@ fn validate_reward_percentiles(percentiles: &[f64]) -> RpcResult<()> {
     }
     for w in percentiles.windows(2) {
         if w[0] > w[1] {
-            return Err(RpcError::InvalidTransaction(
+            return Err(RpcError::InvalidParams(
                 "reward percentiles must be monotonically non-decreasing".to_string(),
             )
             .into());
