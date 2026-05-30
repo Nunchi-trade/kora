@@ -1,6 +1,6 @@
 //! Block execution context.
 
-use std::collections::HashMap;
+use std::{cmp::Reverse, collections::HashMap};
 
 use alloy_consensus::Header;
 use alloy_primitives::B256;
@@ -56,13 +56,10 @@ impl BlockContext {
     #[must_use]
     pub fn with_recent_block_hashes(mut self, hashes: HashMap<u64, B256>) -> Self {
         if hashes.len() > MAX_BLOCK_HASHES {
-            // Retain only the MAX_BLOCK_HASHES entries with the highest
-            // block numbers.  Computing the cutoff via the max key avoids
-            // a full sort and keeps this O(n).
-            let max_block = hashes.keys().copied().max().unwrap_or(0);
-            let min_block = max_block.saturating_sub(MAX_BLOCK_HASHES as u64 - 1);
-            self.recent_block_hashes =
-                hashes.into_iter().filter(|(k, _)| *k >= min_block).collect();
+            let mut entries: Vec<_> = hashes.into_iter().collect();
+            entries.sort_unstable_by_key(|(number, _)| Reverse(*number));
+            entries.truncate(MAX_BLOCK_HASHES);
+            self.recent_block_hashes = entries.into_iter().collect();
         } else {
             self.recent_block_hashes = hashes;
         }
@@ -152,6 +149,25 @@ mod tests {
         for i in 0..44u64 {
             assert!(!context.recent_block_hashes.contains_key(&i), "should not contain block {i}");
         }
+    }
+
+    #[test]
+    fn block_context_with_recent_block_hashes_truncates_sparse_inputs_to_top_256() {
+        let header = Header::default();
+        let mut hashes: HashMap<u64, B256> =
+            (0..300).map(|i| (i, B256::repeat_byte(i as u8))).collect();
+        hashes.insert(10_000, B256::repeat_byte(0xff));
+        assert_eq!(hashes.len(), 301);
+
+        let context =
+            BlockContext::new(header, B256::ZERO, B256::ZERO).with_recent_block_hashes(hashes);
+
+        assert_eq!(context.recent_block_hashes.len(), MAX_BLOCK_HASHES);
+        assert_eq!(context.recent_block_hashes[&10_000], B256::repeat_byte(0xff));
+        for i in 45..300u64 {
+            assert!(context.recent_block_hashes.contains_key(&i), "missing block {i}");
+        }
+        assert!(!context.recent_block_hashes.contains_key(&44));
     }
 
     #[test]
