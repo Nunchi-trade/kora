@@ -19,6 +19,8 @@ pub struct PoolConfig {
     pub pending_ttl_secs: u64,
     /// Time-to-live for queued transactions, in seconds.
     pub queued_ttl_secs: u64,
+    /// Block gas limit. Transactions with gas_limit above this are rejected.
+    pub block_gas_limit: u64,
 }
 
 impl Default for PoolConfig {
@@ -32,6 +34,7 @@ impl Default for PoolConfig {
             replacement_bump_percent: 10,
             pending_ttl_secs: 30 * 60,
             queued_ttl_secs: 60 * 60,
+            block_gas_limit: 250_000_000, // matches DEFAULT_GAS_LIMIT
         }
     }
 }
@@ -48,6 +51,7 @@ impl PoolConfig {
             replacement_bump_percent: 10,
             pending_ttl_secs: 30 * 60,
             queued_ttl_secs: 60 * 60,
+            block_gas_limit: 250_000_000, // matches DEFAULT_GAS_LIMIT
         }
     }
 
@@ -106,6 +110,13 @@ impl PoolConfig {
         self.queued_ttl_secs = ttl;
         self
     }
+
+    /// Sets the block gas limit.
+    #[must_use]
+    pub const fn with_block_gas_limit(mut self, limit: u64) -> Self {
+        self.block_gas_limit = limit;
+        self
+    }
 }
 
 #[cfg(test)]
@@ -123,6 +134,7 @@ mod tests {
         assert_eq!(config.replacement_bump_percent, 10);
         assert_eq!(config.pending_ttl_secs, 30 * 60);
         assert_eq!(config.queued_ttl_secs, 60 * 60);
+        assert_eq!(config.block_gas_limit, 250_000_000);
     }
 
     #[test]
@@ -137,6 +149,7 @@ mod tests {
         assert_eq!(new.replacement_bump_percent, default.replacement_bump_percent);
         assert_eq!(new.pending_ttl_secs, default.pending_ttl_secs);
         assert_eq!(new.queued_ttl_secs, default.queued_ttl_secs);
+        assert_eq!(new.block_gas_limit, default.block_gas_limit);
     }
 
     #[test]

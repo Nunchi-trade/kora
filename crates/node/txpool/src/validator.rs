@@ -18,6 +18,14 @@ const TX_DATA_NON_ZERO_GAS: u64 = 16;
 const TX_CREATE_GAS: u64 = 32000;
 const TX_ACCESS_LIST_ADDRESS_GAS: u64 = 2400;
 const TX_ACCESS_LIST_STORAGE_KEY_GAS: u64 = 1900;
+/// EIP-7702: gas cost per authorization list entry.
+const TX_AUTH_LIST_ENTRY_GAS: u64 = 25_000;
+/// EIP-3860: gas cost per 32-byte word of initcode.
+const INITCODE_WORD_COST: u64 = 2;
+/// EIP-3860: maximum initcode size in bytes.
+const MAX_INITCODE_SIZE: usize = 49_152;
+/// EIP-4844: gas consumed per blob.
+const GAS_PER_BLOB: u64 = 131_072;
 
 /// A validated transaction ready for pool insertion.
 #[derive(Debug, Clone)]
@@ -82,6 +90,14 @@ impl<S: StateDbRead> TransactionValidator<S> {
 
         let (sender, hash) = recover_sender_and_hash(&envelope)?;
 
+        // EIP-3860: reject contract creation with oversized initcode.
+        if envelope.to().is_none() && envelope.input().len() > MAX_INITCODE_SIZE {
+            return Err(TxPoolError::InitcodeTooLarge {
+                size: envelope.input().len(),
+                max: MAX_INITCODE_SIZE,
+            });
+        }
+
         let effective_gas_price = effective_gas_price(&envelope);
         if effective_gas_price < self.config.min_gas_price {
             return Err(TxPoolError::GasPriceTooLow {
@@ -96,6 +112,14 @@ impl<S: StateDbRead> TransactionValidator<S> {
             return Err(TxPoolError::IntrinsicGasTooLow {
                 limit: gas_limit,
                 intrinsic: intrinsic_gas,
+            });
+        }
+
+        // Reject transactions whose gas limit exceeds the block gas limit.
+        if gas_limit > self.config.block_gas_limit {
+            return Err(TxPoolError::GasLimitTooHigh {
+                limit: gas_limit,
+                max: self.config.block_gas_limit,
             });
         }
 
@@ -215,6 +239,9 @@ fn intrinsic_gas(envelope: &TxEnvelope) -> u64 {
 
     if envelope.to().is_none() {
         gas += TX_CREATE_GAS;
+        // EIP-3860: initcode word cost.
+        let initcode_len = envelope.input().len() as u64;
+        gas += INITCODE_WORD_COST * ((initcode_len + 31) / 32);
     }
 
     let access_list_gas = match envelope {
@@ -222,7 +249,12 @@ fn intrinsic_gas(envelope: &TxEnvelope) -> u64 {
         TxEnvelope::Eip2930(tx) => access_list_gas_cost(&tx.tx().access_list),
         TxEnvelope::Eip1559(tx) => access_list_gas_cost(&tx.tx().access_list),
         TxEnvelope::Eip4844(tx) => access_list_gas_cost(&tx.tx().tx().access_list),
-        TxEnvelope::Eip7702(tx) => access_list_gas_cost(&tx.tx().access_list),
+        TxEnvelope::Eip7702(tx) => {
+            let al_gas = access_list_gas_cost(&tx.tx().access_list);
+            // EIP-7702: authorization list cost.
+            let auth_gas = tx.tx().authorization_list.len() as u64 * TX_AUTH_LIST_ENTRY_GAS;
+            al_gas + auth_gas
+        }
     };
     gas += access_list_gas;
 
@@ -242,8 +274,17 @@ fn max_tx_cost(envelope: &TxEnvelope) -> U256 {
     let gas_limit = U256::from(envelope.gas_limit());
     let max_fee = U256::from(effective_gas_price(envelope));
     let value = envelope.value();
+    let mut cost = gas_limit * max_fee + value;
 
-    gas_limit * max_fee + value
+    // EIP-4844: add blob gas cost.
+    if let TxEnvelope::Eip4844(tx) = envelope {
+        let blob_tx = tx.tx().tx();
+        let total_blob_gas = U256::from(blob_tx.blob_versioned_hashes.len() as u64 * GAS_PER_BLOB);
+        let max_blob_fee = U256::from(blob_tx.max_fee_per_blob_gas);
+        cost += total_blob_gas * max_blob_fee;
+    }
+
+    cost
 }
 
 #[cfg(test)]
