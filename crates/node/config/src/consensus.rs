@@ -12,9 +12,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::ConfigError;
 
-/// Default validator threshold.
-pub const DEFAULT_THRESHOLD: u32 = 2;
-
 /// Default maximum transactions decoded per block.
 pub const DEFAULT_BLOCK_CODEC_MAX_TXS: usize = 10_000;
 
@@ -139,15 +136,16 @@ impl Default for ConsensusSimplexConfig {
 }
 
 /// Consensus layer configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+///
+/// The consensus quorum is always computed dynamically from the validator count
+/// via `N3f1::quorum(participant_count)`. Legacy config files that include a
+/// `threshold` key are accepted (the key is silently ignored during
+/// deserialization).
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConsensusConfig {
     /// Path to the validator key file.
     #[serde(default)]
     pub validator_key: Option<PathBuf>,
-
-    /// Threshold for consensus (e.g., 2f+1 of 3f+1).
-    #[serde(default = "default_threshold")]
-    pub threshold: u32,
 
     /// List of participant public keys (hex-encoded).
     #[serde(
@@ -164,18 +162,6 @@ pub struct ConsensusConfig {
     /// Simplex consensus tuning parameters.
     #[serde(default)]
     pub simplex: ConsensusSimplexConfig,
-}
-
-impl Default for ConsensusConfig {
-    fn default() -> Self {
-        Self {
-            validator_key: None,
-            threshold: DEFAULT_THRESHOLD,
-            participants: Vec::new(),
-            block_codec: ConsensusBlockCodecConfig::default(),
-            simplex: ConsensusSimplexConfig::default(),
-        }
-    }
 }
 
 impl ConsensusConfig {
@@ -195,10 +181,6 @@ impl ConsensusConfig {
             })
             .collect()
     }
-}
-
-const fn default_threshold() -> u32 {
-    DEFAULT_THRESHOLD
 }
 
 const fn default_block_codec_max_txs() -> NonZeroUsize {
@@ -301,7 +283,6 @@ mod tests {
     fn default_consensus_config() {
         let config = ConsensusConfig::default();
         assert!(config.validator_key.is_none());
-        assert_eq!(config.threshold, DEFAULT_THRESHOLD);
         assert!(config.participants.is_empty());
         assert_eq!(config.block_codec.max_txs.get(), DEFAULT_BLOCK_CODEC_MAX_TXS);
         assert_eq!(config.block_codec.max_tx_bytes.get(), DEFAULT_BLOCK_CODEC_MAX_TX_BYTES);
@@ -323,17 +304,10 @@ mod tests {
     }
 
     #[test]
-    fn default_threshold_constant() {
-        assert_eq!(DEFAULT_THRESHOLD, 2);
-        assert_eq!(default_threshold(), DEFAULT_THRESHOLD);
-    }
-
-    #[test]
     fn serde_json_roundtrip() {
         let pk_bytes = create_valid_public_key_bytes();
         let config = ConsensusConfig {
             validator_key: Some(PathBuf::from("/path/to/key")),
-            threshold: 3,
             participants: vec![pk_bytes],
             ..Default::default()
         };
@@ -355,17 +329,17 @@ mod tests {
     fn serde_defaults_applied() {
         let config: ConsensusConfig = serde_json::from_str("{}").expect("deserialize");
         assert!(config.validator_key.is_none());
-        assert_eq!(config.threshold, DEFAULT_THRESHOLD);
         assert!(config.participants.is_empty());
         assert_eq!(config.block_codec, ConsensusBlockCodecConfig::default());
         assert_eq!(config.simplex, ConsensusSimplexConfig::default());
     }
 
+    /// Legacy config files with a "threshold" key should still deserialize
+    /// without error (the key is silently ignored).
     #[test]
-    fn serde_partial_threshold() {
+    fn serde_ignores_legacy_threshold() {
         let config: ConsensusConfig =
             serde_json::from_str(r#"{"threshold": 7}"#).expect("deserialize");
-        assert_eq!(config.threshold, 7);
         assert!(config.validator_key.is_none());
         assert!(config.participants.is_empty());
         assert_eq!(config.block_codec, ConsensusBlockCodecConfig::default());
@@ -377,7 +351,6 @@ mod tests {
         let config: ConsensusConfig =
             serde_json::from_str(r#"{"validator_key": "/etc/key"}"#).expect("deserialize");
         assert_eq!(config.validator_key, Some(PathBuf::from("/etc/key")));
-        assert_eq!(config.threshold, DEFAULT_THRESHOLD);
         assert_eq!(config.block_codec, ConsensusBlockCodecConfig::default());
         assert_eq!(config.simplex, ConsensusSimplexConfig::default());
     }
@@ -474,7 +447,7 @@ mod tests {
             })
             .collect();
 
-        let config = ConsensusConfig { participants: keys, threshold: 2, ..Default::default() };
+        let config = ConsensusConfig { participants: keys, ..Default::default() };
 
         let result = config.build_validator_set().expect("build validator set");
         assert_eq!(result.len(), 3);
@@ -503,7 +476,6 @@ mod tests {
         let pk_bytes = create_valid_public_key_bytes();
         let config = ConsensusConfig {
             validator_key: Some(PathBuf::from("/custom/path")),
-            threshold: 10,
             participants: vec![pk_bytes],
             ..Default::default()
         };
@@ -516,6 +488,5 @@ mod tests {
         let config = ConsensusConfig::default();
         let debug = format!("{:?}", config);
         assert!(debug.contains("ConsensusConfig"));
-        assert!(debug.contains("threshold"));
     }
 }

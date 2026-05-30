@@ -3249,6 +3249,7 @@ dependencies = [
  "kora-qmdb",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
 ]
 
@@ -3553,6 +3554,7 @@ dependencies = [
  "kora-overlay",
  "kora-qmdb-ledger",
  "kora-rpc",
+ "parking_lot",
  "sha3",
  "tempfile",
  "thiserror 2.0.18",

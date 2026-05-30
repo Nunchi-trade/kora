@@ -13,6 +13,7 @@ use commonware_storage::{
 use commonware_utils::{NZU64, NZUsize};
 use kora_handlers::{HandleError, RootProvider};
 use kora_qmdb::{ChangeSet, PartitionCommitSeqs, QmdbStore, StateRoot};
+use tokio::sync::OnceCell;
 use tracing::{error, info};
 
 use crate::{
@@ -35,9 +36,17 @@ pub struct CommonwareBackend {
 }
 
 /// Root provider that computes state roots from commonware-storage partitions.
+///
+/// Caches the opened stores after the first call to avoid reopening all three
+/// QMDB partitions on every `state_root()` invocation. The dirty-store path
+/// used by `compute_root()` still opens fresh stores each time because it needs
+/// mutable, throwaway copies.
 pub struct CommonwareRootProvider {
     context: Context,
     config: QmdbBackendConfig,
+    /// Lazily-initialized cached read-only stores. Opened once on first use and
+    /// reused for all subsequent `state_root()` calls.
+    cached_stores: OnceCell<Stores>,
 }
 
 impl std::fmt::Debug for CommonwareBackend {
@@ -55,8 +64,13 @@ impl std::fmt::Debug for CommonwareRootProvider {
 impl CommonwareRootProvider {
     /// Create a new root provider from the given context and config.
     #[must_use]
-    pub const fn new(context: Context, config: QmdbBackendConfig) -> Self {
-        Self { context, config }
+    pub fn new(context: Context, config: QmdbBackendConfig) -> Self {
+        Self { context, config, cached_stores: OnceCell::new() }
+    }
+
+    /// Return a reference to the cached stores, opening them on first use.
+    async fn get_or_open_stores(&self) -> Result<&Stores, BackendError> {
+        self.cached_stores.get_or_try_init(|| open_stores(&self.context, &self.config)).await
     }
 }
 
@@ -163,7 +177,8 @@ impl CommonwareBackend {
 #[async_trait]
 impl RootProvider for CommonwareRootProvider {
     async fn state_root(&self) -> Result<B256, HandleError> {
-        let stores = open_stores(&self.context, &self.config)
+        let stores = self
+            .get_or_open_stores()
             .await
             .map_err(|e| HandleError::RootComputation(e.to_string()))?;
         state_root_from_stores(&stores.accounts, &stores.storage, &stores.code)

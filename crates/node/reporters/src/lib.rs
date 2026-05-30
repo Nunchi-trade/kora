@@ -6,12 +6,7 @@
 
 mod gc_log;
 
-use std::{
-    fmt,
-    marker::PhantomData,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{fmt, marker::PhantomData, sync::Arc, time::Duration};
 
 use alloy_consensus::{
     ReceiptEnvelope, ReceiptWithBloom, Transaction as _, TxEnvelope,
@@ -42,6 +37,7 @@ use kora_metrics::{AppMetrics, EquivocationTypeLabel};
 use kora_overlay::OverlayState;
 use kora_qmdb_ledger::QmdbState;
 use kora_rpc::{MempoolEventSender, NodeState};
+use parking_lot::Mutex;
 use thiserror::Error;
 use tracing::{error, info, trace, warn};
 
@@ -358,7 +354,7 @@ async fn acknowledge_checkpoint(
         // that all blocks up through this checkpoint are durably persisted
         // (QMDB has been fsynced and the archive has been fsynced).
         let pending = {
-            let mut guard = pending_acks.lock().expect("pending_acks mutex poisoned");
+            let mut guard = pending_acks.lock();
             std::mem::take(&mut *guard)
         };
         for pending_ack in pending {
@@ -367,7 +363,7 @@ async fn acknowledge_checkpoint(
         ack.acknowledge();
     } else {
         // Between checkpoints: defer acknowledgment until the next boundary.
-        let mut guard = pending_acks.lock().expect("pending_acks mutex poisoned");
+        let mut guard = pending_acks.lock();
         guard.push(ack);
     }
 }

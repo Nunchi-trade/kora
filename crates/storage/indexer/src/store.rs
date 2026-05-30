@@ -214,32 +214,53 @@ impl BlockIndex {
         self.head_block.load(Ordering::Acquire)
     }
 
+    /// Maximum number of blocks to process per batch in [`Self::get_logs`].
+    ///
+    /// Read locks on `blocks_by_number` and `logs_by_block` are held for at
+    /// most this many blocks at a time, then released so that concurrent
+    /// `insert_block` writers can make progress.
+    const GET_LOGS_BATCH_SIZE: u64 = 200;
+
     /// Gets logs matching the given filter.
+    ///
+    /// Processes the block range in batches of [`Self::GET_LOGS_BATCH_SIZE`]
+    /// blocks, releasing and re-acquiring both read locks between batches so
+    /// that concurrent writers (block insertions from the finalization pipeline)
+    /// are not starved.
     pub fn get_logs(&self, filter: &LogFilter) -> Vec<IndexedLog> {
         let head = self.head_block_number();
         let from_block = filter.from_block.unwrap_or(0);
         let to_block = filter.to_block.unwrap_or(head).min(head);
 
         let mut result = Vec::new();
+        let mut current = from_block;
 
-        let blocks_by_number = self.blocks_by_number.read();
-        let logs_by_block = self.logs_by_block.read();
+        while current <= to_block {
+            let batch_end = current.saturating_add(Self::GET_LOGS_BATCH_SIZE - 1).min(to_block);
 
-        for block_num in from_block..=to_block {
-            let Some(block_hash) = blocks_by_number.get(&block_num) else {
-                continue;
-            };
+            // Acquire both locks for this batch only; they are dropped at the
+            // end of each iteration so writers can interleave.
+            let blocks_by_number = self.blocks_by_number.read();
+            let logs_by_block = self.logs_by_block.read();
 
-            let Some(logs) = logs_by_block.get(block_hash) else {
-                continue;
-            };
-
-            for log in logs {
-                if !Self::matches_filter(log, filter) {
+            for block_num in current..=batch_end {
+                let Some(block_hash) = blocks_by_number.get(&block_num) else {
                     continue;
+                };
+
+                let Some(logs) = logs_by_block.get(block_hash) else {
+                    continue;
+                };
+
+                for log in logs {
+                    if Self::matches_filter(log, filter) {
+                        result.push(log.clone());
+                    }
                 }
-                result.push(log.clone());
             }
+            // Both locks released here at end of scope.
+
+            current = batch_end + 1;
         }
 
         result
