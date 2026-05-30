@@ -505,8 +505,7 @@ impl<S: StateDb> BlockExecutor<S> for RevmExecutor {
 /// Recovers the signer once at the envelope level to avoid redundant ECDSA
 /// recovery per transaction type variant.
 fn decode_tx_env(tx_bytes: &Bytes, _chain_id: u64) -> Result<revm::context::TxEnv, ExecutionError> {
-    use alloy_consensus::TxEnvelope;
-    use alloy_consensus::transaction::SignerRecoverable as _;
+    use alloy_consensus::{TxEnvelope, transaction::SignerRecoverable as _};
     use alloy_eips::eip2718::Decodable2718 as _;
 
     // Decode both legacy RLP transactions and typed EIP-2718 envelopes.
@@ -518,9 +517,9 @@ fn decode_tx_env(tx_bytes: &Bytes, _chain_id: u64) -> Result<revm::context::TxEn
     // instead of per-variant avoids redundant work when the executor
     // processes transactions whose signatures were already validated
     // at mempool admission.
-    let caller = envelope.recover_signer().map_err(|e| {
-        ExecutionError::TxDecode(format!("failed to recover signer: {}", e))
-    })?;
+    let caller = envelope
+        .recover_signer()
+        .map_err(|e| ExecutionError::TxDecode(format!("failed to recover signer: {}", e)))?;
 
     // Build TxEnv using the builder pattern
     let mut builder = revm::context::TxEnv::builder();
