@@ -22,13 +22,17 @@ use commonware_utils::{Faults, N3f1, TryCollect, ordered::Set};
 use tracing::{debug, info, warn};
 
 /// Session metadata for a DKG ceremony, providing anti-replay protection.
+///
+/// The `round` field is currently always 0 (initial DKG). When resharing is
+/// implemented (issue #103), it will be incremented for each resharing ceremony
+/// to provide domain separation between epochs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CeremonySession {
     /// Unique identifier for this ceremony instance (random bytes generated at start).
     pub ceremony_id: [u8; 32],
     /// Chain ID from configuration, binding the ceremony to a specific network.
     pub chain_id: u64,
-    /// DKG round number (0 for initial DKG).
+    /// DKG round number (0 for initial DKG, incremented for each resharing).
     pub round: u32,
 }
 

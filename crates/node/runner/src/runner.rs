@@ -70,6 +70,12 @@ impl kora_metrics::MetricsRegister for RuntimeMetrics<'_> {
     }
 }
 
+// TODO(#103): Replace this hardcoded infinite epoch length with a configurable
+// value from `ConsensusConfig::resharing::epoch_length` when DKG resharing is
+// implemented. When `resharing.enabled` is true, this should use the configured
+// epoch length to trigger periodic resharing ceremonies at epoch boundaries.
+// When resharing is disabled (the default), this should remain `u64::MAX` so
+// that the validator set is permanently fixed at genesis.
 const EPOCH_LENGTH: u64 = u64::MAX;
 const PARTITION_PREFIX: &str = "kora";
 const TXPOOL_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);

@@ -61,6 +61,19 @@ pub const DEFAULT_SIMPLEX_SKIP_TIMEOUT_VIEWS: u64 = 10;
 /// Default number of concurrent Simplex fetch requests.
 pub const DEFAULT_SIMPLEX_FETCH_CONCURRENT: usize = 8;
 
+/// Default epoch length in blocks when resharing is enabled.
+///
+/// This value is only used when `resharing.enabled` is `true`. When resharing
+/// is disabled (the default), the epoch length is effectively infinite
+/// (`u64::MAX`) so that the validator set never rotates.
+///
+/// 14400 blocks at ~6 s/block is approximately 24 hours.
+pub const DEFAULT_RESHARING_EPOCH_LENGTH: u64 = 14_400;
+
+/// Default cooldown period (in blocks) after a validator registration or
+/// deregistration before the change takes effect.
+pub const DEFAULT_RESHARING_COOLDOWN_BLOCKS: u64 = 256;
+
 /// Block codec limits used by consensus networking and storage.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConsensusBlockCodecConfig {
@@ -138,6 +151,53 @@ impl Default for ConsensusSimplexConfig {
     }
 }
 
+/// Configuration for DKG resharing and dynamic validator set management.
+///
+/// When `enabled` is `false` (the default), the validator set is fixed at genesis
+/// and the epoch length is effectively infinite. When `enabled` is `true`, the
+/// node will participate in periodic resharing ceremonies at epoch boundaries to
+/// rotate threshold key shares and allow validator set changes.
+///
+/// **Status: stub -- resharing is not yet implemented.** Enabling this field
+/// currently has no effect beyond signaling intent. See issue #103 for the
+/// full design and tracking.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResharingConfig {
+    /// Whether DKG resharing is enabled.
+    ///
+    /// When `false` (default), the validator set is permanently fixed at genesis
+    /// and `EPOCH_LENGTH` remains `u64::MAX`. When `true`, epoch-based resharing
+    /// ceremonies will be triggered at `epoch_length` block intervals.
+    ///
+    /// **Not yet implemented.** See issue #103.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Number of blocks per epoch before a resharing ceremony is triggered.
+    ///
+    /// Only meaningful when `enabled` is `true`. Defaults to
+    /// [`DEFAULT_RESHARING_EPOCH_LENGTH`] (~24 hours at 6 s/block).
+    #[serde(default = "default_resharing_epoch_length")]
+    pub epoch_length: u64,
+
+    /// Cooldown period (in blocks) after validator registration or deregistration
+    /// before the change takes effect in the next resharing ceremony.
+    ///
+    /// Prevents rapid validator churn from destabilizing the network.
+    #[serde(default = "default_resharing_cooldown_blocks")]
+    pub cooldown_blocks: u64,
+}
+
+impl Default for ResharingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            epoch_length: DEFAULT_RESHARING_EPOCH_LENGTH,
+            cooldown_blocks: DEFAULT_RESHARING_COOLDOWN_BLOCKS,
+        }
+    }
+}
+
 /// Consensus layer configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConsensusConfig {
@@ -164,6 +224,16 @@ pub struct ConsensusConfig {
     /// Simplex consensus tuning parameters.
     #[serde(default)]
     pub simplex: ConsensusSimplexConfig,
+
+    /// DKG resharing configuration for dynamic validator sets.
+    ///
+    /// Controls whether the node participates in periodic resharing ceremonies
+    /// to rotate threshold key shares and allow validator set changes after genesis.
+    /// Defaults to disabled (static validator set, epoch length = `u64::MAX`).
+    ///
+    /// **Not yet implemented.** See issue #103.
+    #[serde(default)]
+    pub resharing: ResharingConfig,
 }
 
 impl Default for ConsensusConfig {
@@ -174,6 +244,7 @@ impl Default for ConsensusConfig {
             participants: Vec::new(),
             block_codec: ConsensusBlockCodecConfig::default(),
             simplex: ConsensusSimplexConfig::default(),
+            resharing: ResharingConfig::default(),
         }
     }
 }
@@ -255,6 +326,14 @@ const fn default_simplex_fetch_concurrent() -> NonZeroUsize {
         .expect("default simplex fetch concurrency is non-zero")
 }
 
+const fn default_resharing_epoch_length() -> u64 {
+    DEFAULT_RESHARING_EPOCH_LENGTH
+}
+
+const fn default_resharing_cooldown_blocks() -> u64 {
+    DEFAULT_RESHARING_COOLDOWN_BLOCKS
+}
+
 fn serialize_participants<S>(participants: &[Vec<u8>], serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
@@ -320,6 +399,9 @@ mod tests {
         );
         assert_eq!(config.simplex.skip_timeout_views.get(), DEFAULT_SIMPLEX_SKIP_TIMEOUT_VIEWS);
         assert_eq!(config.simplex.fetch_concurrent.get(), DEFAULT_SIMPLEX_FETCH_CONCURRENT);
+        assert!(!config.resharing.enabled);
+        assert_eq!(config.resharing.epoch_length, DEFAULT_RESHARING_EPOCH_LENGTH);
+        assert_eq!(config.resharing.cooldown_blocks, DEFAULT_RESHARING_COOLDOWN_BLOCKS);
     }
 
     #[test]
@@ -359,6 +441,7 @@ mod tests {
         assert!(config.participants.is_empty());
         assert_eq!(config.block_codec, ConsensusBlockCodecConfig::default());
         assert_eq!(config.simplex, ConsensusSimplexConfig::default());
+        assert_eq!(config.resharing, ResharingConfig::default());
     }
 
     #[test]
@@ -517,5 +600,48 @@ mod tests {
         let debug = format!("{:?}", config);
         assert!(debug.contains("ConsensusConfig"));
         assert!(debug.contains("threshold"));
+    }
+
+    #[test]
+    fn resharing_config_default() {
+        let config = ResharingConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.epoch_length, DEFAULT_RESHARING_EPOCH_LENGTH);
+        assert_eq!(config.cooldown_blocks, DEFAULT_RESHARING_COOLDOWN_BLOCKS);
+    }
+
+    #[test]
+    fn resharing_config_serde_json_roundtrip() {
+        let config = ResharingConfig { enabled: true, epoch_length: 1000, cooldown_blocks: 50 };
+        let serialized = serde_json::to_string(&config).expect("serialize");
+        let deserialized: ResharingConfig = serde_json::from_str(&serialized).expect("deserialize");
+        assert_eq!(config, deserialized);
+    }
+
+    #[test]
+    fn resharing_config_serde_defaults() {
+        let config: ResharingConfig = serde_json::from_str("{}").expect("deserialize");
+        assert!(!config.enabled);
+        assert_eq!(config.epoch_length, DEFAULT_RESHARING_EPOCH_LENGTH);
+        assert_eq!(config.cooldown_blocks, DEFAULT_RESHARING_COOLDOWN_BLOCKS);
+    }
+
+    #[test]
+    fn resharing_config_partial_deserialization() {
+        let config: ResharingConfig =
+            serde_json::from_str(r#"{"enabled": true}"#).expect("deserialize");
+        assert!(config.enabled);
+        assert_eq!(config.epoch_length, DEFAULT_RESHARING_EPOCH_LENGTH);
+        assert_eq!(config.cooldown_blocks, DEFAULT_RESHARING_COOLDOWN_BLOCKS);
+    }
+
+    #[test]
+    fn consensus_config_with_resharing() {
+        let config: ConsensusConfig =
+            serde_json::from_str(r#"{"resharing": {"enabled": true, "epoch_length": 7200}}"#)
+                .expect("deserialize");
+        assert!(config.resharing.enabled);
+        assert_eq!(config.resharing.epoch_length, 7200);
+        assert_eq!(config.resharing.cooldown_blocks, DEFAULT_RESHARING_COOLDOWN_BLOCKS);
     }
 }

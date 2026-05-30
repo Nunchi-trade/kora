@@ -1,6 +1,20 @@
 //! Interactive DKG ceremony runner.
 //!
 //! This module orchestrates the full DKG ceremony using the protocol and network modules.
+//!
+//! # Resharing support (planned)
+//!
+//! Currently this module only supports a one-shot initial DKG ceremony run as a
+//! standalone pre-genesis tool. To support dynamic validator sets (issue #103),
+//! this will need to be refactored into a Commonware actor that can:
+//!
+//! 1. Run within the main node process (not as a standalone binary)
+//! 2. Use authenticated P2P transport from the existing overlay
+//! 3. Be triggered at epoch boundaries by the orchestrator
+//! 4. Perform resharing (redistributing shares to a new validator set while
+//!    preserving the group public key)
+//!
+//! See [`crate::resharing::Resharing`] for the planned trait interface.
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 

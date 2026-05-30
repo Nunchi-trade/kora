@@ -29,6 +29,9 @@ pub use protocol::{CeremonySession, DkgParticipant, ProtocolMessage, ProtocolMes
 mod state;
 pub use state::{DkgPhase, PersistedDkgState};
 
+mod resharing;
+pub use resharing::{NoopResharing, Resharing, ResharingOutput, ValidatorSetChange};
+
 mod transport;
 pub use transport::{
     CHANNEL_DKG, DEFAULT_BACKLOG, DEFAULT_MAX_MESSAGE_SIZE, DKG_NAMESPACE, DkgReceiver, DkgSender,

@@ -41,6 +41,10 @@ use crate::{TestConfig, TestNode, TestSetup};
 const MAX_MSG_SIZE: usize = 1024 * 1024;
 const BLOCK_CODEC_MAX_TXS: usize = 64;
 const BLOCK_CODEC_MAX_TX_BYTES: usize = 128 * 1024;
+// TODO(#103): When DKG resharing is implemented, add e2e tests with a finite
+// epoch length to verify that the validator set can be rotated at epoch
+// boundaries. Currently the infinite epoch length means tests only cover the
+// static validator set case.
 const EPOCH_LENGTH: u64 = u64::MAX;
 
 type Peer = PublicKey;

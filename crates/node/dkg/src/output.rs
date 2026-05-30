@@ -6,6 +6,14 @@ use serde::{Deserialize, Serialize};
 use crate::DkgError;
 
 /// Output of a successful DKG ceremony containing the group key, shares, and participant info.
+///
+/// # Resharing (planned, issue #103)
+///
+/// When DKG resharing is implemented, this struct will also be produced by
+/// resharing ceremonies. In that case, the `group_public_key` will remain the
+/// same across epochs, but the shares (`share_secret`, `share_index`) and
+/// `participant_keys` will change to reflect the new validator set. An `epoch`
+/// field will be added to track which resharing round produced this output.
 #[derive(Debug, Clone)]
 pub struct DkgOutput {
     /// The aggregated group public key derived from all participants' contributions.
