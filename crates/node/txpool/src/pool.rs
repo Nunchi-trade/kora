@@ -630,6 +630,8 @@ fn rejection_reason(err: &TxPoolError) -> String {
         TxPoolError::NonceAlreadyInPool { .. } => "nonce_already_in_pool".to_string(),
         TxPoolError::StateError(_) => "state_error".to_string(),
         TxPoolError::ReplacementUnderpriced => "replacement_underpriced".to_string(),
+        TxPoolError::GasLimitTooHigh { .. } => "gas_limit_too_high".to_string(),
+        TxPoolError::InitcodeTooLarge { .. } => "initcode_too_large".to_string(),
     }
 }
 
