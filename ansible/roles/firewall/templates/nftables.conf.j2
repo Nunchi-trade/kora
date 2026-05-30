@@ -80,7 +80,12 @@ table inet filter {
     chain forward {
         type filter hook forward priority 0; policy drop;
 
-        # Allow Docker bridge traffic (default bridge and Compose custom bridges)
+        # Allow Docker bridge traffic (default bridge and Compose custom bridges).
+        # Docker's own ip/ip6 tables still apply container-port policy; this
+        # inet table must not block container egress or build containers cannot
+        # resolve DNS/download dependencies.
+        iifname "docker0" accept
+        iifname "br-*" accept
         iifname "docker0" oifname "docker0" accept
         iifname "br-*" oifname "br-*" accept
         ct state established,related accept
