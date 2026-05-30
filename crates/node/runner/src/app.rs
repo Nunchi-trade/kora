@@ -144,40 +144,6 @@ impl<S, E> std::fmt::Debug for RevmApplication<S, E> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use alloy_primitives::Bytes;
-    use kora_domain::Tx;
-
-    use super::truncate_txs_to_included_prefix;
-
-    #[test]
-    fn truncate_txs_to_included_prefix_drops_suffix() {
-        let mut txs = vec![
-            Tx::new(Bytes::from_static(&[0x01])),
-            Tx::new(Bytes::from_static(&[0x02])),
-            Tx::new(Bytes::from_static(&[0x03])),
-        ];
-
-        let dropped = truncate_txs_to_included_prefix(&mut txs, 2);
-
-        assert_eq!(dropped, 1);
-        assert_eq!(txs.len(), 2);
-        assert_eq!(txs[0].bytes, Bytes::from_static(&[0x01]));
-        assert_eq!(txs[1].bytes, Bytes::from_static(&[0x02]));
-    }
-
-    #[test]
-    fn truncate_txs_to_included_prefix_caps_overreported_count() {
-        let mut txs = vec![Tx::new(Bytes::from_static(&[0x01]))];
-
-        let dropped = truncate_txs_to_included_prefix(&mut txs, 2);
-
-        assert_eq!(dropped, 0);
-        assert_eq!(txs.len(), 1);
-    }
-}
-
 impl<S, E> RevmApplication<S, E>
 where
     E: BlockExecutor<OverlayState<QmdbState>, Tx = Bytes> + Clone,
@@ -978,5 +944,39 @@ where
 
             true
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy_primitives::Bytes;
+    use kora_domain::Tx;
+
+    use super::truncate_txs_to_included_prefix;
+
+    #[test]
+    fn truncate_txs_to_included_prefix_drops_suffix() {
+        let mut txs = vec![
+            Tx::new(Bytes::from_static(&[0x01])),
+            Tx::new(Bytes::from_static(&[0x02])),
+            Tx::new(Bytes::from_static(&[0x03])),
+        ];
+
+        let dropped = truncate_txs_to_included_prefix(&mut txs, 2);
+
+        assert_eq!(dropped, 1);
+        assert_eq!(txs.len(), 2);
+        assert_eq!(txs[0].bytes, Bytes::from_static(&[0x01]));
+        assert_eq!(txs[1].bytes, Bytes::from_static(&[0x02]));
+    }
+
+    #[test]
+    fn truncate_txs_to_included_prefix_caps_overreported_count() {
+        let mut txs = vec![Tx::new(Bytes::from_static(&[0x01]))];
+
+        let dropped = truncate_txs_to_included_prefix(&mut txs, 2);
+
+        assert_eq!(dropped, 0);
+        assert_eq!(txs.len(), 1);
     }
 }
