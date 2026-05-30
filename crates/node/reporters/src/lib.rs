@@ -38,7 +38,7 @@ use kora_domain::{Block, ConsensusDigest, MempoolEvent, PublicKey, StateRoot};
 use kora_executor::{BlockContext, BlockExecutor, ExecutionOutcome};
 use kora_indexer::{BlockIndex, IndexedBlock, IndexedLog, IndexedReceipt, IndexedTransaction};
 use kora_ledger::{LedgerError, LedgerService};
-use kora_metrics::{AppMetrics, EquivocationTypeLabel};
+use kora_metrics::{AppMetrics, EquivocationTypeLabel, ReasonLabel};
 use kora_overlay::OverlayState;
 use kora_qmdb_ledger::QmdbState;
 use kora_rpc::{MempoolEventSender, NodeState};
@@ -208,6 +208,8 @@ where
 {
     /// Bounded sender for activity events.
     tx: ::tokio::sync::mpsc::Sender<Activity<Scheme<PublicKey, V>, ConsensusDigest>>,
+    /// Optional application-level metrics for dropped seed activity.
+    metrics: Option<AppMetrics>,
     /// Marker indicating the variant for the threshold scheme in use.
     _variant: PhantomData<V>,
 }
@@ -217,7 +219,7 @@ where
     V: Variant,
 {
     fn clone(&self) -> Self {
-        Self { tx: self.tx.clone(), _variant: PhantomData }
+        Self { tx: self.tx.clone(), metrics: self.metrics.clone(), _variant: PhantomData }
     }
 }
 
@@ -245,11 +247,46 @@ where
                 seed_report_inner(state.clone(), activity).await;
             }
         });
-        Self { tx, _variant: PhantomData }
+        Self { tx, metrics: None, _variant: PhantomData }
     }
 
     fn hash_seed(seed: impl commonware_codec::Encode) -> B256 {
         keccak256(seed.encode())
+    }
+
+    /// Attach application-level metrics for seed reporter backpressure.
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: AppMetrics) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+}
+
+fn seed_reporter_send_failure<T>(
+    err: ::tokio::sync::mpsc::error::TrySendError<T>,
+    metrics: Option<&AppMetrics>,
+) -> Feedback {
+    match err {
+        ::tokio::sync::mpsc::error::TrySendError::Full(_) => {
+            if let Some(metrics) = metrics {
+                metrics
+                    .seed_reporter_dropped
+                    .get_or_create_owned(&ReasonLabel { reason: "channel_full".to_string() })
+                    .inc();
+            }
+            warn!("seed reporter channel full, dropping activity event");
+            Feedback::Backoff
+        }
+        ::tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+            if let Some(metrics) = metrics {
+                metrics
+                    .seed_reporter_dropped
+                    .get_or_create_owned(&ReasonLabel { reason: "channel_closed".to_string() })
+                    .inc();
+            }
+            warn!("seed reporter channel closed, dropping activity event");
+            Feedback::Closed
+        }
     }
 }
 
@@ -260,10 +297,47 @@ where
     type Activity = Activity<Scheme<PublicKey, V>, ConsensusDigest>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
-        if self.tx.try_send(activity).is_err() {
-            warn!("seed reporter channel full, dropping activity event");
+        match self.tx.try_send(activity) {
+            Ok(()) => Feedback::Ok,
+            Err(err) => seed_reporter_send_failure(err, self.metrics.as_ref()),
         }
-        Feedback::Ok
+    }
+}
+
+#[cfg(test)]
+mod seed_reporter_tests {
+    use super::*;
+
+    #[test]
+    fn seed_reporter_full_send_returns_backoff_and_records_metric() {
+        let metrics = AppMetrics::new();
+        let feedback = seed_reporter_send_failure(
+            ::tokio::sync::mpsc::error::TrySendError::Full(()),
+            Some(&metrics),
+        );
+
+        assert_eq!(feedback, Feedback::Backoff);
+        let metric = metrics
+            .seed_reporter_dropped
+            .get(&ReasonLabel { reason: "channel_full".to_string() })
+            .expect("metric recorded");
+        assert_eq!(metric.get(), 1);
+    }
+
+    #[test]
+    fn seed_reporter_closed_send_returns_closed_and_records_metric() {
+        let metrics = AppMetrics::new();
+        let feedback = seed_reporter_send_failure(
+            ::tokio::sync::mpsc::error::TrySendError::Closed(()),
+            Some(&metrics),
+        );
+
+        assert_eq!(feedback, Feedback::Closed);
+        let metric = metrics
+            .seed_reporter_dropped
+            .get(&ReasonLabel { reason: "channel_closed".to_string() })
+            .expect("metric recorded");
+        assert_eq!(metric.get(), 1);
     }
 }
 

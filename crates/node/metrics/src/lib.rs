@@ -105,6 +105,10 @@ pub struct AppMetrics {
     /// (both persisted and unpersisted).
     pub snapshot_store_total: Gauge,
 
+    // -- Seed Reporter --
+    /// Total seed reporter activities dropped before persistence, labelled by reason.
+    pub seed_reporter_dropped: Family<ReasonLabel, Counter>,
+
     // -- Transaction Gossip --
     /// Total transactions broadcast to peers via gossip.
     pub gossip_tx_broadcast: Counter,
@@ -166,6 +170,7 @@ impl AppMetrics {
             rpc_requests_total: Counter::default(),
             unpersisted_snapshot_depth: Gauge::default(),
             snapshot_store_total: Gauge::default(),
+            seed_reporter_dropped: Family::default(),
             gossip_tx_broadcast: Counter::default(),
             gossip_tx_received: Counter::default(),
             gossip_tx_broadcast_failed: Counter::default(),
@@ -260,6 +265,11 @@ impl AppMetrics {
             "kora_snapshot_store_total",
             "Total snapshots currently held in the in-memory store",
             self.snapshot_store_total.clone(),
+        );
+        registry.register(
+            "kora_seed_reporter_dropped",
+            "Total seed reporter activities dropped before persistence by reason",
+            self.seed_reporter_dropped.clone(),
         );
         registry.register(
             "kora_gossip_tx_broadcast",

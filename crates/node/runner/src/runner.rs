@@ -1489,9 +1489,11 @@ impl NodeRunner for ProductionRunner {
         let marshaled =
             Inline::new(scratch_context.child("marshaled"), app, marshal_mailbox.clone(), epocher);
 
-        let seed_reporter = SeedReporter::<MinSig>::new(ledger.clone());
+        let seed_reporter =
+            SeedReporter::<MinSig>::new(ledger.clone()).with_metrics(app_metrics.clone());
         let node_state_reporter = self.rpc_config.as_ref().map(|(state, _)| {
-            NodeStateReporter::<ThresholdScheme>::new(state.clone()).with_metrics(app_metrics)
+            NodeStateReporter::<ThresholdScheme>::new(state.clone())
+                .with_metrics(app_metrics.clone())
         });
         let inner_reporters: Reporters<_, MarshalMailbox, Option<NodeStateRptr>> =
             Reporters::from((marshal_mailbox.clone(), node_state_reporter));
