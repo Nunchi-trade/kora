@@ -168,14 +168,8 @@ impl CommonwareBackend {
             "QMDB partition inconsistency detected, repairing"
         );
 
-        repair_partition_seqs(
-            &mut self.accounts,
-            &mut self.storage,
-            &mut self.code,
-            &seqs,
-            target,
-        )
-        .await?;
+        repair_partition_seqs(&mut self.accounts, &mut self.storage, &mut self.code, &seqs, target)
+            .await?;
 
         // Re-read to confirm repair succeeded.
         let repaired =
@@ -191,10 +185,7 @@ impl CommonwareBackend {
             return Err(BackendError::InconsistentPartitions(msg));
         }
 
-        info!(
-            commit_seq = target,
-            "QMDB partition inconsistency repaired successfully"
-        );
+        info!(commit_seq = target, "QMDB partition inconsistency repaired successfully");
         Ok(repaired)
     }
 }
@@ -383,10 +374,7 @@ async fn repair_partition_seqs(
 
     if seqs.accounts != Some(target) {
         accounts
-            .write_batch(vec![(
-                COMMIT_SEQ_ACCOUNT_KEY,
-                Some(encode_commit_seq_account(target)),
-            )])
+            .write_batch(vec![(COMMIT_SEQ_ACCOUNT_KEY, Some(encode_commit_seq_account(target)))])
             .await
             .map_err(|e| BackendError::Storage(e.to_string()))?;
     }

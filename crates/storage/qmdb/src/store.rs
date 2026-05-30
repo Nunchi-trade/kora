@@ -687,10 +687,7 @@ mod tests {
         let stores = store.stores_mut().unwrap();
         stores
             .accounts
-            .write_batch(vec![(
-                COMMIT_SEQ_ACCOUNT_KEY,
-                Some(encode_commit_seq_account(1)),
-            )])
+            .write_batch(vec![(COMMIT_SEQ_ACCOUNT_KEY, Some(encode_commit_seq_account(1)))])
             .await
             .unwrap();
 
@@ -721,10 +718,7 @@ mod tests {
         let stores = store.stores_mut().unwrap();
         stores
             .accounts
-            .write_batch(vec![(
-                COMMIT_SEQ_ACCOUNT_KEY,
-                Some(encode_commit_seq_account(5)),
-            )])
+            .write_batch(vec![(COMMIT_SEQ_ACCOUNT_KEY, Some(encode_commit_seq_account(5)))])
             .await
             .unwrap();
         stores

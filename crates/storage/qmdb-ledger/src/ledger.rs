@@ -69,8 +69,7 @@ impl QmdbLedger {
         genesis_alloc: Vec<(Address, U256)>,
         apply_genesis: bool,
     ) -> Result<Self, Error> {
-        let mut backend =
-            CommonwareBackend::open(context.child("backend"), config.clone()).await?;
+        let mut backend = CommonwareBackend::open(context.child("backend"), config.clone()).await?;
 
         // Verify cross-partition consistency (and auto-repair if needed)
         // before consuming the backend.
