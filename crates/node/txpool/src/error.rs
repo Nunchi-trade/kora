@@ -105,6 +105,24 @@ pub enum TxPoolError {
     /// Replacement transaction does not have sufficient gas price bump.
     #[error("replacement transaction underpriced")]
     ReplacementUnderpriced,
+
+    /// The transaction gas limit exceeds the block gas limit.
+    #[error("gas limit {limit} exceeds block gas limit {block_limit}")]
+    GasLimitTooHigh {
+        /// Provided gas limit.
+        limit: u64,
+        /// Block gas limit.
+        block_limit: u64,
+    },
+
+    /// The initcode size exceeds the EIP-3860 maximum.
+    #[error("initcode size {size} exceeds maximum {max}")]
+    InitcodeTooLarge {
+        /// Actual initcode size.
+        size: usize,
+        /// Maximum allowed size.
+        max: usize,
+    },
 }
 
 #[cfg(test)]
