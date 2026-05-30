@@ -47,7 +47,7 @@ impl<C: Signer> TransportConfig<C> {
     /// let transport = config.build(context)?;
     ///
     /// // Register validators with oracle
-    /// transport.oracle.track(0, validators).await;
+    /// transport.oracle.track(0, validators);
     ///
     /// // Pass channels to consumers
     /// engine.start(
@@ -77,8 +77,7 @@ impl<C: Signer> TransportConfig<C> {
         let gossip_backlog = self.gossip_backlog;
 
         // Create network and oracle
-        let (mut network, oracle) =
-            discovery::Network::new(context.with_label("network"), self.inner);
+        let (mut network, oracle) = discovery::Network::new(context.child("network"), self.inner);
 
         // Register simplex channels (consensus: high frequency, small messages)
         let votes = network.register(CHANNEL_VOTES, quota, consensus_backlog);

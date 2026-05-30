@@ -23,6 +23,7 @@ kora-qmdb-ledger = { path = "../../storage/qmdb-ledger" }
 kora-rpc = { path = "../rpc" }
 
 # Commonware
+commonware-actor.workspace = true
 commonware-codec.workspace = true
 commonware-consensus.workspace = true
 commonware-cryptography.workspace = true

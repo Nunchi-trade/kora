@@ -116,22 +116,13 @@ impl Block {
         *self.cached_id.get_or_init(|| BlockId(keccak256(self.encode())))
     }
 
-    /// Choose a block timestamp that is strictly greater than its parent.
+    /// Choose a block timestamp that tracks wall-clock time without going backwards.
     ///
     /// `now_secs` is the current wall-clock time in seconds since the Unix
-    /// epoch. Returns `None` if `parent_timestamp` is `u64::MAX`, since no
-    /// strictly greater timestamp can be represented.
+    /// epoch. When blocks are produced faster than one per second, multiple
+    /// consecutive blocks may share the same timestamp.
     pub const fn next_timestamp(now_secs: u64, parent_timestamp: u64) -> Option<u64> {
-        match parent_timestamp.checked_add(1) {
-            Some(next) => {
-                if now_secs > next {
-                    Some(now_secs)
-                } else {
-                    Some(next)
-                }
-            }
-            None => None,
-        }
+        if now_secs > parent_timestamp { Some(now_secs) } else { Some(parent_timestamp) }
     }
 }
 
@@ -311,15 +302,15 @@ mod tests {
     }
 
     #[test]
-    fn next_timestamp_advances_parent_when_clock_lags() {
-        assert_eq!(Block::next_timestamp(1_700_000_042, 1_700_000_042), Some(1_700_000_043));
-        assert_eq!(Block::next_timestamp(1_700_000_000, 1_700_000_042), Some(1_700_000_043));
+    fn next_timestamp_allows_same_second_blocks_when_clock_lags() {
+        assert_eq!(Block::next_timestamp(1_700_000_042, 1_700_000_042), Some(1_700_000_042));
+        assert_eq!(Block::next_timestamp(1_700_000_000, 1_700_000_042), Some(1_700_000_042));
     }
 
     #[test]
-    fn next_timestamp_returns_none_at_u64_max() {
-        assert_eq!(Block::next_timestamp(0, u64::MAX), None);
-        assert_eq!(Block::next_timestamp(u64::MAX, u64::MAX), None);
+    fn next_timestamp_handles_u64_max() {
+        assert_eq!(Block::next_timestamp(0, u64::MAX), Some(u64::MAX));
+        assert_eq!(Block::next_timestamp(u64::MAX, u64::MAX), Some(u64::MAX));
     }
 
     #[test]

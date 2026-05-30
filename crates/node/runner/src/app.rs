@@ -12,9 +12,7 @@ use std::{
 use alloy_consensus::Header;
 use alloy_primitives::{Address, B256, Bytes};
 use commonware_consensus::{
-    Application, Block as _, VerifyingApplication,
-    marshal::ancestry::{AncestorStream, BlockProvider},
-    simplex::types::Context,
+    Application, Block as _, marshal::ancestry::Ancestry, simplex::types::Context,
 };
 use commonware_cryptography::{Committable as _, certificate::Scheme as CertScheme};
 use commonware_runtime::{Clock, Metrics, Spawner};
@@ -148,6 +146,9 @@ where
         gas_limit: u64,
         fee_recipient: Address,
     ) -> Self {
+        let mut block_fees = HashMap::new();
+        block_fees.insert(ledger.genesis_block().commitment(), (0, kora_config::INITIAL_BASE_FEE));
+
         Self {
             ledger,
             executor,
@@ -158,7 +159,7 @@ where
             metrics: None,
             recovered_height: Arc::new(AtomicU64::new(0)),
             last_verified_height: Arc::new(AtomicU64::new(0)),
-            block_fees: Arc::new(RwLock::new(HashMap::new())),
+            block_fees: Arc::new(RwLock::new(block_fees)),
             _scheme: std::marker::PhantomData,
         }
     }
@@ -500,18 +501,18 @@ where
         // executing transactions.  During catch-up the blocks are already
         // backed by a finality certificate so we skip the checks.
         if !self.is_catching_up(block.height) {
-            // Monotonicity: block timestamp must be strictly greater than
-            // the parent timestamp (matches the contract enforced by
-            // `Block::next_timestamp` on the proposer side).
+            // Monotonicity: block timestamp must not move backwards.
+            // `block.timestamp` is second-granularity wall-clock time, so
+            // fast blocks can legitimately share the same timestamp.
             if let Some(parent_ts) = parent_timestamp
-                && block.timestamp <= parent_ts
+                && block.timestamp < parent_ts
             {
                 warn!(
                     ?digest,
                     height = block.height,
                     block_timestamp = block.timestamp,
                     parent_timestamp = parent_ts,
-                    "verify_block: timestamp not increasing"
+                    "verify_block: timestamp moved backwards"
                 );
                 return false;
             }
@@ -768,25 +769,11 @@ where
     type Context = Context<ConsensusDigest, S::PublicKey>;
     type Block = Block;
 
-    fn genesis(&mut self) -> impl std::future::Future<Output = Self::Block> + Send {
-        async move {
-            let genesis = self.ledger.genesis_block();
-            // Seed the genesis block's fee data so that block 1 can derive
-            // its base fee from the parent (genesis) gas usage.
-            let genesis_digest = genesis.commitment();
-            self.record_block_fees(genesis_digest, 0, kora_config::INITIAL_BASE_FEE);
-            genesis
-        }
-    }
-
-    fn propose<A>(
+    fn propose(
         &mut self,
         context: (Env, Self::Context),
-        mut ancestry: AncestorStream<A, Self::Block>,
-    ) -> impl std::future::Future<Output = Option<Self::Block>> + Send
-    where
-        A: BlockProvider<Block = Self::Block>,
-    {
+        mut ancestry: impl Ancestry<Self::Block>,
+    ) -> impl std::future::Future<Output = Option<Self::Block>> + Send {
         let node_state = self.node_state.clone();
         let metrics = self.metrics.clone();
         let env = context.0;
@@ -860,22 +847,12 @@ where
             block
         }
     }
-}
 
-impl<Env, S, E> VerifyingApplication<Env> for RevmApplication<S, E>
-where
-    Env: Rng + Spawner + Metrics + Clock,
-    S: CertScheme + Send + Sync + 'static,
-    E: BlockExecutor<OverlayState<QmdbState>, Tx = Bytes> + Clone + Send + Sync + 'static,
-{
-    fn verify<A>(
+    fn verify(
         &mut self,
         context: (Env, Self::Context),
-        mut ancestry: AncestorStream<A, Self::Block>,
-    ) -> impl std::future::Future<Output = bool> + Send
-    where
-        A: BlockProvider<Block = Self::Block>,
-    {
+        mut ancestry: impl Ancestry<Self::Block>,
+    ) -> impl std::future::Future<Output = bool> + Send {
         let env = context.0;
         async move {
             let start = Instant::now();

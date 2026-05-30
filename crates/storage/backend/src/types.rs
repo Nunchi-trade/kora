@@ -4,6 +4,7 @@ use alloy_primitives::U256;
 use bytes::{Buf, BufMut};
 use commonware_codec::{EncodeSize, Error as CodecError, Read, Write};
 use commonware_cryptography::sha256::Sha256 as QmdbHasher;
+use commonware_parallel::Sequential;
 use commonware_runtime::tokio;
 use commonware_storage::{merkle::mmr, qmdb::any, translator::EightCap};
 use commonware_utils::sequence::FixedBytes;
@@ -79,6 +80,7 @@ pub(crate) type AccountDb = any::unordered::variable::Db<
     AccountValue,
     QmdbHasher,
     EightCap,
+    Sequential,
 >;
 pub(crate) type StorageDb = any::unordered::variable::Db<
     mmr::Family,
@@ -87,9 +89,19 @@ pub(crate) type StorageDb = any::unordered::variable::Db<
     StorageValue,
     QmdbHasher,
     EightCap,
+    Sequential,
 >;
-pub(crate) type CodeDb =
-    any::unordered::variable::Db<mmr::Family, Context, CodeKey, Vec<u8>, QmdbHasher, EightCap>;
+pub(crate) type CodeDb = any::unordered::variable::Db<
+    mmr::Family,
+    Context,
+    CodeKey,
+    Vec<u8>,
+    QmdbHasher,
+    EightCap,
+    Sequential,
+>;
+pub(crate) type CodeConfig =
+    any::VariableConfig<EightCap, ((), (commonware_codec::RangeCfg<usize>, ())), Sequential>;
 
 pub(crate) struct StoreSlot<T>(Option<T>);
 

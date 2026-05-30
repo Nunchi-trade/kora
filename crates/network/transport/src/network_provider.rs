@@ -74,7 +74,7 @@ where
         let gossip_backlog = self.config.gossip_backlog;
 
         let (mut network, oracle) =
-            discovery::Network::new(context.with_label("network"), self.config.inner);
+            discovery::Network::new(context.child("network"), self.config.inner);
 
         let votes = network.register(CHANNEL_VOTES, self.quota, consensus_backlog);
         let certs = network.register(CHANNEL_CERTS, self.quota, consensus_backlog);

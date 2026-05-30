@@ -2,12 +2,11 @@
 
 use alloy_primitives::B256;
 use commonware_cryptography::sha256::Digest as QmdbDigest;
-use commonware_storage::{qmdb::any::VariableConfig, translator::EightCap};
 use kora_qmdb::{QmdbBatchable, QmdbGettable};
 
 use crate::{
     BackendError,
-    types::{CodeDb, CodeKey, Context, StoreSlot},
+    types::{CodeConfig, CodeDb, CodeKey, Context, StoreSlot},
 };
 
 /// Code partition backed by commonware-storage.
@@ -27,10 +26,7 @@ pub(crate) struct CodeStoreDirty {
 
 impl CodeStore {
     /// Initialize the code store.
-    pub async fn init(
-        context: Context,
-        config: VariableConfig<EightCap, ((), (commonware_codec::RangeCfg<usize>, ()))>,
-    ) -> Result<Self, BackendError> {
+    pub async fn init(context: Context, config: CodeConfig) -> Result<Self, BackendError> {
         let inner = CodeDb::init(context, config)
             .await
             .map_err(|e| BackendError::Storage(e.to_string()))?;

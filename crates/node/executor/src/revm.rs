@@ -83,9 +83,9 @@ impl RevmExecutor {
             )));
         }
 
-        if header.timestamp <= parent.timestamp {
+        if header.timestamp < parent.timestamp {
             return Err(ExecutionError::BlockValidation(format!(
-                "timestamp not increasing: parent {}, current {}",
+                "timestamp moved backwards: parent {}, current {}",
                 parent.timestamp, header.timestamp
             )));
         }
@@ -917,7 +917,7 @@ mod tests {
             base_fee_per_gas: None,
         };
 
-        let header = Header {
+        let mut header = Header {
             parent_hash: B256::repeat_byte(1),
             number: 101,
             timestamp: 999,
@@ -926,6 +926,9 @@ mod tests {
         };
 
         assert!(executor.validate_header_against_parent(&header, &parent).is_err());
+
+        header.timestamp = 1000;
+        assert!(executor.validate_header_against_parent(&header, &parent).is_ok());
     }
 
     #[test]

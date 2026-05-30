@@ -5,6 +5,7 @@ use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_p2p::Provider;
 use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner};
+use commonware_utils::NZUsize;
 
 /// Initializes the buffered broadcast engine with sensible defaults.
 #[derive(Debug, Clone, Copy)]
@@ -39,7 +40,7 @@ impl BroadcastInitializer {
     {
         let config = Config {
             public_key,
-            mailbox_size: Self::DEFAULT_MAILBOX_SIZE,
+            mailbox_size: NZUsize!(Self::DEFAULT_MAILBOX_SIZE),
             deque_size: Self::DEFAULT_DEQUE_SIZE,
             priority: Self::DEFAULT_PRIORITY,
             codec_config,

@@ -1,6 +1,7 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use clap::{Parser, Subcommand};
+use commonware_runtime::Supervisor as _;
 use commonware_utils::{Faults, N3f1};
 use kora_config::NodeConfig;
 use kora_domain::BootstrapConfig;
@@ -289,7 +290,7 @@ impl Cli {
         executor.start(|context| async move {
             let mut transport = config
                 .network
-                .build_local_transport(identity_key, context.clone())
+                .build_local_transport(identity_key, context.child("transport"))
                 .map_err(|e| eyre::eyre!("failed to build transport: {}", e))?;
 
             transport
@@ -300,19 +301,19 @@ impl Cli {
                         Set::from_iter_dedup(peers.participants),
                         Set::from_iter_dedup(peers.secondary_participants),
                     ),
-                )
-                .await;
+                );
 
             tracing::info!("secondary peer joined network");
 
             // Spawn a metrics server so Prometheus can scrape this node.
-            let metrics_context = context.clone();
-            context.with_label("metrics").shared(true).spawn(move |_| async move {
+            let metrics_context = Arc::new(context.child("metrics_endpoint"));
+            context.child("metrics").shared(true).spawn(move |_| async move {
                 let app = axum::Router::new().route(
                     "/metrics",
                     axum::routing::get(move || {
-                        let body = metrics_context.encode();
+                        let metrics_context = metrics_context.clone();
                         async move {
+                            let body = metrics_context.encode();
                             (
                                 axum::http::StatusCode::OK,
                                 [(
@@ -340,7 +341,7 @@ impl Cli {
             });
 
             // Spawn periodic health logging.
-            context.with_label("health").shared(true).spawn(move |ctx| async move {
+            context.child("health").shared(true).spawn(move |ctx| async move {
                 let interval = std::time::Duration::from_secs(30);
                 loop {
                     ctx.sleep(interval).await;

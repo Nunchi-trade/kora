@@ -17,7 +17,9 @@ use commonware_consensus::{
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519};
 use commonware_p2p::{Manager as _, simulated};
 use commonware_parallel::Sequential;
-use commonware_runtime::{Clock, Metrics, Runner as _, Spawner, buffer::paged::CacheRef, tokio};
+use commonware_runtime::{
+    Clock, Metrics, Runner as _, Spawner, Supervisor as _, buffer::paged::CacheRef, tokio,
+};
 use commonware_utils::{NZU64, NZUsize, TryCollect as _, ordered::Set};
 use futures::{StreamExt as _, channel::mpsc};
 use kora_config::INITIAL_BASE_FEE;
@@ -103,8 +105,20 @@ pub struct TestHarness;
 impl TestHarness {
     /// Run a test with the given configuration and setup.
     pub fn run(config: TestConfig, setup: TestSetup) -> Result<TestOutcome, HarnessError> {
-        let executor = tokio::Runner::default();
-        executor.start(|context| async move { Self::run_inner(context, config, setup).await })
+        let handle = std::thread::Builder::new()
+            .name("kora-e2e-harness".to_string())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(move || {
+                let executor = tokio::Runner::default();
+                executor
+                    .start(|context| async move { Self::run_inner(context, config, setup).await })
+            })
+            .expect("failed to spawn e2e harness thread");
+
+        match handle.join() {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
     }
 
     async fn run_inner(
@@ -206,7 +220,7 @@ async fn start_network(
     participants: Set<ed25519::PublicKey>,
 ) -> SimControl<ed25519::PublicKey> {
     let (network, oracle) = simulated::Network::new(
-        SimContext::new(context.with_label("network")),
+        SimContext::new(context.child("network")),
         simulated::Config {
             max_size: MAX_MSG_SIZE as u32,
             disconnect_on_block: true,
@@ -216,7 +230,7 @@ async fn start_network(
     network.start();
 
     let control = SimControl::new(oracle);
-    control.manager().track(0, participants).await;
+    control.manager().track(0, participants);
     control
 }
 
@@ -313,7 +327,7 @@ async fn start_single_node(
 
     // Initialize ledger
     let state = LedgerView::init_with_genesis_timestamp(
-        context.with_label(&format!("state_{index}")),
+        context.child("state").with_attribute("node", index),
         format!("{partition_prefix}-qmdb-{index}"),
         bootstrap.genesis_alloc.clone(),
         bootstrap.genesis_timestamp,
@@ -322,7 +336,7 @@ async fn start_single_node(
     .context("init qmdb")?;
 
     let ledger = LedgerService::new(state.clone());
-    spawn_ledger_observers(ledger.clone(), context.clone(), index, finalized_tx);
+    spawn_ledger_observers(ledger.clone(), context.child("ledger_observers"), index, finalized_tx);
     let test_node = TestNode::new(index, ledger.clone());
 
     // Create application
@@ -336,8 +350,12 @@ async fn start_single_node(
     // Create finalized reporter
     let executor = RevmExecutor::new(chain_id);
     let context_provider = TestContextProvider { gas_limit };
-    let finalized_reporter =
-        FinalizedReporter::new(ledger.clone(), context.clone(), executor, context_provider);
+    let finalized_reporter = FinalizedReporter::new(
+        ledger.clone(),
+        context.child("finalized_reporter"),
+        executor,
+        context_provider,
+    );
 
     // Start marshal
     let marshal_mailbox = start_marshal(
@@ -352,6 +370,7 @@ async fn start_single_node(
         channels.marshal.blocks,
         channels.marshal.backfill,
         finalized_reporter,
+        ledger.genesis_block(),
         partition_prefix,
     )
     .await?;
@@ -359,7 +378,7 @@ async fn start_single_node(
     // Create marshaled application
     let epocher = FixedEpocher::new(NZU64!(EPOCH_LENGTH));
     let marshaled = Inline::new(
-        context.with_label(&format!("marshaled_{index}")),
+        context.child("marshaled").with_attribute("node", index),
         app,
         marshal_mailbox.clone(),
         epocher,
@@ -376,7 +395,7 @@ async fn start_single_node(
 
     // Start consensus engine
     let engine = simplex::Engine::new(
-        context.with_label(&format!("engine_{index}")),
+        context.child("engine").with_attribute("node", index),
         simplex::Config {
             scheme,
             elector: Random,
@@ -386,8 +405,9 @@ async fn start_single_node(
             reporter,
             strategy: Sequential,
             partition: format!("{partition_prefix}-{index}"),
-            mailbox_size: MAILBOX_SIZE,
+            mailbox_size: NZUsize!(MAILBOX_SIZE),
             epoch: Epoch::zero(),
+            floor: simplex::Floor::Genesis(ledger.genesis_block().commitment()),
             replay_buffer: NZUsize!(1024 * 1024),
             write_buffer: NZUsize!(1024 * 1024),
             leader_timeout: Duration::from_secs(1),
@@ -396,7 +416,7 @@ async fn start_single_node(
             fetch_timeout: Duration::from_secs(1),
             activity_timeout: ViewDelta::new(20),
             skip_timeout: ViewDelta::new(10),
-            fetch_concurrent: 8,
+            fetch_concurrent: NZUsize!(8),
             page_cache,
             forwarding: simplex::ForwardingPolicy::Disabled,
         },
@@ -445,6 +465,7 @@ async fn start_marshal<M, R>(
     blocks: (simulated::Sender<Peer, SimContext>, simulated::Receiver<Peer>),
     backfill: (simulated::Sender<Peer, SimContext>, simulated::Receiver<Peer>),
     application: R,
+    genesis: Block,
     partition_prefix: &str,
 ) -> anyhow::Result<commonware_consensus::marshal::core::Mailbox<ThresholdScheme, Standard<Block>>>
 where
@@ -456,7 +477,7 @@ where
     use commonware_cryptography::certificate::Scheme as _;
     use commonware_utils::acknowledgement::Exact;
 
-    let ctx = context.with_label(&format!("marshal_{index}"));
+    let ctx = context.child("marshal").with_attribute("node", index);
     let marshal_partition = format!("{partition_prefix}-marshal-{index}");
 
     #[derive(Clone)]
@@ -478,7 +499,7 @@ where
     let scheme_provider = ConstantSchemeProvider(Arc::new(scheme));
 
     let resolver = PeerInitializer::init::<_, _, _, Block, _, _, _>(
-        &ctx,
+        ctx.child("resolver"),
         public_key.clone(),
         manager.clone(),
         control,
@@ -486,7 +507,7 @@ where
     );
 
     let (broadcast_engine, buffer) = BroadcastInitializer::init::<_, PublicKey, Block, M>(
-        ctx.with_label("broadcast"),
+        ctx.child("broadcast"),
         public_key,
         manager,
         block_codec_config,
@@ -496,7 +517,7 @@ where
     ThresholdScheme::certificate_codec_config_unbounded();
     let finalizations_by_height =
         ArchiveInitializer::init_prunable::<_, ConsensusDigest, CertArchive>(
-            ctx.with_label("finalizations_by_height"),
+            ctx.child("finalizations_by_height"),
             format!("{marshal_partition}-finalizations-by-height"),
             (),
         )
@@ -504,7 +525,7 @@ where
         .context("init finalizations archive")?;
 
     let finalized_blocks = ArchiveInitializer::init_prunable::<_, ConsensusDigest, Block>(
-        ctx.with_label("finalized_blocks"),
+        ctx.child("finalized_blocks"),
         format!("{marshal_partition}-finalized-blocks"),
         block_codec_config,
     )
@@ -513,10 +534,11 @@ where
 
     let (actor, mailbox, _last_processed_height) =
         kora_marshal::ActorInitializer::init_with_partition::<_, Block, _, _, _, Exact>(
-            ctx.clone(),
+            ctx.child("actor"),
             finalizations_by_height,
             finalized_blocks,
             scheme_provider,
+            commonware_consensus::marshal::Start::Genesis(genesis),
             buffer_pool,
             block_codec_config,
             format!("{marshal_partition}-actor"),
@@ -658,9 +680,7 @@ use std::collections::BTreeSet;
 
 use alloy_primitives::Bytes;
 use commonware_consensus::{
-    Application, Block as _, VerifyingApplication,
-    marshal::ancestry::{AncestorStream, BlockProvider},
-    simplex::types::Context,
+    Application, Block as _, marshal::ancestry::Ancestry, simplex::types::Context,
 };
 use commonware_cryptography::{Committable as _, certificate::Scheme as CertScheme};
 use kora_consensus::{
@@ -834,14 +854,10 @@ where
     type Context = Context<ConsensusDigest, S::PublicKey>;
     type Block = Block;
 
-    async fn genesis(&mut self) -> Self::Block {
-        self.ledger.genesis_block()
-    }
-
-    fn propose<A: BlockProvider<Block = Self::Block>>(
+    fn propose(
         &mut self,
         context: (Env, Self::Context),
-        mut ancestry: AncestorStream<A, Self::Block>,
+        mut ancestry: impl Ancestry<Self::Block>,
     ) -> impl std::future::Future<Output = Option<Self::Block>> + Send {
         let env = context.0;
         async move {
@@ -852,17 +868,11 @@ where
             self.build_block(&parent, timestamp).await
         }
     }
-}
 
-impl<Env, S> VerifyingApplication<Env> for TestApplication<S>
-where
-    Env: Rng + Spawner + Metrics + Clock,
-    S: CertScheme + Send + Sync + 'static,
-{
-    async fn verify<A: BlockProvider<Block = Self::Block>>(
+    async fn verify(
         &mut self,
         _context: (Env, Self::Context),
-        mut ancestry: AncestorStream<A, Self::Block>,
+        mut ancestry: impl Ancestry<Self::Block>,
     ) -> bool {
         let mut blocks_to_verify = Vec::new();
         while let Some(block) = ancestry.next().await {

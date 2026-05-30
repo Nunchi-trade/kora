@@ -29,6 +29,7 @@ kora-txpool.workspace = true
 commonware-codec.workspace = true
 commonware-consensus.workspace = true
 commonware-cryptography.workspace = true
+commonware-actor.workspace = true
 commonware-p2p.workspace = true
 commonware-runtime.workspace = true
 commonware-storage.workspace = true

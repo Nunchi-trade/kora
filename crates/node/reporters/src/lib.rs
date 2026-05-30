@@ -20,6 +20,7 @@ use alloy_consensus::{
 };
 use alloy_eips::eip2718::Decodable2718 as _;
 use alloy_primitives::{B256, Bloom, Bytes, U256, keccak256, logs_bloom};
+use commonware_actor::Feedback;
 use commonware_consensus::{
     Block as _, Reporter, Viewable as _,
     marshal::Update,
@@ -29,7 +30,7 @@ use commonware_consensus::{
     },
 };
 use commonware_cryptography::{Committable as _, bls12381::primitives::variant::Variant};
-use commonware_runtime::{Spawner as _, tokio};
+use commonware_runtime::{Spawner as _, Supervisor as _, tokio};
 use commonware_utils::acknowledgement::{Acknowledgement as _, Exact};
 pub use gc_log::SelfdestructGcLog;
 use kora_consensus::BlockExecution;
@@ -43,6 +44,29 @@ use kora_qmdb_ledger::QmdbState;
 use kora_rpc::{MempoolEventSender, NodeState};
 use thiserror::Error;
 use tracing::{error, info, trace, warn};
+
+#[cfg(test)]
+fn run_reporter_test<F, Fut>(f: F)
+where
+    F: FnOnce(tokio::Context) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name("kora-reporters-test".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            use commonware_runtime::Runner as _;
+
+            let runner = tokio::Runner::default();
+            runner.start(f);
+        })
+        .expect("failed to spawn reporters test thread");
+
+    match handle.join() {
+        Ok(()) => (),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
 
 /// Provides block execution context for finalized block verification.
 pub trait BlockContextProvider: Clone + Send + Sync + 'static {
@@ -199,11 +223,12 @@ where
 {
     type Activity = Activity<Scheme<PublicKey, V>, ConsensusDigest>;
 
-    fn report(&mut self, activity: Self::Activity) -> impl std::future::Future<Output = ()> + Send {
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
         let state = self.state.clone();
-        async move {
+        ::tokio::spawn(async move {
             seed_report_inner(state, activity).await;
-        }
+        });
+        Feedback::Ok
     }
 }
 
@@ -575,7 +600,7 @@ where
     if persist_checkpoint {
         let persist_state = state.clone();
         let persist_handle = context
-            .clone()
+            .child("persist")
             .shared(true)
             .spawn(move |_| async move { persist_state.persist_snapshot(digest).await });
         let persist_result = persist_handle
@@ -644,7 +669,6 @@ mod finalize_error_tests {
 
     use alloy_consensus::Header;
     use alloy_primitives::{B256, Bytes};
-    use commonware_runtime::Runner as _;
     use kora_domain::StateRoot;
     use kora_executor::ExecutionError;
     use kora_ledger::LedgerView;
@@ -705,11 +729,10 @@ mod finalize_error_tests {
     /// before the error is considered permanent.
     #[test]
     fn finalize_with_retry_returns_error_on_permanent_failure() {
-        let runner = tokio::Runner::default();
-        runner.start(|context| async move {
+        run_reporter_test(|context| async move {
             // -- set up ledger with an empty genesis --
             let ledger = LedgerView::init(
-                context.clone(),
+                context.child("ledger"),
                 next_partition("reporters-finalize-err"),
                 Vec::new(),
             )
@@ -753,7 +776,6 @@ mod finalize_success_tests {
 
     use alloy_consensus::Header;
     use alloy_primitives::{Address, B256, U256};
-    use commonware_runtime::Runner as _;
     use commonware_utils::acknowledgement::{Acknowledgement as _, Exact};
     use k256::ecdsa::SigningKey;
     use kora_domain::evm::Evm;
@@ -808,11 +830,10 @@ mod finalize_success_tests {
     /// acknowledge the update.
     #[test]
     fn successful_finalization_persists_and_acknowledges() {
-        let runner = tokio::Runner::default();
-        runner.start(|context| async move {
+        run_reporter_test(|context| async move {
             // -- set up ledger with an empty genesis --
             let ledger = LedgerView::init(
-                context.clone(),
+                context.child("ledger"),
                 next_partition("reporters-finalize-ok"),
                 Vec::new(),
             )
@@ -879,10 +900,9 @@ mod finalize_success_tests {
     /// the index with the finalized block metadata.
     #[test]
     fn finalization_updates_block_index() {
-        let runner = tokio::Runner::default();
-        runner.start(|context| async move {
+        run_reporter_test(|context| async move {
             let ledger = LedgerView::init(
-                context.clone(),
+                context.child("ledger"),
                 next_partition("reporters-finalize-index"),
                 Vec::new(),
             )
@@ -930,10 +950,9 @@ mod finalize_success_tests {
 
     #[test]
     fn checkpoint_interval_persists_chain_only_on_boundary() {
-        let runner = tokio::Runner::default();
-        runner.start(|context| async move {
+        run_reporter_test(|context| async move {
             let ledger = LedgerView::init(
-                context.clone(),
+                context.child("ledger"),
                 next_partition("reporters-finalize-checkpoint"),
                 Vec::new(),
             )
@@ -953,7 +972,7 @@ mod finalize_success_tests {
 
             handle_finalized_update(
                 service.clone(),
-                context.clone(),
+                context.child("finalize_block1"),
                 EmptySuccessExecutor,
                 StubProvider,
                 None,
@@ -1273,7 +1292,6 @@ fn receipt_effective_gas_price(metadata: &TxMetadata, base_fee_per_gas: Option<u
     max_fee_per_gas.min(u128::from(base_fee_per_gas).saturating_add(priority_fee))
 }
 
-#[derive(Clone)]
 /// Persists finalized blocks.
 pub struct FinalizedReporter<E, P> {
     /// Ledger service used to verify blocks and persist snapshots.
@@ -1296,8 +1314,33 @@ pub struct FinalizedReporter<E, P> {
     checkpoint_interval: u64,
     /// Marshal acknowledgements held until the next checkpoint boundary.
     pending_acks: Arc<Mutex<Vec<Exact>>>,
+    /// Serializes finalized-block persistence so marshal acknowledgements advance in chain order.
+    finalize_lock: Arc<::tokio::sync::Mutex<()>>,
     /// Optional node state for tracking the latest finalized height.
     node_state: Option<NodeState>,
+}
+
+impl<E, P> Clone for FinalizedReporter<E, P>
+where
+    E: Clone,
+    P: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+            context: self.context.child("finalized_reporter"),
+            executor: self.executor.clone(),
+            provider: self.provider.clone(),
+            block_index: self.block_index.clone(),
+            mempool_broadcast: self.mempool_broadcast.clone(),
+            gc_log: self.gc_log.clone(),
+            metrics: self.metrics.clone(),
+            checkpoint_interval: self.checkpoint_interval,
+            pending_acks: self.pending_acks.clone(),
+            finalize_lock: self.finalize_lock.clone(),
+            node_state: self.node_state.clone(),
+        }
+    }
 }
 
 impl<E, P> fmt::Debug for FinalizedReporter<E, P> {
@@ -1324,6 +1367,7 @@ where
             metrics: None,
             checkpoint_interval: DEFAULT_CHECKPOINT_INTERVAL,
             pending_acks: Arc::new(Mutex::new(Vec::new())),
+            finalize_lock: Arc::new(::tokio::sync::Mutex::new(())),
             node_state: None,
         }
     }
@@ -1382,9 +1426,9 @@ where
 {
     type Activity = Update<Block>;
 
-    fn report(&mut self, update: Self::Activity) -> impl std::future::Future<Output = ()> + Send {
+    fn report(&mut self, update: Self::Activity) -> Feedback {
         let state = self.state.clone();
-        let context = self.context.clone();
+        let context = self.context.child("report");
         let executor = self.executor.clone();
         let provider = self.provider.clone();
         let block_index = self.block_index.clone();
@@ -1393,8 +1437,10 @@ where
         let metrics = self.metrics.clone();
         let checkpoint_interval = self.checkpoint_interval;
         let pending_acks = self.pending_acks.clone();
+        let finalize_lock = self.finalize_lock.clone();
         let node_state = self.node_state.clone();
-        async move {
+        self.context.child("report_task").spawn(move |_| async move {
+            let _guard = finalize_lock.lock().await;
             handle_finalized_update(
                 state,
                 context,
@@ -1410,7 +1456,8 @@ where
                 update,
             )
             .await;
-        }
+        });
+        Feedback::Ok
     }
 }
 
@@ -1560,7 +1607,7 @@ where
 {
     type Activity = Activity<S, ConsensusDigest>;
 
-    fn report(&mut self, activity: Self::Activity) -> impl std::future::Future<Output = ()> + Send {
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
         match &activity {
             Activity::Notarization(n) => {
                 self.state.set_view(n.proposal.round.view().get());
@@ -1621,6 +1668,6 @@ where
             | Activity::Nullify(_)
             | Activity::Finalize(_) => {}
         }
-        async {}
+        Feedback::Ok
     }
 }

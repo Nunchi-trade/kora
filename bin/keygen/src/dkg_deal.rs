@@ -8,7 +8,7 @@ use std::{fs, io::Write as _, path::PathBuf};
 use clap::Args;
 use commonware_codec::{ReadExt, Write as _};
 use commonware_cryptography::bls12381::{
-    dkg,
+    dkg::feldman_desmedt as dkg,
     primitives::{sharing::Mode, variant::MinSig},
 };
 use commonware_utils::{Faults, N3f1, TryCollect, ordered::Set};

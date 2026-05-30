@@ -12,6 +12,7 @@ use std::{
 use alloy_consensus::Header;
 use alloy_primitives::{Address, B256, keccak256};
 use anyhow::Context as _;
+use commonware_actor::Feedback;
 use commonware_consensus::{
     Block as _, Reporters,
     marshal::{
@@ -28,7 +29,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{Blocker, Manager, Receiver as _, Recipients, Sender as _, TrackedPeers};
 use commonware_runtime::{
-    Clock as _, Handle as RuntimeHandle, Metrics as _, Spawner, ThreadPooler as _,
+    Clock as _, Handle as RuntimeHandle, Metrics as _, Spawner, Supervisor as _, ThreadPooler as _,
     buffer::paged::CacheRef, tokio as cw_tokio,
 };
 use commonware_storage::archive::{Archive, Identifier as ArchiveId};
@@ -63,7 +64,9 @@ impl kora_metrics::MetricsRegister for RuntimeMetrics<'_> {
         help: H,
         metric: impl prometheus_client::registry::Metric,
     ) {
-        commonware_runtime::Metrics::register(self.0, name, help, metric);
+        // AppMetrics lives for the process lifetime; keep commonware's
+        // registration handles alive for the same duration.
+        std::mem::forget(commonware_runtime::Metrics::register(self.0, name, help, metric));
     }
 }
 
@@ -129,16 +132,14 @@ impl<P: commonware_cryptography::PublicKey> GraduatedBlocker<P> {
 impl<P: commonware_cryptography::PublicKey> Blocker for GraduatedBlocker<P> {
     type PublicKey = P;
 
-    fn block(&mut self, peer: Self::PublicKey) -> impl std::future::Future<Output = ()> + Send {
+    fn block(&mut self, peer: Self::PublicKey) -> Feedback {
         let catching_up = self.catching_up.load(Ordering::Relaxed);
-        let mut oracle = self.oracle.clone();
-        async move {
-            if catching_up {
-                warn!(?peer, "GraduatedBlocker: suppressing block request during catch-up");
-            } else {
-                warn!(?peer, "GraduatedBlocker: blocking Byzantine peer via oracle");
-                oracle.block(peer).await;
-            }
+        if catching_up {
+            warn!(?peer, "GraduatedBlocker: suppressing block request during catch-up");
+            Feedback::Ok
+        } else {
+            warn!(?peer, "GraduatedBlocker: blocking Byzantine peer via oracle");
+            self.oracle.block(peer)
         }
     }
 }
@@ -690,7 +691,7 @@ fn spawn_ledger_observers<S: Spawner>(service: LedgerService, spawner: S, data_d
 }
 
 fn spawn_txpool_cleanup(pool: TransactionPool, context: cw_tokio::Context) {
-    context.with_label("txpool-cleanup").shared(false).spawn(move |ctx| async move {
+    context.child("txpool_cleanup").shared(false).spawn(move |ctx| async move {
         loop {
             ctx.sleep(TXPOOL_CLEANUP_INTERVAL).await;
             let removed = pool.cleanup();
@@ -734,7 +735,7 @@ fn mark_seen(seen: &SeenSet, hash: B256) -> bool {
 /// operators (and log-based alerting) can detect connectivity issues even
 /// without Prometheus.
 fn spawn_partition_monitor(node_state: kora_rpc::NodeState, context: cw_tokio::Context) {
-    context.with_label("partition-monitor").shared(false).spawn(move |ctx| async move {
+    context.child("partition_monitor").shared(false).spawn(move |ctx| async move {
         loop {
             ctx.sleep(PARTITION_CHECK_INTERVAL).await;
             let status = node_state.status();
@@ -792,7 +793,7 @@ fn spawn_consensus_monitor(
 /// to flush buffered log output.  This makes post-mortem diagnosis possible
 /// even when the process is restarted by a supervisor immediately.
 fn spawn_task_watchdog(context: &cw_tokio::Context, name: &'static str, handle: RuntimeHandle<()>) {
-    context.with_label(name).shared(true).spawn(move |ctx| async move {
+    context.child(name).shared(true).spawn(move |ctx| async move {
         let reason = match handle.await {
             Ok(()) => {
                 error!(task = name, "critical task exited cleanly — this should never happen for a long-lived consensus actor");
@@ -907,7 +908,7 @@ impl ProductionRunner {
 
             let transport = config
                 .network
-                .build_local_transport(validator_key, context.clone())
+                .build_local_transport(validator_key, context.child("transport"))
                 .map_err(|e| anyhow::anyhow!("failed to build transport: {}", e))?;
 
             let ctx =
@@ -951,7 +952,7 @@ impl NodeRunner for ProductionRunner {
         let validators = self.scheme.participants().clone();
         let secondary = Set::from_iter_dedup(self.secondary_peers.iter().cloned());
         let secondary_count = secondary.len();
-        transport.oracle.track(0, TrackedPeers::new(validators, secondary)).await;
+        transport.oracle.track(0, TrackedPeers::new(validators, secondary));
         info!(
             validators = self.scheme.participants().len(),
             secondary_peers = secondary_count,
@@ -986,7 +987,7 @@ impl NodeRunner for ProductionRunner {
         <ThresholdScheme as commonware_cryptography::certificate::Scheme>::certificate_codec_config_unbounded();
         let finalizations_by_height =
             ArchiveInitializer::init_prunable_checkpointed::<_, ConsensusDigest, CertArchive>(
-                context.with_label("finalizations_by_height"),
+                context.child("finalizations_by_height"),
                 finalizations_prefix,
                 (),
                 checkpoint_interval,
@@ -996,7 +997,7 @@ impl NodeRunner for ProductionRunner {
 
         let finalized_blocks =
             ArchiveInitializer::init_prunable_checkpointed::<_, ConsensusDigest, Block>(
-                context.with_label("finalized_blocks"),
+                context.child("finalized_blocks"),
                 blocks_prefix,
                 block_cfg,
                 checkpoint_interval,
@@ -1006,7 +1007,7 @@ impl NodeRunner for ProductionRunner {
 
         let has_finalized_history = finalized_blocks.last_index().is_some();
         let state = LedgerView::init_with_genesis_options(
-            context.with_label("state"),
+            context.child("state"),
             format!("{}-qmdb", self.partition_prefix),
             self.bootstrap.genesis_alloc.clone(),
             !has_finalized_history,
@@ -1022,9 +1023,13 @@ impl NodeRunner for ProductionRunner {
         let ledger = LedgerService::new(state.clone());
         let block_index = Arc::new(BlockIndex::new());
         seed_genesis_block_index(&block_index, &ledger.genesis_block(), gas_limit);
-        spawn_ledger_observers(ledger.clone(), context.clone(), config.data_dir.clone());
+        spawn_ledger_observers(
+            ledger.clone(),
+            context.child("ledger_observers"),
+            config.data_dir.clone(),
+        );
         let txpool = ledger.txpool().await;
-        spawn_txpool_cleanup(txpool.clone(), context.clone());
+        spawn_txpool_cleanup(txpool.clone(), context.child("txpool"));
 
         // Initialize application-level Prometheus metrics and register them
         // with the commonware runtime so they appear on the /metrics endpoint.
@@ -1046,7 +1051,7 @@ impl NodeRunner for ProductionRunner {
                 let seen = seen.clone();
                 let mut sender = tx_gossip_sender;
                 let out_metrics = app_metrics.clone();
-                context.with_label("tx-gossip-out").shared(true).spawn(move |_| async move {
+                context.child("tx_gossip_out").shared(true).spawn(move |_| async move {
                     let mut rx = gossip_outbound_rx;
                     while let Some(raw) = rx.recv().await {
                         let hash = keccak256(&raw);
@@ -1054,11 +1059,16 @@ impl NodeRunner for ProductionRunner {
                             continue;
                         }
                         let msg = bytes::Bytes::copy_from_slice(&raw);
-                        if let Err(e) = sender.send(Recipients::All, msg, false).await {
-                            warn!(error = %e, "tx gossip: failed to broadcast transaction");
+                        let recipients = sender.send(Recipients::All, msg, false);
+                        if recipients.is_empty() {
+                            warn!("tx gossip: failed to broadcast transaction");
                             out_metrics.gossip_tx_broadcast_failed.inc();
                         } else {
-                            trace!(?hash, "tx gossip: broadcast transaction to peers");
+                            trace!(
+                                ?hash,
+                                recipients = recipients.len(),
+                                "tx gossip: broadcast transaction to peers"
+                            );
                             out_metrics.gossip_tx_broadcast.inc();
                         }
                     }
@@ -1074,7 +1084,7 @@ impl NodeRunner for ProductionRunner {
                 let gossip_pool = txpool.clone();
                 let mut receiver = tx_gossip_receiver;
                 let in_metrics = app_metrics.clone();
-                context.with_label("tx-gossip-in").shared(true).spawn(move |_| async move {
+                context.child("tx_gossip_in").shared(true).spawn(move |_| async move {
                     loop {
                         let (peer, raw) = match receiver.recv().await {
                             Ok(msg) => msg,
@@ -1251,17 +1261,18 @@ impl NodeRunner for ProductionRunner {
             let _rpc_handle = rpc.start();
             info!(addr = %addr, "RPC server started with live state provider");
 
-            spawn_partition_monitor(node_state.clone(), context.clone());
+            spawn_partition_monitor(node_state.clone(), context.child("partition"));
         }
 
         if let Some(metrics_addr) = self.metrics_addr {
-            let metrics_context = context.clone();
-            context.with_label("metrics").shared(true).spawn(move |_| async move {
+            let metrics_context = Arc::new(context.child("metrics_endpoint"));
+            context.child("metrics").shared(true).spawn(move |_| async move {
                 let app = axum::Router::new().route(
                     "/metrics",
                     axum::routing::get(move || {
-                        let body = metrics_context.encode();
+                        let metrics_context = metrics_context.clone();
                         async move {
+                            let body = metrics_context.encode();
                             (
                                 axum::http::StatusCode::OK,
                                 [(
@@ -1297,7 +1308,7 @@ impl NodeRunner for ProductionRunner {
         let finalized_executor = RevmExecutor::new(self.chain_id);
         let mut finalized_reporter = FinalizedReporter::new(
             ledger.clone(),
-            context.clone(),
+            context.child("finalized_reporter"),
             finalized_executor,
             context_provider,
         )
@@ -1339,7 +1350,7 @@ impl NodeRunner for ProductionRunner {
             GraduatedBlocker::new(transport.oracle.clone(), resolver_catching_up);
 
         let resolver = PeerInitializer::init::<_, _, _, Block, _, _, _>(
-            &context.with_label("resolver"),
+            context.child("resolver"),
             my_pk.clone(),
             transport.oracle.clone(),
             resolver_blocker,
@@ -1347,20 +1358,21 @@ impl NodeRunner for ProductionRunner {
         );
 
         let (broadcast_engine, buffer) = BroadcastInitializer::init::<_, Peer, Block, _>(
-            context.with_label("broadcast"),
+            context.child("broadcast"),
             my_pk.clone(),
             transport.oracle.clone(),
             block_cfg,
         );
         let broadcast_handle = broadcast_engine.start(transport.marshal.blocks);
 
-        let scratch_context = NoSyncStorage::new(context.clone(), checkpoint_interval);
+        let scratch_context = NoSyncStorage::new(context.child("scratch"), checkpoint_interval);
         let (actor, marshal_mailbox, _last_processed_height) =
             kora_marshal::ActorInitializer::init_with_strategy::<_, Block, _, _, _, Exact, _>(
                 scratch_context.clone(),
                 finalizations_by_height,
                 finalized_blocks,
                 scheme_provider,
+                commonware_consensus::marshal::Start::Genesis(ledger.genesis_block()),
                 page_cache.clone(),
                 block_cfg,
                 strategy.clone(),
@@ -1392,12 +1404,8 @@ impl NodeRunner for ProductionRunner {
         if let Some((state, _)) = &self.rpc_config {
             app = app.with_node_state(state.clone());
         }
-        let marshaled = Inline::new(
-            scratch_context.with_label("marshaled"),
-            app,
-            marshal_mailbox.clone(),
-            epocher,
-        );
+        let marshaled =
+            Inline::new(scratch_context.child("marshaled"), app, marshal_mailbox.clone(), epocher);
 
         let seed_reporter = SeedReporter::<MinSig>::new(ledger.clone());
         let node_state_reporter = self.rpc_config.as_ref().map(|(state, _)| {
@@ -1414,7 +1422,7 @@ impl NodeRunner for ProductionRunner {
         }
 
         let engine = simplex::Engine::new(
-            scratch_context.with_label("engine"),
+            scratch_context.child("engine"),
             simplex::Config {
                 scheme: self.scheme.clone(),
                 elector: Random,
@@ -1424,8 +1432,9 @@ impl NodeRunner for ProductionRunner {
                 reporter,
                 strategy,
                 partition: self.partition_prefix.clone(),
-                mailbox_size: MAILBOX_SIZE,
+                mailbox_size: NZUsize!(MAILBOX_SIZE),
                 epoch: Epoch::zero(),
+                floor: simplex::Floor::Genesis(ledger.genesis_block().commitment()),
                 replay_buffer: simplex_config.replay_buffer_bytes,
                 write_buffer: simplex_config.write_buffer_bytes,
                 leader_timeout: Duration::from_secs(simplex_config.leader_timeout_secs.get()),
@@ -1436,7 +1445,7 @@ impl NodeRunner for ProductionRunner {
                 fetch_timeout: Duration::from_secs(simplex_config.fetch_timeout_secs.get()),
                 activity_timeout: ViewDelta::new(simplex_config.activity_timeout_views.get()),
                 skip_timeout: ViewDelta::new(simplex_config.skip_timeout_views.get()),
-                fetch_concurrent: simplex_config.fetch_concurrent.get(),
+                fetch_concurrent: simplex_config.fetch_concurrent,
                 page_cache,
                 forwarding: simplex::ForwardingPolicy::SilentLeader,
             },

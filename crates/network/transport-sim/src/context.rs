@@ -8,7 +8,6 @@ use std::{
 
 use commonware_runtime::{self, tokio};
 use governor::clock::{Clock as GovernorClock, ReasonablyRealtime};
-use prometheus_client::registry::Metric;
 use rand::{RngCore, rngs::OsRng};
 
 const PORT_BASE_MIN: u16 = 40_000;
@@ -33,12 +32,14 @@ const fn remap_socket(socket: SocketAddr, port_offset: u16) -> SocketAddr {
 pub struct SimContext {
     inner: tokio::Context,
     force_base_addr: bool,
+    base_addr: Ipv4Addr,
     port_offset: u16,
 }
 
 impl fmt::Debug for SimContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SimContext")
+            .field("base_addr", &self.base_addr)
             .field("port_offset", &self.port_offset)
             .field("force_base_addr", &self.force_base_addr)
             .finish_non_exhaustive()
@@ -51,13 +52,20 @@ impl SimContext {
         let mut rng = OsRng;
         let span = u32::from(PORT_BASE_MAX - PORT_BASE_MIN + 1);
         let base = PORT_BASE_MIN + (rng.next_u32() % span) as u16;
-        Self { inner, force_base_addr: true, port_offset: base }
+        let seed = rng.next_u32() ^ std::process::id();
+        let base_addr = Ipv4Addr::new(127, (seed >> 16) as u8, (seed >> 8) as u8, seed as u8);
+        Self { inner, force_base_addr: true, base_addr, port_offset: base }
     }
 }
 
 impl Clone for SimContext {
     fn clone(&self) -> Self {
-        Self { inner: self.inner.clone(), force_base_addr: false, port_offset: self.port_offset }
+        Self {
+            inner: commonware_runtime::Supervisor::child(&self.inner, "sim_context"),
+            force_base_addr: false,
+            base_addr: self.base_addr,
+            port_offset: self.port_offset,
+        }
     }
 }
 
@@ -88,45 +96,54 @@ impl commonware_runtime::Clock for SimContext {
     }
 }
 
-impl commonware_runtime::Metrics for SimContext {
-    fn label(&self) -> String {
-        self.inner.label()
+impl commonware_runtime::Supervisor for SimContext {
+    fn name(&self) -> commonware_runtime::Name {
+        self.inner.name()
     }
 
-    fn with_label(&self, label: &str) -> Self {
+    fn child(&self, label: &'static str) -> Self {
         Self {
-            inner: self.inner.with_label(label),
+            inner: self.inner.child(label),
             force_base_addr: false,
+            base_addr: self.base_addr,
             port_offset: self.port_offset,
         }
     }
 
-    fn with_attribute(&self, key: &str, value: impl fmt::Display) -> Self {
+    fn with_attribute(self, key: &'static str, value: impl fmt::Display) -> Self {
         Self {
             inner: self.inner.with_attribute(key, value),
             force_base_addr: false,
+            base_addr: self.base_addr,
             port_offset: self.port_offset,
         }
     }
+}
 
-    fn with_scope(&self) -> Self {
-        Self {
-            inner: self.inner.with_scope(),
-            force_base_addr: false,
-            port_offset: self.port_offset,
-        }
-    }
-
-    fn with_span(&self) -> Self {
+impl commonware_runtime::Tracing for SimContext {
+    fn with_span(self) -> Self {
         Self {
             inner: self.inner.with_span(),
             force_base_addr: false,
+            base_addr: self.base_addr,
             port_offset: self.port_offset,
         }
     }
+}
 
-    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
-        self.inner.register(name, help, metric);
+impl commonware_runtime::Metrics for SimContext {
+    fn register<N, H, M>(
+        &self,
+        name: N,
+        help: H,
+        metric: M,
+    ) -> commonware_runtime::telemetry::metrics::Registered<M>
+    where
+        N: Into<String>,
+        H: Into<String>,
+        M: commonware_runtime::telemetry::metrics::Metric,
+    {
+        self.inner.register(name, help, metric)
     }
 
     fn encode(&self) -> String {
@@ -152,8 +169,9 @@ impl commonware_runtime::Spawner for SimContext {
         T: Send + 'static,
     {
         let port_offset = self.port_offset;
+        let base_addr = self.base_addr;
         self.inner.spawn(move |context| {
-            let context = Self { inner: context, force_base_addr: false, port_offset };
+            let context = Self { inner: context, force_base_addr: false, base_addr, port_offset };
             f(context)
         })
     }
@@ -199,7 +217,7 @@ impl RngCore for SimContext {
     fn next_u32(&mut self) -> u32 {
         if self.force_base_addr {
             self.force_base_addr = false;
-            return u32::from(Ipv4Addr::LOCALHOST);
+            return self.base_addr.to_bits();
         }
         let mut rng = OsRng;
         RngCore::next_u32(&mut rng)

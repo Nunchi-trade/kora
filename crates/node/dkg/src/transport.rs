@@ -199,7 +199,7 @@ impl DkgTransportConfig {
         E: Spawner + BufferPooler + Clock + CryptoRngCore + Network + Resolver + Metrics,
     {
         let (mut network, oracle) =
-            discovery::Network::new(context.with_label("dkg-network"), self.inner);
+            discovery::Network::new(context.child("dkg_network"), self.inner);
 
         let (sender, receiver) = network.register(CHANNEL_DKG, self.quota, self.backlog);
 
@@ -216,7 +216,7 @@ impl<E: Clock> DkgTransport<E> {
     ///
     /// This should be called with the DKG ceremony participants before starting.
     pub async fn set_participants(&mut self, participants: Set<ed25519::PublicKey>) {
-        self.oracle.track(0, participants).await;
+        self.oracle.track(0, participants);
     }
 
     /// Send a message to a specific peer.
@@ -224,11 +224,12 @@ impl<E: Clock> DkgTransport<E> {
     where
         E: Spawner + Clock + CryptoRngCore + Network,
     {
-        self.sender
-            .send(Recipients::One(to.clone()), msg, false)
-            .await
-            .map(|_| ())
-            .map_err(|e| DkgError::Network(format!("Failed to send to peer: {}", e)))
+        let recipients = self.sender.send(Recipients::One(to.clone()), msg, false);
+        if recipients.iter().any(|pk| pk == to) {
+            Ok(())
+        } else {
+            Err(DkgError::Network("Failed to enqueue message for peer".into()))
+        }
     }
 
     /// Broadcast a message to all connected peers.
@@ -236,11 +237,12 @@ impl<E: Clock> DkgTransport<E> {
     where
         E: Spawner + Clock + CryptoRngCore + Network,
     {
-        self.sender
-            .send(Recipients::All, msg, false)
-            .await
-            .map(|_| ())
-            .map_err(|e| DkgError::Network(format!("Failed to broadcast: {}", e)))
+        let recipients = self.sender.send(Recipients::All, msg, false);
+        if recipients.is_empty() {
+            Err(DkgError::Network("Failed to enqueue broadcast for any peer".into()))
+        } else {
+            Ok(())
+        }
     }
 
     /// Receive the next message.

@@ -5,13 +5,13 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use commonware_codec::{Read as CodecRead, ReadExt, Write};
+use commonware_codec::{Read as _, ReadExt, Write};
 use commonware_cryptography::{
     Hasher as _, Sha256,
     bls12381::{
-        dkg::{
+        dkg::feldman_desmedt::{
             Dealer, DealerLog, DealerPrivMsg, DealerPubMsg, Info, Logs, Player, PlayerAck,
-            SignedDealerLog,
+            SignedDealerLog, observe,
         },
         primitives::{sharing::Mode, variant::MinSig},
     },
@@ -816,7 +816,6 @@ impl DkgParticipant {
         let mut rng = rand::rngs::OsRng;
 
         // Debug: try to observe the logs first to understand what's failing
-        use commonware_cryptography::bls12381::dkg::observe;
         match observe::<MinSig, ed25519::PublicKey, N3f1, ed25519::Batch>(
             &mut rng,
             self.logs_for_verification(),

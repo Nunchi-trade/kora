@@ -16,6 +16,7 @@ kora-config = { path = "../config" }
 kora-transport = { path = "../../network/transport" }
 
 # Commonware
+commonware-actor.workspace = true
 commonware-consensus.workspace = true
 commonware-cryptography.workspace = true
 commonware-p2p.workspace = true

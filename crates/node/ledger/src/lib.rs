@@ -12,7 +12,7 @@ use std::{collections::BTreeSet, fmt, sync::Arc, time::Duration};
 use alloy_primitives::{Address, B256, U256};
 use commonware_consensus::Block as _;
 use commonware_cryptography::Committable as _;
-use commonware_runtime::{Metrics as _, tokio};
+use commonware_runtime::{Supervisor as _, tokio};
 use futures::{channel::mpsc::UnboundedReceiver, lock::Mutex};
 use kora_consensus::{
     ConsensusError, Mempool as _, SeedTracker as _, Snapshot, SnapshotStore as _,
@@ -224,7 +224,7 @@ impl LedgerView {
         genesis_timestamp: u64,
     ) -> LedgerResult<Self> {
         let qmdb = QmdbLedger::init_with_genesis(
-            context.with_label("qmdb"),
+            context.child("qmdb"),
             config,
             genesis_alloc,
             apply_genesis,
@@ -756,7 +756,10 @@ impl LedgerService {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::{
+        future::Future,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
     use alloy_consensus::Header;
     use alloy_primitives::{Address, B256, Bytes, U256};
@@ -798,6 +801,26 @@ mod tests {
     struct BuiltBlock {
         block: Block,
         digest: ConsensusDigest,
+    }
+
+    fn run_ledger_test<F, Fut>(f: F)
+    where
+        F: FnOnce(tokio::Context) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + 'static,
+    {
+        let handle = std::thread::Builder::new()
+            .name("kora-ledger-test".to_string())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(move || {
+                let executor = tokio::Runner::default();
+                executor.start(f);
+            })
+            .expect("failed to spawn ledger test thread");
+
+        match handle.join() {
+            Ok(()) => (),
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
     }
 
     fn key_from_byte(byte: u8) -> SigningKey {
@@ -852,8 +875,7 @@ mod tests {
 
     #[test]
     fn init_uses_configured_genesis_timestamp() {
-        let executor = tokio::Runner::default();
-        executor.start(|context| async move {
+        run_ledger_test(|context| async move {
             let ledger = LedgerView::init_with_genesis_timestamp(
                 context,
                 next_partition("revm-ledger-genesis-timestamp"),
@@ -896,8 +918,7 @@ mod tests {
     #[test]
     fn persist_snapshot_merges_unpersisted_ancestors() {
         // Tokio runtime required for WrapDatabaseAsync in the QMDB adapter.
-        let executor = tokio::Runner::default();
-        executor.start(|context| async move {
+        run_ledger_test(|context| async move {
             // Arrange
             let from_key = key_from_byte(FROM_BYTE_A);
             let to_key = key_from_byte(TO_BYTE_A);
@@ -951,8 +972,7 @@ mod tests {
     #[test]
     fn persist_snapshot_compacts_all_persisted_chain_snapshots() {
         // Tokio runtime required for WrapDatabaseAsync in the QMDB adapter.
-        let executor = tokio::Runner::default();
-        executor.start(|context| async move {
+        run_ledger_test(|context| async move {
             // Arrange
             let from_key = key_from_byte(FROM_BYTE_A);
             let to_key = key_from_byte(TO_BYTE_A);
@@ -1035,8 +1055,7 @@ mod tests {
     #[test]
     fn empty_child_inherits_parent_state_root_after_persist() {
         // Tokio runtime required for WrapDatabaseAsync in the QMDB adapter.
-        let executor = tokio::Runner::default();
-        executor.start(|context| async move {
+        run_ledger_test(|context| async move {
             // Arrange: create and persist a non-empty parent, matching the timing that can differ
             // across validators during consensus.
             let from_key = key_from_byte(FROM_BYTE_A);
@@ -1080,8 +1099,7 @@ mod tests {
     #[test]
     fn persist_snapshot_duplicate_is_noop() {
         // Tokio runtime required for WrapDatabaseAsync in the QMDB adapter.
-        let executor = tokio::Runner::default();
-        executor.start(|context| async move {
+        run_ledger_test(|context| async move {
             // Arrange
             let from_key = key_from_byte(FROM_BYTE_A);
             let to_key = key_from_byte(TO_BYTE_A);
@@ -1123,8 +1141,7 @@ mod tests {
     #[test]
     fn persist_snapshot_merges_overlays() {
         // Tokio runtime required for WrapDatabaseAsync in the QMDB adapter.
-        let executor = tokio::Runner::default();
-        executor.start(|context| async move {
+        run_ledger_test(|context| async move {
             // Arrange
             let sender_bytes = [0x11, 0x12, 0x13, 0x14, 0x15];
             let recipient_bytes = [0x21, 0x22, 0x23, 0x24, 0x25];
@@ -1177,8 +1194,7 @@ mod tests {
     #[test]
     fn persist_snapshot_unrelated_merges() {
         // Tokio runtime required for WrapDatabaseAsync in the QMDB adapter.
-        let executor = tokio::Runner::default();
-        executor.start(|context| async move {
+        run_ledger_test(|context| async move {
             // Arrange
             let from_key_a = key_from_byte(FROM_BYTE_A);
             let to_key_a = key_from_byte(TO_BYTE_A);
@@ -1250,8 +1266,7 @@ mod tests {
     #[test]
     fn persist_snapshot_updates_snapshot_state() {
         // Tokio runtime required for WrapDatabaseAsync in the QMDB adapter.
-        let executor = tokio::Runner::default();
-        executor.start(|context| async move {
+        run_ledger_test(|context| async move {
             // Arrange
             let from_key = key_from_byte(FROM_BYTE_A);
             let to_key = key_from_byte(TO_BYTE_A);

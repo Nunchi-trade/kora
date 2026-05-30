@@ -5,22 +5,20 @@ use std::time::Duration;
 use commonware_consensus::{
     Block,
     marshal::resolver::{
-        handler::{Message, Request},
-        p2p::Config,
+        handler::Receiver as HandlerReceiver,
+        p2p::{Config, Mailbox as P2pMailbox},
     },
 };
 use commonware_cryptography::{Digestible, PublicKey};
 use commonware_p2p::{Blocker, Provider, Receiver, Sender};
-use commonware_resolver::p2p;
 use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner};
-use commonware_utils::channel::mpsc;
 use rand::Rng;
 
 /// Receiver for inbound resolver messages.
-pub type ResolverReceiver<B> = mpsc::Receiver<Message<<B as Digestible>::Digest>>;
+pub type ResolverReceiver<B> = HandlerReceiver<<B as Digestible>::Digest>;
 
 /// Mailbox used to submit resolver requests.
-pub type ResolverMailbox<B, P> = p2p::Mailbox<Request<<B as Digestible>::Digest>, P>;
+pub type ResolverMailbox<B, P> = P2pMailbox<<B as Digestible>::Digest, P>;
 
 /// Resolver channels returned by peer initialization.
 pub type ResolverChannels<B, P> = (ResolverReceiver<B>, ResolverMailbox<B, P>);
@@ -52,7 +50,7 @@ impl PeerInitializer {
 impl PeerInitializer {
     /// Initializes the p2p resolver.
     pub fn init<E, C, Bl, B, S, R, P>(
-        ctx: &E,
+        ctx: E,
         public_key: P,
         peer_provider: C,
         blocker: Bl,
@@ -71,7 +69,7 @@ impl PeerInitializer {
             public_key,
             peer_provider,
             blocker,
-            mailbox_size: Self::DEFAULT_MAILBOX_SIZE,
+            mailbox_size: commonware_utils::NZUsize!(Self::DEFAULT_MAILBOX_SIZE),
             initial: Self::DEFAULT_INITIAL_DELAY,
             timeout: Self::DEFAULT_TIMEOUT,
             fetch_retry_timeout: Self::DEFAULT_FETCH_RETRY_TIMEOUT,

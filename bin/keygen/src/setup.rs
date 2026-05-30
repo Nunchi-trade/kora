@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, fs, io::Write as _, path::PathBuf};
 
 use alloy_primitives::{Address, keccak256};
 use clap::Args;
-use commonware_codec::Encode;
+use commonware_codec::{Encode, ReadExt as _};
 use commonware_cryptography::{Signer, ed25519};
 use commonware_utils::{Faults, N3f1};
 use eyre::{Result, WrapErr};
@@ -84,6 +84,10 @@ fn funded_loadgen_allocations() -> impl Iterator<Item = GenesisAllocation> {
     (1..=LOADGEN_ACCOUNT_COUNT).map(|seed| funded_allocation(loadgen_address(seed).to_string()))
 }
 
+fn private_key_from_seed(seed: [u8; 32]) -> ed25519::PrivateKey {
+    ed25519::PrivateKey::read(&mut seed.as_slice()).expect("32-byte ed25519 seed should decode")
+}
+
 pub(crate) fn run(args: SetupArgs) -> Result<()> {
     let quorum = N3f1::quorum(args.validators);
     tracing::info!(
@@ -113,13 +117,13 @@ pub(crate) fn run(args: SetupArgs) -> Result<()> {
             let bytes = fs::read(&key_path)?;
             let mut seed = [0u8; 32];
             seed.copy_from_slice(&bytes);
-            ed25519::PrivateKey::from(ed25519_consensus::SigningKey::from(seed))
+            private_key_from_seed(seed)
         } else {
             tracing::info!(node = i, "Generating new identity key");
             let mut seed = [0u8; 32];
             rand::rngs::OsRng.fill_bytes(&mut seed);
             write_secret_file(&key_path, &seed)?;
-            ed25519::PrivateKey::from(ed25519_consensus::SigningKey::from(seed))
+            private_key_from_seed(seed)
         };
 
         let public_key = key.public_key();
@@ -149,13 +153,13 @@ pub(crate) fn run(args: SetupArgs) -> Result<()> {
             let bytes = fs::read(&key_path)?;
             let mut seed = [0u8; 32];
             seed.copy_from_slice(&bytes);
-            ed25519::PrivateKey::from(ed25519_consensus::SigningKey::from(seed))
+            private_key_from_seed(seed)
         } else {
             tracing::info!(node = i, "Generating new secondary identity key");
             let mut seed = [0u8; 32];
             rand::rngs::OsRng.fill_bytes(&mut seed);
             write_secret_file(&key_path, &seed)?;
-            ed25519::PrivateKey::from(ed25519_consensus::SigningKey::from(seed))
+            private_key_from_seed(seed)
         };
 
         let public_key = key.public_key();

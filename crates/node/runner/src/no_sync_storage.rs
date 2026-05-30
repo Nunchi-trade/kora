@@ -10,9 +10,9 @@ use std::{
 
 use commonware_runtime::{
     Blob, BufferPool, BufferPooler, Clock, Error, Handle, IoBufs, IoBufsMut, Metrics, Spawner,
-    Storage, iobuf, signal,
+    Storage, Supervisor, Tracing, iobuf, signal,
+    telemetry::metrics::{Metric, Registered},
 };
-use prometheus_client::registry::Metric;
 use rand::{CryptoRng, RngCore};
 
 type PartitionMap = BTreeMap<String, BTreeMap<Vec<u8>, Arc<RwLock<Vec<u8>>>>>;
@@ -23,7 +23,6 @@ type PartitionMap = BTreeMap<String, BTreeMap<Vec<u8>, Arc<RwLock<Vec<u8>>>>>;
 /// wrapper is only used for state that can be reconstructed from finalized
 /// blocks, so it avoids Docker-volume write latency without putting durable
 /// state on tmpfs.
-#[derive(Clone)]
 pub(crate) struct NoSyncStorage<C> {
     inner: C,
     partitions: Arc<Mutex<PartitionMap>>,
@@ -37,6 +36,19 @@ impl<C> NoSyncStorage<C> {
             inner,
             partitions: Arc::new(Mutex::new(BTreeMap::new())),
             checkpoint_interval: checkpoint_interval.max(1),
+        }
+    }
+}
+
+impl<C> Clone for NoSyncStorage<C>
+where
+    C: Supervisor,
+{
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.child("nosync_storage"),
+            partitions: self.partitions.clone(),
+            checkpoint_interval: self.checkpoint_interval,
         }
     }
 }
@@ -78,6 +90,31 @@ pub(crate) enum NoSyncBlob<B> {
 /// is not affected by this function.
 fn is_durable_partition(partition: &str) -> bool {
     partition.ends_with("-application-metadata")
+}
+
+impl<C> Supervisor for NoSyncStorage<C>
+where
+    C: Supervisor,
+{
+    fn name(&self) -> commonware_runtime::Name {
+        self.inner.name()
+    }
+
+    fn child(&self, label: &'static str) -> Self {
+        Self {
+            inner: self.inner.child(label),
+            partitions: self.partitions.clone(),
+            checkpoint_interval: self.checkpoint_interval,
+        }
+    }
+
+    fn with_attribute(self, key: &'static str, value: impl std::fmt::Display) -> Self {
+        Self {
+            inner: self.inner.with_attribute(key, value),
+            partitions: self.partitions,
+            checkpoint_interval: self.checkpoint_interval,
+        }
+    }
 }
 
 impl<C> Spawner for NoSyncStorage<C>
@@ -124,48 +161,30 @@ impl<C> Metrics for NoSyncStorage<C>
 where
     C: Metrics,
 {
-    fn label(&self) -> String {
-        self.inner.label()
-    }
-
-    fn with_label(&self, label: &str) -> Self {
-        Self {
-            inner: self.inner.with_label(label),
-            partitions: self.partitions.clone(),
-            checkpoint_interval: self.checkpoint_interval,
-        }
-    }
-
-    fn with_attribute(&self, key: &str, value: impl std::fmt::Display) -> Self {
-        Self {
-            inner: self.inner.with_attribute(key, value),
-            partitions: self.partitions.clone(),
-            checkpoint_interval: self.checkpoint_interval,
-        }
-    }
-
-    fn with_scope(&self) -> Self {
-        Self {
-            inner: self.inner.with_scope(),
-            partitions: self.partitions.clone(),
-            checkpoint_interval: self.checkpoint_interval,
-        }
-    }
-
-    fn with_span(&self) -> Self {
-        Self {
-            inner: self.inner.with_span(),
-            partitions: self.partitions.clone(),
-            checkpoint_interval: self.checkpoint_interval,
-        }
-    }
-
-    fn register<N: Into<String>, H: Into<String>>(&self, name: N, help: H, metric: impl Metric) {
-        self.inner.register(name, help, metric);
+    fn register<N, H, M>(&self, name: N, help: H, metric: M) -> Registered<M>
+    where
+        N: Into<String>,
+        H: Into<String>,
+        M: Metric,
+    {
+        self.inner.register(name, help, metric)
     }
 
     fn encode(&self) -> String {
         self.inner.encode()
+    }
+}
+
+impl<C> Tracing for NoSyncStorage<C>
+where
+    C: Tracing,
+{
+    fn with_span(self) -> Self {
+        Self {
+            inner: self.inner.with_span(),
+            partitions: self.partitions,
+            checkpoint_interval: self.checkpoint_interval,
+        }
     }
 }
 
@@ -365,6 +384,29 @@ where
                     Ok(())
                 }
                 Self::Passthrough(blob) => blob.write_at(offset, bufs).await,
+            }
+        }
+    }
+
+    fn write_at_sync(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> impl Future<Output = Result<(), Error>> + Send {
+        async move {
+            match self {
+                Self::Memory { content, .. } => {
+                    let buf = bufs.into().coalesce();
+                    let offset: usize = offset.try_into().map_err(|_| Error::OffsetOverflow)?;
+                    let end = offset.checked_add(buf.len()).ok_or(Error::OffsetOverflow)?;
+                    let mut content = content.write().expect("scratch blob lock poisoned");
+                    if end > content.len() {
+                        content.resize(end, 0);
+                    }
+                    content[offset..end].copy_from_slice(buf.as_ref());
+                    Ok(())
+                }
+                Self::Passthrough(blob) => blob.write_at_sync(offset, bufs).await,
             }
         }
     }

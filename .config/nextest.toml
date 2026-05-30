@@ -1,0 +1,6 @@
+[[profile.default.overrides]]
+filter = 'package(kora-e2e)'
+test-group = 'e2e'
+
+[test-groups.e2e]
+max-threads = 1

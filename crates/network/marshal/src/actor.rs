@@ -8,7 +8,7 @@ use std::num::{NonZeroU64, NonZeroUsize};
 use commonware_consensus::{
     Block,
     marshal::{
-        Config,
+        Config, Start,
         core::{Actor, Mailbox},
         standard::Standard,
         store::{Blocks, Certificates},
@@ -107,6 +107,7 @@ impl ActorInitializer {
         finalizations_by_height: FC,
         finalized_blocks: FB,
         provider: P,
+        start: Start<P::Scheme, B::Digest, B>,
         page_cache: CacheRef,
         block_codec_config: B::Cfg,
     ) -> (
@@ -127,6 +128,7 @@ impl ActorInitializer {
             finalizations_by_height,
             finalized_blocks,
             provider,
+            start,
             page_cache,
             block_codec_config,
             Sequential,
@@ -135,12 +137,13 @@ impl ActorInitializer {
     }
 
     /// Initializes the marshal actor with a custom verification strategy.
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub async fn init_with_strategy<E, B, P, FC, FB, A, S>(
         context: E,
         finalizations_by_height: FC,
         finalized_blocks: FB,
         provider: P,
+        start: Start<P::Scheme, B::Digest, B>,
         page_cache: CacheRef,
         block_codec_config: B::Cfg,
         strategy: S,
@@ -160,9 +163,10 @@ impl ActorInitializer {
     {
         let config = Config {
             provider,
+            start,
             epocher: FixedEpocher::new(Self::DEFAULT_BLOCKS_PER_EPOCH),
             partition_prefix: Self::DEFAULT_PARTITION_PREFIX.to_string(),
-            mailbox_size: Self::DEFAULT_MAILBOX_SIZE,
+            mailbox_size: NZUsize!(Self::DEFAULT_MAILBOX_SIZE),
             view_retention_timeout: Self::DEFAULT_VIEW_RETENTION_TIMEOUT,
             prunable_items_per_section: Self::DEFAULT_PRUNABLE_ITEMS_PER_SECTION,
             page_cache,
@@ -175,19 +179,22 @@ impl ActorInitializer {
             strategy,
         };
 
-        Actor::init(context, finalizations_by_height, finalized_blocks, config).await
+        let (actor, mailbox, processed_height) =
+            Actor::init(context, finalizations_by_height, finalized_blocks, config).await;
+        (actor, mailbox, processed_height.unwrap_or_else(Height::zero))
     }
 
     /// Initializes the marshal actor with a custom partition prefix.
     ///
     /// This is the same as [`init`](Self::init) but allows specifying a custom partition prefix
     /// for storage isolation. Useful for testing multiple nodes in the same process.
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub async fn init_with_partition<E, B, P, FC, FB, A>(
         context: E,
         finalizations_by_height: FC,
         finalized_blocks: FB,
         provider: P,
+        start: Start<P::Scheme, B::Digest, B>,
         page_cache: CacheRef,
         block_codec_config: B::Cfg,
         partition_prefix: impl Into<String>,
@@ -206,9 +213,10 @@ impl ActorInitializer {
     {
         let config = Config {
             provider,
+            start,
             epocher: FixedEpocher::new(Self::DEFAULT_BLOCKS_PER_EPOCH),
             partition_prefix: partition_prefix.into(),
-            mailbox_size: Self::DEFAULT_MAILBOX_SIZE,
+            mailbox_size: NZUsize!(Self::DEFAULT_MAILBOX_SIZE),
             view_retention_timeout: Self::DEFAULT_VIEW_RETENTION_TIMEOUT,
             prunable_items_per_section: Self::DEFAULT_PRUNABLE_ITEMS_PER_SECTION,
             page_cache,
@@ -221,7 +229,9 @@ impl ActorInitializer {
             strategy: Sequential,
         };
 
-        Actor::init(context, finalizations_by_height, finalized_blocks, config).await
+        let (actor, mailbox, processed_height) =
+            Actor::init(context, finalizations_by_height, finalized_blocks, config).await;
+        (actor, mailbox, processed_height.unwrap_or_else(Height::zero))
     }
 }
 

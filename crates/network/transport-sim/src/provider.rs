@@ -79,7 +79,7 @@ impl<P: PublicKey> SimControl<P> {
         epoch: u64,
         validators: commonware_utils::ordered::Set<P>,
     ) {
-        self.manager().track(epoch, validators).await;
+        self.manager().track(epoch, validators);
     }
 
     /// Returns a peer control handle for channel registration.

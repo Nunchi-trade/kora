@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use alloy_primitives::{Address, B256, U256};
-use commonware_runtime::tokio::Context;
+use commonware_runtime::{Supervisor as _, tokio::Context};
 use kora_backend::{
     AccountStore, CodeStore, CommonwareBackend, CommonwareRootProvider, QmdbBackendConfig,
     StorageStore,
@@ -69,14 +69,14 @@ impl QmdbLedger {
         genesis_alloc: Vec<(Address, U256)>,
         apply_genesis: bool,
     ) -> Result<Self, Error> {
-        let backend = CommonwareBackend::open(context.clone(), config.clone()).await?;
+        let backend = CommonwareBackend::open(context.child("backend"), config.clone()).await?;
 
         // Verify cross-partition consistency before consuming the backend.
         let seqs = backend.verify_partition_consistency().await?;
         let starting_seq = seqs.accounts.unwrap_or(0);
         info!(commit_seq = starting_seq, "QMDB partition consistency verified");
 
-        let root_provider = CommonwareRootProvider::new(context, config);
+        let root_provider = CommonwareRootProvider::new(context.child("root_provider"), config);
         let (accounts, storage, code) = backend.into_stores();
 
         // Create a QmdbStore with the persisted commit sequence so that

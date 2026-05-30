@@ -2,6 +2,7 @@
 
 use alloy_primitives::U256;
 use commonware_cryptography::sha256::Digest as QmdbDigest;
+use commonware_parallel::Sequential;
 use commonware_storage::{qmdb::any::VariableConfig, translator::EightCap};
 use kora_qmdb::{QmdbBatchable, QmdbGettable, StorageKey};
 
@@ -30,7 +31,7 @@ impl StorageStore {
     /// Initialize the storage store.
     pub async fn init(
         context: Context,
-        config: VariableConfig<EightCap, ((), ())>,
+        config: VariableConfig<EightCap, ((), ()), Sequential>,
     ) -> Result<Self, BackendError> {
         let inner = StorageDb::init(context, config)
             .await

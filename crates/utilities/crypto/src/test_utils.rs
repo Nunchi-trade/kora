@@ -3,7 +3,7 @@ use commonware_consensus::simplex::scheme::bls12381_threshold::vrf as bls12381_t
 use commonware_cryptography::{
     Signer as _,
     bls12381::{
-        dkg,
+        dkg::feldman_desmedt as dkg,
         primitives::{sharing::Mode, variant::MinSig},
     },
     ed25519,

@@ -356,7 +356,7 @@ impl ArchiveInitializer {
         codec_config: V::Cfg,
     ) -> Result<Archive<E, K, V>, commonware_storage::archive::Error>
     where
-        E: BufferPooler + Spawner + Storage + Metrics + Clock + Clone,
+        E: BufferPooler + Spawner + Storage + Metrics + Clock,
         K: Array,
         V: Codec + Send + Sync,
     {
@@ -395,7 +395,7 @@ impl ArchiveInitializer {
         checkpoint_interval: u64,
     ) -> Result<CheckpointedArchive<Archive<E, K, V>>, commonware_storage::archive::Error>
     where
-        E: BufferPooler + Spawner + Storage + Metrics + Clock + Clone,
+        E: BufferPooler + Spawner + Storage + Metrics + Clock,
         K: Array,
         V: Codec + Send + Sync,
     {
@@ -411,7 +411,7 @@ impl ArchiveInitializer {
         codec_config: V::Cfg,
     ) -> Result<Archive<E, K, V>, commonware_storage::archive::Error>
     where
-        E: BufferPooler + Spawner + Storage + Metrics + Clock + Clone,
+        E: BufferPooler + Spawner + Storage + Metrics + Clock,
         K: Array,
         V: Codec + Send + Sync,
     {
@@ -426,7 +426,7 @@ impl ArchiveInitializer {
         codec_config: V::Cfg,
     ) -> Result<Archive<E, K, V>, commonware_storage::archive::Error>
     where
-        E: BufferPooler + Spawner + Storage + Metrics + Clock + Clone,
+        E: BufferPooler + Spawner + Storage + Metrics + Clock,
         K: Array,
         V: Codec + Send + Sync,
     {
@@ -447,7 +447,7 @@ impl ArchiveInitializer {
         codec_config: V::Cfg,
     ) -> Result<PrunableArchive<EightCap, E, K, V>, commonware_storage::archive::Error>
     where
-        E: BufferPooler + Spawner + Storage + Metrics + Clock + Clone,
+        E: BufferPooler + Spawner + Storage + Metrics + Clock,
         K: Array,
         V: Codec + Send + Sync,
     {
@@ -486,7 +486,7 @@ impl ArchiveInitializer {
         commonware_storage::archive::Error,
     >
     where
-        E: BufferPooler + Spawner + Storage + Metrics + Clock + Clone,
+        E: BufferPooler + Spawner + Storage + Metrics + Clock,
         K: Array,
         V: Codec + Send + Sync,
     {

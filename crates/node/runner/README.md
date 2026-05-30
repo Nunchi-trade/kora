@@ -107,7 +107,7 @@ The `ProductionRunner` implements the `NodeRunner` trait and executes the follow
 ## Key Types
 
 - `ProductionRunner` - Main production validator runner
-- `RevmApplication` - REVM-based consensus application implementing `Application` and `VerifyingApplication`
+- `RevmApplication` - REVM-based consensus application implementing `Application`
 - `ThresholdScheme` - BLS12-381 threshold signing configuration
 - `RunnerError` - Error types for runner operations
 
