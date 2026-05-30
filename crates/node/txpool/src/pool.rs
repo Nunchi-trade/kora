@@ -1089,7 +1089,7 @@ mod tests {
         pool.add(tx1_high.clone()).unwrap();
         // This triggers eviction: cheapest sender is `sender` (min=10),
         // so the tail (tx1_high, nonce=1) is evicted -- NOT tx0_low.
-        pool.add(other.clone()).unwrap();
+        pool.add(other).unwrap();
 
         // tx0_low remains (base of nonce chain), tx1_high evicted from tail
         assert!(pool.contains(&tx0_low.hash));
