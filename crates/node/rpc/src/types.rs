@@ -122,11 +122,16 @@ pub enum BlockTransactions {
 
 impl BlockTransactions {
     /// Returns the number of transactions in this block.
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         match self {
             Self::Hashes(h) => h.len(),
             Self::Full(f) => f.len(),
         }
+    }
+
+    /// Returns `true` if there are no transactions.
+    pub const fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 

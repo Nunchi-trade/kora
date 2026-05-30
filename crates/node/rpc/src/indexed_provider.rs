@@ -1013,17 +1013,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn balance_with_historical_block_number_returns_error() {
+    async fn balance_with_historical_block_number_succeeds_serving_latest_state() {
         let index = Arc::new(BlockIndex::new());
         index.insert_block(create_test_block(10, B256::repeat_byte(10)), vec![], vec![]);
         let provider = IndexedStateProvider::with_chain_id(index, MockState, 1337);
 
-        let err = provider
+        // Historical block numbers <= head succeed (serve latest state),
+        // avoiding races between eth_blockNumber and state queries.
+        let balance = provider
             .balance(Address::ZERO, Some(BlockNumberOrTag::Number(U64::from(5))))
             .await
-            .unwrap_err();
-        assert!(matches!(err, RpcError::Unsupported(_)));
-        assert!(err.to_string().contains("historical state not available"));
+            .unwrap();
+        assert_eq!(balance, U256::from(1000));
     }
 
     #[tokio::test]
@@ -1041,56 +1042,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nonce_with_historical_block_number_returns_error() {
+    async fn nonce_with_historical_block_number_succeeds_serving_latest_state() {
         let index = Arc::new(BlockIndex::new());
         index.insert_block(create_test_block(10, B256::repeat_byte(10)), vec![], vec![]);
         let provider = IndexedStateProvider::with_chain_id(index, MockState, 1337);
 
-        let err = provider
+        let nonce = provider
             .nonce(Address::ZERO, Some(BlockNumberOrTag::Number(U64::from(3))))
             .await
-            .unwrap_err();
-        assert!(matches!(err, RpcError::Unsupported(_)));
+            .unwrap();
+        assert_eq!(nonce, 42);
     }
 
     #[tokio::test]
-    async fn code_with_historical_block_number_returns_error() {
+    async fn code_with_historical_block_number_succeeds_serving_latest_state() {
         let index = Arc::new(BlockIndex::new());
         index.insert_block(create_test_block(10, B256::repeat_byte(10)), vec![], vec![]);
         let provider = IndexedStateProvider::with_chain_id(index, MockState, 1337);
 
-        let err = provider
+        // MockState returns B256::ZERO as code_hash, so the provider returns empty bytes.
+        let code = provider
             .code(Address::ZERO, Some(BlockNumberOrTag::Number(U64::from(3))))
             .await
-            .unwrap_err();
-        assert!(matches!(err, RpcError::Unsupported(_)));
+            .unwrap();
+        assert!(code.is_empty());
     }
 
     #[tokio::test]
-    async fn storage_with_historical_block_number_returns_error() {
+    async fn storage_with_historical_block_number_succeeds_serving_latest_state() {
         let index = Arc::new(BlockIndex::new());
         index.insert_block(create_test_block(10, B256::repeat_byte(10)), vec![], vec![]);
         let provider = IndexedStateProvider::with_chain_id(index, MockState, 1337);
 
-        let err = provider
+        let val = provider
             .storage(Address::ZERO, U256::from(1), Some(BlockNumberOrTag::Number(U64::from(3))))
             .await
-            .unwrap_err();
-        assert!(matches!(err, RpcError::Unsupported(_)));
+            .unwrap();
+        assert_eq!(val, U256::from(123));
     }
 
     #[tokio::test]
-    async fn call_with_historical_block_number_returns_error() {
+    async fn call_with_historical_block_number_succeeds_serving_latest_state() {
         let index = Arc::new(BlockIndex::new());
         index.insert_block(create_test_block(10, B256::repeat_byte(10)), vec![], vec![]);
         let provider = IndexedStateProvider::with_chain_id(index, MockState, 1337);
 
-        let err = provider
+        // Historical block numbers <= head are now accepted (serving latest state).
+        let _result = provider
             .call(CallRequest::default(), Some(BlockNumberOrTag::Number(U64::from(3))))
-            .await
-            .unwrap_err();
-        assert!(matches!(err, RpcError::Unsupported(_)));
-        assert!(err.to_string().contains("historical state not available"));
+            .await;
     }
 
     #[tokio::test]
@@ -1108,17 +1108,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn estimate_gas_with_historical_block_number_returns_error() {
+    async fn estimate_gas_with_historical_block_number_succeeds_serving_latest_state() {
         let index = Arc::new(BlockIndex::new());
         index.insert_block(create_test_block(10, B256::repeat_byte(10)), vec![], vec![]);
         let provider = IndexedStateProvider::with_chain_id(index, MockState, 1337);
 
-        let err = provider
+        // Historical block numbers <= head are now accepted (serving latest state).
+        let _result = provider
             .estimate_gas(CallRequest::default(), Some(BlockNumberOrTag::Number(U64::from(3))))
-            .await
-            .unwrap_err();
-        assert!(matches!(err, RpcError::Unsupported(_)));
-        assert!(err.to_string().contains("historical state not available"));
+            .await;
     }
 
     #[tokio::test]

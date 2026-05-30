@@ -1137,11 +1137,10 @@ impl NetApiServer for NetApiImpl {
 
     fn peer_count(&self) -> RpcResult<U64> {
         // Prefer the live value from NodeState when wired.
-        let count = if let Some(ref state) = self.node_state {
-            state.status().peer_count
-        } else {
-            self.peer_count.load(std::sync::atomic::Ordering::Relaxed)
-        };
+        let count = self.node_state.as_ref().map_or_else(
+            || self.peer_count.load(std::sync::atomic::Ordering::Relaxed),
+            |state| state.status().peer_count,
+        );
         Ok(U64::from(count))
     }
 }
