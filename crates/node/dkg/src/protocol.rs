@@ -66,6 +66,13 @@ impl CeremonySession {
         buf
     }
 
+    fn info_namespace(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(16 + 44);
+        buf.extend_from_slice(b"kora-dkg-session");
+        buf.extend_from_slice(&self.to_bytes());
+        buf
+    }
+
     /// Deserialize from bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, commonware_codec::Error> {
         if bytes.len() < 44 {
@@ -79,17 +86,31 @@ impl CeremonySession {
     }
 }
 
-/// Compute SHA256 hash of message bytes for deduplication.
-fn compute_message_hash(bytes: &[u8]) -> [u8; 32] {
-    let mut hasher = Sha256::default();
-    hasher.update(bytes);
-    let digest = hasher.finalize();
-    let mut hash = [0u8; 32];
-    hash.copy_from_slice(digest.as_ref());
-    hash
+use crate::{DkgConfig, DkgError, DkgOutput, DkgPhase, PersistedDkgState};
+
+/// Maximum accepted DKG protocol payload size.
+pub(crate) const MAX_DKG_MESSAGE_BYTES: usize = 256 * 1024;
+
+const WIRE_V2_MARKER: u8 = 0xFF;
+const WIRE_V2_VERSION: u8 = 2;
+const SESSION_ID_LEN: usize = 32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProtocolFrameHeader {
+    session_id: Option<[u8; 32]>,
+    tag: u8,
 }
 
-use crate::{DkgConfig, DkgError, DkgOutput, DkgPhase, PersistedDkgState};
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum SeenMessageKey {
+    DealerPublic(ed25519::PublicKey),
+    DealerPrivate(ed25519::PublicKey),
+    PlayerAck(ed25519::PublicKey),
+    DealerLog(ed25519::PublicKey),
+    RequestLogs(ed25519::PublicKey),
+    AllLogs(ed25519::PublicKey),
+    Ready(ed25519::PublicKey),
+}
 
 /// Inner message types for the DKG protocol (without session binding).
 #[derive(Debug, Clone)]
@@ -162,8 +183,8 @@ impl ProtocolMessage {
         let mut buf = Vec::new();
 
         if let Some(session_id) = &self.session_id {
-            buf.push(0xFFu8);
-            buf.push(2u8);
+            buf.push(WIRE_V2_MARKER);
+            buf.push(WIRE_V2_VERSION);
             buf.extend_from_slice(session_id);
         }
 
@@ -207,25 +228,64 @@ impl ProtocolMessage {
         buf
     }
 
+    fn frame_header(bytes: &[u8]) -> Result<ProtocolFrameHeader, commonware_codec::Error> {
+        if bytes.len() > MAX_DKG_MESSAGE_BYTES {
+            return Err(commonware_codec::Error::InvalidLength(bytes.len()));
+        }
+
+        let Some((&first_byte, rest)) = bytes.split_first() else {
+            return Err(commonware_codec::Error::EndOfBuffer);
+        };
+
+        if first_byte != WIRE_V2_MARKER {
+            return Ok(ProtocolFrameHeader { session_id: None, tag: first_byte });
+        }
+
+        if rest.len() < 1 + SESSION_ID_LEN + 1 {
+            return Err(commonware_codec::Error::EndOfBuffer);
+        }
+
+        let version = rest[0];
+        if version != WIRE_V2_VERSION {
+            return Err(commonware_codec::Error::InvalidEnum(version));
+        }
+
+        let mut session_id = [0u8; 32];
+        session_id.copy_from_slice(&rest[1..1 + SESSION_ID_LEN]);
+        let tag = rest[1 + SESSION_ID_LEN];
+
+        Ok(ProtocolFrameHeader { session_id: Some(session_id), tag })
+    }
+
     /// Deserialize from bytes.
     ///
     /// Supports both v2 (session-bound) and v1 (legacy) message formats.
     pub fn from_bytes(bytes: &[u8], max_degree: u32) -> Result<Self, commonware_codec::Error> {
+        let max_log_entries = max_entries_for_degree(max_degree);
+        Self::from_bytes_with_limits(bytes, max_degree, max_log_entries)
+    }
+
+    fn from_bytes_with_limits(
+        bytes: &[u8],
+        max_degree: u32,
+        max_log_entries: usize,
+    ) -> Result<Self, commonware_codec::Error> {
+        Self::frame_header(bytes)?;
         let mut reader = bytes;
 
         let first_byte = u8::read(&mut reader)?;
 
-        let (session_id, tag) = if first_byte == 0xFF {
+        let (session_id, tag) = if first_byte == WIRE_V2_MARKER {
             let version = u8::read(&mut reader)?;
-            if version != 2 {
+            if version != WIRE_V2_VERSION {
                 return Err(commonware_codec::Error::InvalidEnum(version));
             }
             let mut session_id = [0u8; 32];
-            if reader.len() < 32 {
+            if reader.len() < SESSION_ID_LEN {
                 return Err(commonware_codec::Error::EndOfBuffer);
             }
-            session_id.copy_from_slice(&reader[..32]);
-            reader = &reader[32..];
+            session_id.copy_from_slice(&reader[..SESSION_ID_LEN]);
+            reader = &reader[SESSION_ID_LEN..];
             let tag = u8::read(&mut reader)?;
             (Some(session_id), tag)
         } else {
@@ -262,6 +322,9 @@ impl ProtocolMessage {
             4 => ProtocolMessageKind::RequestLogs,
             5 => {
                 let count = u32::read(&mut reader)? as usize;
+                if count > max_log_entries {
+                    return Err(commonware_codec::Error::InvalidLength(count));
+                }
                 let mut logs = Vec::with_capacity(count);
                 for _ in 0..count {
                     let pk = ed25519::PublicKey::read(&mut reader)?;
@@ -280,8 +343,30 @@ impl ProtocolMessage {
             _ => return Err(commonware_codec::Error::InvalidEnum(tag)),
         };
 
+        if !reader.is_empty() {
+            return Err(commonware_codec::Error::ExtraData(reader.len()));
+        }
+
         Ok(Self { session_id, kind })
     }
+}
+
+const fn max_entries_for_degree(max_degree: u32) -> usize {
+    let threshold = max_degree as usize;
+    threshold.saturating_add(threshold.saturating_sub(1) / 2)
+}
+
+fn dealer_log_matches_public_message(
+    dealer_log: &DealerLog<MinSig, ed25519::PublicKey>,
+    pub_msg: &DealerPubMsg<MinSig>,
+) -> bool {
+    let mut log_bytes = Vec::new();
+    dealer_log.write(&mut log_bytes);
+
+    let mut pub_msg_bytes = Vec::new();
+    pub_msg.write(&mut pub_msg_bytes);
+
+    log_bytes.starts_with(&pub_msg_bytes)
 }
 
 /// State of a participant in the DKG protocol.
@@ -294,8 +379,8 @@ pub struct DkgParticipant {
 
     /// Session metadata for this ceremony (anti-replay protection).
     session: CeremonySession,
-    /// Set of message hashes we've already processed (for deduplication).
-    seen_messages: HashSet<[u8; 32]>,
+    /// Set of semantic message keys we've already accepted.
+    seen_messages: HashSet<SeenMessageKey>,
 
     /// Messages to send (accumulated during protocol execution).
     outgoing: Vec<(Option<ed25519::PublicKey>, ProtocolMessage)>,
@@ -357,10 +442,13 @@ impl DkgParticipant {
             .try_collect()
             .map_err(|_| DkgError::CeremonyFailed("duplicate participants".into()))?;
 
+        let session = CeremonySession::new(config.chain_id, &config.participants, timestamp_nanos);
+        let info_namespace = session.info_namespace();
+
         // Create round info - all participants are both dealers and players
         let info = Info::<MinSig, ed25519::PublicKey>::new::<N3f1>(
-            format!("kora-dkg-{}", config.chain_id).as_bytes(),
-            0,    // round 0 for initial DKG
+            &info_namespace,
+            u64::from(session.round),
             None, // no previous output
             Mode::default(),
             participants_set.clone(), // dealers
@@ -373,7 +461,6 @@ impl DkgParticipant {
             Player::<MinSig, ed25519::PrivateKey>::new(info.clone(), config.identity_key.clone())
                 .map_err(|e| DkgError::Crypto(format!("Failed to create player: {:?}", e)))?;
 
-        let session = CeremonySession::new(config.chain_id, &config.participants, timestamp_nanos);
         info!(
             ceremony_id = hex::encode(session.ceremony_id),
             chain_id = session.chain_id,
@@ -486,15 +573,6 @@ impl DkgParticipant {
         from: &ed25519::PublicKey,
         bytes: &[u8],
     ) -> Result<(), DkgError> {
-        let message_hash = compute_message_hash(bytes);
-        if self.seen_messages.contains(&message_hash) {
-            debug!(?from, "Rejecting duplicate message");
-            return Ok(());
-        }
-
-        let msg = ProtocolMessage::from_bytes(bytes, self.config.n() as u32)
-            .map_err(|e| DkgError::InvalidMessage(format!("Failed to decode: {:?}", e)))?;
-
         // Validate sender is a known participant before inserting into
         // seen_messages to prevent non-participants from exhausting memory.
         if !self.is_participant(from) {
@@ -502,7 +580,10 @@ impl DkgParticipant {
             return Err(DkgError::UnknownSender { sender: format!("{:?}", from) });
         }
 
-        match &msg.session_id {
+        let header = ProtocolMessage::frame_header(bytes)
+            .map_err(|e| DkgError::InvalidMessage(format!("Invalid frame: {:?}", e)))?;
+
+        match &header.session_id {
             Some(session_id) => {
                 if *session_id != self.session.ceremony_id {
                     warn!(
@@ -526,16 +607,122 @@ impl DkgParticipant {
             }
         }
 
-        // Cap seen_messages to prevent unbounded growth under adversarial conditions.
-        // With N participants, legitimate messages are bounded by ~30*N per phase.
-        const MAX_SEEN_MESSAGES: usize = 10_000;
-        if self.seen_messages.len() >= MAX_SEEN_MESSAGES {
+        self.validate_message_tag_for_phase(header.tag)?;
+
+        let msg =
+            ProtocolMessage::from_bytes_with_limits(bytes, self.config.n() as u32, self.config.n())
+                .map_err(|e| DkgError::InvalidMessage(format!("Failed to decode: {:?}", e)))?;
+
+        let message_key = self.message_key(from, &msg)?;
+        if self.seen_messages.contains(&message_key) {
+            debug!(?from, ?message_key, "Rejecting duplicate message");
+            return Ok(());
+        }
+
+        if self.seen_messages.len() >= self.max_seen_messages() {
             warn!("seen_messages capacity reached, rejecting message");
             return Err(DkgError::InvalidMessage("deduplication set full".into()));
         }
 
-        self.seen_messages.insert(message_hash);
-        self.handle_message(from, msg)
+        self.handle_message(from, msg)?;
+        self.seen_messages.insert(message_key);
+        Ok(())
+    }
+
+    const fn max_seen_messages(&self) -> usize {
+        self.config.n().saturating_mul(6).saturating_add(8)
+    }
+
+    fn validate_message_tag_for_phase(&self, tag: u8) -> Result<(), DkgError> {
+        let allowed = match tag {
+            // Dealer public/private messages and acks may be in flight while a
+            // participant is starting or collecting phase-2 messages.
+            0..=2 => matches!(
+                self.current_phase,
+                DkgPhase::AwaitingStart | DkgPhase::DealerStarted | DkgPhase::CollectingMessages
+            ),
+            // Dealer logs and log sync messages belong to phase 4.
+            3..=5 => {
+                matches!(self.current_phase, DkgPhase::DealerFinalized | DkgPhase::CollectingLogs)
+            }
+            // Ready can arrive while local phase-2 completion is racing.
+            6 => matches!(
+                self.current_phase,
+                DkgPhase::AwaitingStart | DkgPhase::DealerStarted | DkgPhase::CollectingMessages
+            ),
+            _ => false,
+        };
+
+        if allowed {
+            Ok(())
+        } else {
+            Err(DkgError::InvalidMessage(format!(
+                "message tag {} not valid in phase {}",
+                tag, self.current_phase
+            )))
+        }
+    }
+
+    fn message_key(
+        &self,
+        from: &ed25519::PublicKey,
+        msg: &ProtocolMessage,
+    ) -> Result<SeenMessageKey, DkgError> {
+        match &msg.kind {
+            ProtocolMessageKind::DealerPublic { dealer, .. } => {
+                if from != dealer {
+                    return Err(DkgError::SenderMismatch {
+                        expected: format!("{:?}", dealer),
+                        actual: format!("{:?}", from),
+                    });
+                }
+                Ok(SeenMessageKey::DealerPublic(dealer.clone()))
+            }
+            ProtocolMessageKind::DealerPrivate { dealer, .. } => {
+                if from != dealer {
+                    return Err(DkgError::SenderMismatch {
+                        expected: format!("{:?}", dealer),
+                        actual: format!("{:?}", from),
+                    });
+                }
+                Ok(SeenMessageKey::DealerPrivate(dealer.clone()))
+            }
+            ProtocolMessageKind::PlayerAck { player, dealer, .. } => {
+                if from != player {
+                    return Err(DkgError::SenderMismatch {
+                        expected: format!("{:?}", player),
+                        actual: format!("{:?}", from),
+                    });
+                }
+                if dealer != &self.config.my_public_key() {
+                    return Err(DkgError::SenderMismatch {
+                        expected: format!("{:?}", self.config.my_public_key()),
+                        actual: format!("{:?}", dealer),
+                    });
+                }
+                Ok(SeenMessageKey::PlayerAck(player.clone()))
+            }
+            ProtocolMessageKind::DealerLog { .. } => Ok(SeenMessageKey::DealerLog(from.clone())),
+            ProtocolMessageKind::RequestLogs => Ok(SeenMessageKey::RequestLogs(from.clone())),
+            ProtocolMessageKind::AllLogs { logs } => {
+                if from != self.leader() {
+                    return Err(DkgError::UnauthorizedSender);
+                }
+                if logs.len() > self.config.n() {
+                    return Err(DkgError::InvalidMessage("too many dealer logs".into()));
+                }
+                Ok(SeenMessageKey::AllLogs(from.clone()))
+            }
+            ProtocolMessageKind::Ready { player } => {
+                if from != player {
+                    return Err(DkgError::SenderMismatch {
+                        expected: format!("{:?}", player),
+                        actual: format!("{:?}", from),
+                    });
+                }
+                Ok(SeenMessageKey::Ready(player.clone()))
+            }
+        }
     }
 
     /// Process an incoming message (after session/dedup validation).
@@ -599,6 +786,12 @@ impl DkgParticipant {
                         actual: format!("{:?}", from),
                     });
                 }
+                if dealer != self.config.my_public_key() {
+                    return Err(DkgError::SenderMismatch {
+                        expected: format!("{:?}", self.config.my_public_key()),
+                        actual: format!("{:?}", dealer),
+                    });
+                }
                 if let Some(ref mut our_dealer) = self.dealer
                     && dealer == self.config.my_public_key()
                 {
@@ -611,9 +804,16 @@ impl DkgParticipant {
             ProtocolMessageKind::DealerLog { log } => {
                 let log_clone = log.clone();
                 if let Some((dealer_pk, dealer_log)) = log.check(&self.info) {
+                    if from != &dealer_pk {
+                        return Err(DkgError::SenderMismatch {
+                            expected: format!("{:?}", dealer_pk),
+                            actual: format!("{:?}", from),
+                        });
+                    }
                     if !self.is_participant(&dealer_pk) {
                         return Err(DkgError::UnknownSender { sender: format!("{:?}", dealer_pk) });
                     }
+                    self.validate_dealer_log_for_current_messages(&dealer_pk, &dealer_log)?;
                     if self.dealer_logs.len() >= max_entries {
                         return Err(DkgError::TooManyDealers {
                             count: self.dealer_logs.len() + 1,
@@ -648,10 +848,17 @@ impl DkgParticipant {
                     return Err(DkgError::UnauthorizedSender);
                 }
                 info!(count = logs.len(), "Received all dealer logs from leader");
+                let mut accepted_logs = 0usize;
                 for (_pk, log) in logs {
                     let log_clone = log.clone();
                     if let Some((dealer_pk, dealer_log)) = log.check(&self.info) {
                         if !self.is_participant(&dealer_pk) {
+                            continue;
+                        }
+                        if self
+                            .validate_dealer_log_for_current_messages(&dealer_pk, &dealer_log)
+                            .is_err()
+                        {
                             continue;
                         }
                         if self.dealer_logs.len() >= max_entries {
@@ -662,7 +869,11 @@ impl DkgParticipant {
                         }
                         self.dealer_logs.insert(dealer_pk.clone(), dealer_log);
                         self.signed_logs.insert(dealer_pk, log_clone);
+                        accepted_logs += 1;
                     }
+                }
+                if accepted_logs == 0 {
+                    return Err(DkgError::InvalidMessage("all logs contained no new logs".into()));
                 }
             }
             ProtocolMessageKind::Ready { player } => {
@@ -676,6 +887,32 @@ impl DkgParticipant {
                 self.ready_players.insert(player);
             }
         }
+        Ok(())
+    }
+
+    fn validate_dealer_log_for_current_messages(
+        &self,
+        dealer: &ed25519::PublicKey,
+        dealer_log: &DealerLog<MinSig, ed25519::PublicKey>,
+    ) -> Result<(), DkgError> {
+        let has_current_transcript = !self.dealer_pub_msgs.is_empty() || !self.acks_sent.is_empty();
+        if !has_current_transcript {
+            // Phase-4 restore persists signed logs but not the phase-2 transcript.
+            return Ok(());
+        }
+
+        if !self.acks_sent.contains(dealer) {
+            return Err(DkgError::InvalidDealerLog { dealer: format!("{:?}", dealer) });
+        }
+
+        let Some(pub_msg) = self.dealer_pub_msgs.get(dealer) else {
+            return Err(DkgError::InvalidDealerLog { dealer: format!("{:?}", dealer) });
+        };
+
+        if !dealer_log_matches_public_message(dealer_log, pub_msg) {
+            return Err(DkgError::InvalidDealerLog { dealer: format!("{:?}", dealer) });
+        }
+
         Ok(())
     }
 
@@ -985,6 +1222,11 @@ impl DkgParticipant {
     /// Get the timestamp used for this ceremony.
     pub const fn timestamp_nanos(&self) -> u64 {
         self.timestamp_nanos
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seen_message_count(&self) -> usize {
+        self.seen_messages.len()
     }
 
     /// Save current state to disk for crash recovery.
