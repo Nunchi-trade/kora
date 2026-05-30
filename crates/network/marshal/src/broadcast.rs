@@ -5,6 +5,7 @@ use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
 use commonware_p2p::Provider;
 use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner};
+use commonware_utils::NZUsize;
 
 /// Initializes the buffered broadcast engine with sensible defaults.
 #[derive(Debug, Clone, Copy)]
@@ -18,7 +19,7 @@ impl BroadcastInitializer {
     pub const DEFAULT_DEQUE_SIZE: usize = 256;
 
     /// Whether messages are sent with priority by default.
-    pub const DEFAULT_PRIORITY: bool = false;
+    pub const DEFAULT_PRIORITY: bool = true;
 }
 
 impl BroadcastInitializer {
@@ -39,7 +40,7 @@ impl BroadcastInitializer {
     {
         let config = Config {
             public_key,
-            mailbox_size: Self::DEFAULT_MAILBOX_SIZE,
+            mailbox_size: NZUsize!(Self::DEFAULT_MAILBOX_SIZE),
             deque_size: Self::DEFAULT_DEQUE_SIZE,
             priority: Self::DEFAULT_PRIORITY,
             codec_config,
@@ -57,6 +58,6 @@ mod tests {
     fn test_defaults() {
         assert_eq!(BroadcastInitializer::DEFAULT_MAILBOX_SIZE, 1024);
         assert_eq!(BroadcastInitializer::DEFAULT_DEQUE_SIZE, 256);
-        assert!(!BroadcastInitializer::DEFAULT_PRIORITY);
+        const { assert!(BroadcastInitializer::DEFAULT_PRIORITY) };
     }
 }

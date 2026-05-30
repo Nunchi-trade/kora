@@ -3,15 +3,15 @@
 //! Generates all BLS12-381 threshold shares using a single trusted dealer.
 //! This is NOT secure for production but allows testing the validator workflow.
 
-use std::{fs, path::PathBuf};
+use std::{fs, io::Write as _, path::PathBuf};
 
 use clap::Args;
 use commonware_codec::{ReadExt, Write as _};
 use commonware_cryptography::bls12381::{
-    dkg,
+    dkg::feldman_desmedt as dkg,
     primitives::{sharing::Mode, variant::MinSig},
 };
-use commonware_utils::{N3f1, TryCollect, ordered::Set};
+use commonware_utils::{Faults, N3f1, TryCollect, ordered::Set};
 use eyre::{Result, WrapErr};
 use serde::{Deserialize, Serialize};
 
@@ -19,9 +19,6 @@ use serde::{Deserialize, Serialize};
 pub(crate) struct DkgDealArgs {
     #[arg(long, default_value = "4")]
     pub validators: usize,
-
-    #[arg(long, default_value = "3")]
-    pub threshold: u32,
 
     #[arg(long, default_value = "/shared")]
     pub output_dir: PathBuf,
@@ -43,10 +40,14 @@ struct ShareJson {
 }
 
 pub(crate) fn run(args: DkgDealArgs) -> Result<()> {
+    let quorum = N3f1::quorum(args.validators);
     tracing::info!(
         validators = args.validators,
-        threshold = args.threshold,
-        "Running trusted dealer DKG"
+        quorum = quorum,
+        max_faulty = args.validators as u32 - quorum,
+        "Running trusted dealer DKG (quorum determined by N3f1: need {} of {} validators)",
+        quorum,
+        args.validators
     );
 
     let mut participants = Vec::with_capacity(args.validators);
@@ -119,7 +120,7 @@ pub(crate) fn run(args: DkgDealArgs) -> Result<()> {
         let output_json = OutputJson {
             group_public_key: hex::encode(&group_key_bytes),
             public_polynomial: hex::encode(&public_polynomial_bytes),
-            threshold: args.threshold,
+            threshold: quorum,
             participants: args.validators,
             participant_keys: participant_keys.clone(),
         };
@@ -128,14 +129,27 @@ pub(crate) fn run(args: DkgDealArgs) -> Result<()> {
 
         let share_json = ShareJson { index: share.index.get(), secret: hex::encode(&share_bytes) };
         let share_path = node_dir.join("share.key");
-        fs::write(&share_path, serde_json::to_string_pretty(&share_json)?)?;
+        write_secret_file(&share_path, serde_json::to_string_pretty(&share_json)?.as_bytes())?;
 
         tracing::info!(node = i, "Wrote DKG output and share");
     }
 
     tracing::info!("Trusted dealer DKG complete");
     tracing::info!("  Validators: {}", args.validators);
-    tracing::info!("  Threshold:  {}", args.threshold);
+    tracing::info!("  Quorum (N3f1): {}", quorum);
 
     Ok(())
+}
+
+/// Write `data` to `path` with mode `0600` so key material is never world-readable.
+fn write_secret_file(path: &std::path::Path, data: &[u8]) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .wrap_err_with(|| format!("Failed to create secret file {}", path.display()))?;
+    f.write_all(data).wrap_err_with(|| format!("Failed to write secret file {}", path.display()))
 }

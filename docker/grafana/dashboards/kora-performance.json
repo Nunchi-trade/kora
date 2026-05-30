@@ -1,0 +1,619 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 2,
+  "id": null,
+  "links": [
+    {"title": "Overview Dashboard", "url": "/d/kora-overview", "type": "link"},
+    {"title": "Stall Diagnostics", "url": "/d/kora-stall-diagnostics", "type": "link"},
+    {"title": "Logs Explorer", "url": "/d/kora-logs", "type": "link"}
+  ],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "id": 400,
+      "title": "Block Time & Throughput",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Effective block time (inverse of finalization rate). Target: <1s for fast consensus.",
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null}, {"color": "yellow", "value": 0.5}, {"color": "red", "value": 2}
+          ]},
+          "unit": "s"
+        }
+      },
+      "gridPos": {"h": 4, "w": 4, "x": 0, "y": 1},
+      "id": 401,
+      "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "targets": [{"expr": "1 / clamp_min(avg(rate(finalized_height[1m])), 0.001)", "refId": "A"}],
+      "title": "Avg Block Time",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Peak throughput observed over the last 5 minutes.",
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "red", "value": null}, {"color": "yellow", "value": 1}, {"color": "green", "value": 3}
+          ]},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 4, "w": 4, "x": 4, "y": 1},
+      "id": 402,
+      "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "targets": [{"expr": "max(rate(finalized_height[1m]))", "refId": "A"}],
+      "title": "Peak Blocks/sec",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Consensus efficiency: what fraction of views produce finalized blocks. 100% = no wasted rounds.",
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "red", "value": null}, {"color": "yellow", "value": 0.7}, {"color": "green", "value": 0.9}
+          ]},
+          "unit": "percentunit"
+        }
+      },
+      "gridPos": {"h": 4, "w": 4, "x": 8, "y": 1},
+      "id": 403,
+      "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "targets": [{"expr": "avg(rate(finalized_height[5m])) / avg(rate(engine_voter_state_current_view[5m]))", "refId": "A"}],
+      "title": "Consensus Efficiency",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Average block build duration. Must stay well under LEADER_TIMEOUT (1s default).",
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null}, {"color": "yellow", "value": 0.2}, {"color": "red", "value": 1}
+          ]},
+          "unit": "s"
+        }
+      },
+      "gridPos": {"h": 4, "w": 4, "x": 12, "y": 1},
+      "id": 404,
+      "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "targets": [{"expr": "avg(rate(marshaled_build_duration_sum[1m]) / rate(marshaled_build_duration_count[1m]))", "refId": "A"}],
+      "title": "Avg Build Time",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Average time from proposal to finalization (notarize + finalize votes collected).",
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null}, {"color": "yellow", "value": 0.1}, {"color": "red", "value": 0.5}
+          ]},
+          "unit": "s"
+        }
+      },
+      "gridPos": {"h": 4, "w": 4, "x": 16, "y": 1},
+      "id": 405,
+      "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "targets": [{"expr": "avg(rate(engine_voter_finalization_latency_sum[1m]) / rate(engine_voter_finalization_latency_count[1m]))", "refId": "A"}],
+      "title": "Avg Finalization Latency",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Average BLS signature verification time. Bottleneck if > 50ms.",
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null}, {"color": "yellow", "value": 0.02}, {"color": "red", "value": 0.05}
+          ]},
+          "unit": "s"
+        }
+      },
+      "gridPos": {"h": 4, "w": 4, "x": 20, "y": 1},
+      "id": 406,
+      "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "targets": [{"expr": "avg(rate(engine_batcher_verify_latency_sum[1m]) / rate(engine_batcher_verify_latency_count[1m]))", "refId": "A"}],
+      "title": "Avg Sig Verify",
+      "type": "stat"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 5},
+      "id": 410,
+      "title": "Block Time Breakdown (Where Time Goes)",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Block time breakdown: build + notarization + finalization. Shows where optimization effort should focus.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 2, "fillOpacity": 30, "spanNulls": false, "showPoints": "never", "stacking": {"mode": "normal"}},
+          "unit": "s"
+        }
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 6},
+      "id": 411,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "avg(rate(marshaled_build_duration_sum[1m]) / rate(marshaled_build_duration_count[1m]))", "legendFormat": "Block Build", "refId": "A"},
+        {"expr": "avg(rate(engine_voter_notarization_latency_sum[1m]) / rate(engine_voter_notarization_latency_count[1m]))", "legendFormat": "Notarization", "refId": "B"},
+        {"expr": "avg(rate(engine_voter_finalization_latency_sum[1m]) / rate(engine_voter_finalization_latency_count[1m])) - avg(rate(engine_voter_notarization_latency_sum[1m]) / rate(engine_voter_notarization_latency_count[1m]))", "legendFormat": "Finalization (after notar.)", "refId": "C"}
+      ],
+      "title": "Block Time Composition (stacked)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Effective block time (1/blocks_per_sec) including wasted views. The gap between theoretical min and actual shows optimization potential.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 2, "fillOpacity": 5, "spanNulls": false, "showPoints": "never", "thresholdsStyle": {"mode": "line+area"}},
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "transparent", "value": null}, {"color": "rgba(255,0,0,0.1)", "value": 2}
+          ]},
+          "unit": "s"
+        }
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 6},
+      "id": 412,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "1 / clamp_min(avg(rate(finalized_height[1m])), 0.001)", "legendFormat": "Actual Block Time", "refId": "A"},
+        {"expr": "avg(rate(marshaled_build_duration_sum[1m]) / rate(marshaled_build_duration_count[1m])) + avg(rate(engine_voter_finalization_latency_sum[1m]) / rate(engine_voter_finalization_latency_count[1m]))", "legendFormat": "Theoretical Min (build+finalize)", "refId": "B"},
+        {"expr": "avg(rate(engine_batcher_verify_latency_sum[1m]) / rate(engine_batcher_verify_latency_count[1m]))", "legendFormat": "Sig Verify Overhead", "refId": "C"}
+      ],
+      "title": "Actual vs Theoretical Block Time",
+      "type": "timeseries"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 14},
+      "id": 420,
+      "title": "Latency Percentiles (p50 / p95 / p99)",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Block build duration percentiles. p99 approaching 2s leader timeout means proposals will start failing.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 2, "fillOpacity": 5, "spanNulls": false, "showPoints": "never", "thresholdsStyle": {"mode": "line"}},
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "transparent", "value": null}, {"color": "red", "value": 2}
+          ]},
+          "unit": "s"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 15},
+      "id": 421,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum(rate(marshaled_build_duration_bucket[5m])) by (le))", "legendFormat": "p50", "refId": "A"},
+        {"expr": "histogram_quantile(0.95, sum(rate(marshaled_build_duration_bucket[5m])) by (le))", "legendFormat": "p95", "refId": "B"},
+        {"expr": "histogram_quantile(0.99, sum(rate(marshaled_build_duration_bucket[5m])) by (le))", "legendFormat": "p99", "refId": "C"}
+      ],
+      "title": "Block Build Duration Percentiles",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Finalization latency percentiles. Shows consistency of vote collection time.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 2, "fillOpacity": 5, "spanNulls": false, "showPoints": "never", "thresholdsStyle": {"mode": "line"}},
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "transparent", "value": null}, {"color": "red", "value": 4}
+          ]},
+          "unit": "s"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 15},
+      "id": 422,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum(rate(engine_voter_finalization_latency_bucket[5m])) by (le))", "legendFormat": "p50", "refId": "A"},
+        {"expr": "histogram_quantile(0.95, sum(rate(engine_voter_finalization_latency_bucket[5m])) by (le))", "legendFormat": "p95", "refId": "B"},
+        {"expr": "histogram_quantile(0.99, sum(rate(engine_voter_finalization_latency_bucket[5m])) by (le))", "legendFormat": "p99", "refId": "C"}
+      ],
+      "title": "Finalization Latency Percentiles",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "BLS signature verification percentiles. If p99 > 50ms, increase SIGNATURE_THREADS from 2.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 2, "fillOpacity": 5, "spanNulls": false, "showPoints": "never", "thresholdsStyle": {"mode": "line"}},
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "transparent", "value": null}, {"color": "red", "value": 0.05}
+          ]},
+          "unit": "s"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 15},
+      "id": 423,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum(rate(engine_batcher_verify_latency_bucket[5m])) by (le))", "legendFormat": "p50", "refId": "A"},
+        {"expr": "histogram_quantile(0.95, sum(rate(engine_batcher_verify_latency_bucket[5m])) by (le))", "legendFormat": "p95", "refId": "B"},
+        {"expr": "histogram_quantile(0.99, sum(rate(engine_batcher_verify_latency_bucket[5m])) by (le))", "legendFormat": "p99", "refId": "C"}
+      ],
+      "title": "Sig Verify Latency Percentiles",
+      "type": "timeseries"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 22},
+      "id": 430,
+      "title": "Consensus Pipeline Efficiency",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Rate of views advancing vs blocks finalized. Gap = wasted consensus rounds eating into throughput.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 2, "fillOpacity": 10, "spanNulls": false, "showPoints": "never"},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 23},
+      "id": 431,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "avg(rate(engine_voter_state_current_view[1m]))", "legendFormat": "Views/sec (capacity)", "refId": "A"},
+        {"expr": "avg(rate(finalized_height[1m]))", "legendFormat": "Blocks/sec (actual)", "refId": "B"},
+        {"expr": "avg(rate(engine_voter_state_current_view[1m])) - avg(rate(finalized_height[1m]))", "legendFormat": "Wasted views/sec", "refId": "C"}
+      ],
+      "title": "Capacity vs Actual Throughput",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Consensus messages sent per second by type. Shows the communication overhead at current block rate.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 20, "spanNulls": false, "showPoints": "never", "stacking": {"mode": "normal"}},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 23},
+      "id": 432,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "sum by (message) (rate(engine_voter_outbound_messages_total[1m]))", "legendFormat": "{{message}}", "refId": "A"}
+      ],
+      "title": "Consensus Messages/sec by Type",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Batch verification size. Larger batches = more efficient but higher latency per batch.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 2, "fillOpacity": 5, "spanNulls": false, "showPoints": "never"},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 23},
+      "id": 433,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum(rate(engine_batcher_batch_size_bucket[5m])) by (le))", "legendFormat": "p50 batch size", "refId": "A"},
+        {"expr": "histogram_quantile(0.95, sum(rate(engine_batcher_batch_size_bucket[5m])) by (le))", "legendFormat": "p95 batch size", "refId": "B"},
+        {"expr": "sum(rate(engine_batcher_added[1m]))", "legendFormat": "Messages/sec to batcher", "refId": "C"}
+      ],
+      "title": "Signature Batch Size & Throughput",
+      "type": "timeseries"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 30},
+      "id": 440,
+      "title": "Storage & I/O Performance",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Write throughput vs finalization rate. If writes plateau while finalization slows, disk I/O is the bottleneck.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 10, "spanNulls": false, "showPoints": "never"},
+          "unit": "Bps"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 31},
+      "id": 441,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "sum(rate(runtime_storage_write_bytes_total[1m]))", "legendFormat": "Total Write B/s", "refId": "A"},
+        {"expr": "sum(rate(runtime_storage_read_bytes_total[1m]))", "legendFormat": "Total Read B/s", "refId": "B"}
+      ],
+      "title": "Aggregate Storage I/O",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Write IOPS. High IOPS with low bandwidth indicates many small writes (journaling).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 10, "spanNulls": false, "showPoints": "never"},
+          "unit": "iops"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 31},
+      "id": 442,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "sum by (instance) (rate(runtime_storage_writes_total[1m]))", "legendFormat": "Node {{validator_index}} writes/s", "refId": "A"},
+        {"expr": "sum by (instance) (rate(runtime_storage_reads_total[1m]))", "legendFormat": "Node {{validator_index}} reads/s", "refId": "B"}
+      ],
+      "title": "Storage IOPS per Node",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Average write size (bytes per write op). Small writes indicate journal syncs; large writes indicate state commits.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 5, "spanNulls": false, "showPoints": "never"},
+          "unit": "bytes"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 31},
+      "id": 443,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "rate(runtime_storage_write_bytes_total[1m]) / rate(runtime_storage_writes_total[1m])", "legendFormat": "Node {{validator_index}} avg write size", "refId": "A"}
+      ],
+      "title": "Average Write Size",
+      "type": "timeseries"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 38},
+      "id": 450,
+      "title": "Network Performance",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Total network bandwidth per node. Shows communication overhead at current throughput.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 10, "spanNulls": false, "showPoints": "never"},
+          "unit": "Bps"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 39},
+      "id": 451,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "rate(runtime_outbound_bandwidth_total[1m]) + rate(runtime_inbound_bandwidth_total[1m])", "legendFormat": "Node {{validator_index}} total", "refId": "A"}
+      ],
+      "title": "Network Bandwidth per Node",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Bytes per finalized block (network cost per block). Lower = more efficient protocol.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 2, "fillOpacity": 5, "spanNulls": false, "showPoints": "never"},
+          "unit": "bytes"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 39},
+      "id": 452,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "(rate(runtime_outbound_bandwidth_total[5m]) + rate(runtime_inbound_bandwidth_total[5m])) / clamp_min(rate(finalized_height[5m]), 0.001)", "legendFormat": "Node {{validator_index}} bytes/block", "refId": "A"}
+      ],
+      "title": "Network Cost per Block",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Block fetch/resolve duration percentiles. High values indicate slow block propagation between nodes.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 2, "fillOpacity": 5, "spanNulls": false, "showPoints": "never"},
+          "unit": "s"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 39},
+      "id": 453,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum(rate(engine_resolver_resolver_fetch_duration_bucket[5m])) by (le))", "legendFormat": "Fetch p50", "refId": "A"},
+        {"expr": "histogram_quantile(0.95, sum(rate(engine_resolver_resolver_fetch_duration_bucket[5m])) by (le))", "legendFormat": "Fetch p95", "refId": "B"},
+        {"expr": "histogram_quantile(0.50, sum(rate(engine_resolver_resolver_serve_duration_bucket[5m])) by (le))", "legendFormat": "Serve p50", "refId": "C"},
+        {"expr": "histogram_quantile(0.95, sum(rate(engine_resolver_resolver_serve_duration_bucket[5m])) by (le))", "legendFormat": "Serve p95", "refId": "D"}
+      ],
+      "title": "Resolver Fetch/Serve Latency",
+      "type": "timeseries"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 46},
+      "id": 460,
+      "title": "Resource Utilization vs Throughput",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Memory growth rate. Steady growth under load = mempool leak or state accumulation.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 10, "spanNulls": false, "showPoints": "never"},
+          "unit": "bytes"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 47},
+      "id": 461,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "runtime_process_rss", "legendFormat": "Node {{validator_index}} RSS", "refId": "A"}
+      ],
+      "title": "Memory (RSS)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Active async tasks. Correlate with block rate — task count should scale linearly with throughput.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 5, "spanNulls": false, "showPoints": "never"},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 47},
+      "id": 462,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "runtime_tasks_running", "legendFormat": "Node {{validator_index}} running", "refId": "A"},
+        {"expr": "rate(runtime_tasks_spawned_total[1m])", "legendFormat": "Node {{validator_index}} spawned/s", "refId": "B"}
+      ],
+      "title": "Task Concurrency",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Memory consumed per finalized block. Rising trend indicates state or mempool inefficiency.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 2, "fillOpacity": 5, "spanNulls": false, "showPoints": "never"},
+          "unit": "bytes"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 47},
+      "id": 463,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "deriv(runtime_process_rss[5m]) / clamp_min(rate(finalized_height[5m]), 0.001)", "legendFormat": "Node {{validator_index}} bytes/block", "refId": "A"}
+      ],
+      "title": "Memory Growth per Block",
+      "type": "timeseries"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 54},
+      "id": 470,
+      "title": "Optimization Targets",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Time budget breakdown: what fraction of block time is spent in each phase. Largest slice = optimization target.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 0, "fillOpacity": 80}
+        },
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "Build"}, "properties": [{"id": "color", "value": {"fixedColor": "blue", "mode": "fixed"}}]},
+          {"matcher": {"id": "byName", "options": "Notarization"}, "properties": [{"id": "color", "value": {"fixedColor": "green", "mode": "fixed"}}]},
+          {"matcher": {"id": "byName", "options": "Finalization"}, "properties": [{"id": "color", "value": {"fixedColor": "orange", "mode": "fixed"}}]},
+          {"matcher": {"id": "byName", "options": "Wasted (nullified)"}, "properties": [{"id": "color", "value": {"fixedColor": "red", "mode": "fixed"}}]}
+        ]
+      },
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 55},
+      "id": 471,
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "pieType": "donut", "legend": {"displayMode": "list", "placement": "right"}},
+      "targets": [
+        {"expr": "avg(rate(marshaled_build_duration_sum[5m]) / rate(marshaled_build_duration_count[5m]))", "legendFormat": "Build", "refId": "A"},
+        {"expr": "avg(rate(engine_voter_notarization_latency_sum[5m]) / rate(engine_voter_notarization_latency_count[5m]))", "legendFormat": "Notarization", "refId": "B"},
+        {"expr": "clamp_min(avg(rate(engine_voter_finalization_latency_sum[5m]) / rate(engine_voter_finalization_latency_count[5m])) - avg(rate(engine_voter_notarization_latency_sum[5m]) / rate(engine_voter_notarization_latency_count[5m])), 0)", "legendFormat": "Finalization", "refId": "C"},
+        {"expr": "clamp_min((1 / clamp_min(avg(rate(finalized_height[5m])), 0.001)) - avg(rate(engine_voter_finalization_latency_sum[5m]) / rate(engine_voter_finalization_latency_count[5m])) - avg(rate(marshaled_build_duration_sum[5m]) / rate(marshaled_build_duration_count[5m])), 0)", "legendFormat": "Wasted (nullified)", "refId": "D"}
+      ],
+      "title": "Time Budget Breakdown",
+      "type": "piechart"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Blocked resolver peers — nodes that can't fetch blocks from peers. Non-zero means catch-up is impaired.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 2, "fillOpacity": 10, "spanNulls": false, "showPoints": "never"},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 55},
+      "id": 472,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "engine_resolver_resolver_peers_blocked", "legendFormat": "Node {{validator_index}} blocked peers", "refId": "A"},
+        {"expr": "engine_resolver_resolver_fetch_active", "legendFormat": "Node {{validator_index}} active fetches", "refId": "B"},
+        {"expr": "engine_resolver_resolver_fetch_pending", "legendFormat": "Node {{validator_index}} pending fetches", "refId": "C"}
+      ],
+      "title": "Resolver Health (Blocked Peers & Fetch Queue)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Journal tracked items and sync rate. Growing tracked items without syncs = journal backpressure.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 5, "spanNulls": false, "showPoints": "never"},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 55},
+      "id": 473,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "engine_voter_journal_tracked", "legendFormat": "Node {{validator_index}} tracked", "refId": "A"},
+        {"expr": "rate(engine_voter_journal_synced[1m])", "legendFormat": "Node {{validator_index}} synced/s", "refId": "B"},
+        {"expr": "rate(engine_voter_journal_pruned[1m])", "legendFormat": "Node {{validator_index}} pruned/s", "refId": "C"}
+      ],
+      "title": "Voter Journal Activity",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 38,
+  "tags": ["kora", "performance"],
+  "templating": {"list": []},
+  "time": {"from": "now-30m", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Kora Performance & Block Time",
+  "uid": "kora-performance",
+  "version": 1
+}

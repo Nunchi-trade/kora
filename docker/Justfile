@@ -18,16 +18,19 @@ trusted-devnet:
     ./scripts/devnet-run.sh
 
 devnet-minimal:
-    @COMPOSE_PROFILES="" ./scripts/devnet-run.sh
+    @COMPOSE_PROFILES="none" ./scripts/devnet-run.sh
 
 stats:
     ./scripts/devnet-stats.sh
 
+health:
+    ./scripts/devnet-health.sh
+
 down:
-    docker compose -f compose/devnet.yaml down
+    docker compose -f compose/devnet.yaml --profile observability --profile interactive-dkg down
 
 reset:
-    docker compose -f compose/devnet.yaml down -v
+    docker compose -f compose/devnet.yaml --profile observability --profile interactive-dkg down -v
     @echo "Devnet reset. Next 'just devnet' runs fresh DKG."
 
 restart: down devnet

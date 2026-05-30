@@ -1,4 +1,4 @@
-//! Boostrap configuration.
+//! Bootstrap configuration.
 
 use std::{path::Path, str::FromStr};
 
@@ -10,10 +10,14 @@ use crate::Tx;
 /// Bootstrap configuration for genesis state and initial transactions.
 #[derive(Clone, Debug)]
 pub struct BootstrapConfig {
+    /// Chain ID declared in the genesis file.
+    pub chain_id: u64,
     /// Initial account allocations (address, balance) for genesis.
     pub genesis_alloc: Vec<(Address, U256)>,
     /// Transactions to execute during bootstrap.
     pub bootstrap_txs: Vec<Tx>,
+    /// Genesis block Unix timestamp, in seconds.
+    pub genesis_timestamp: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -32,17 +36,29 @@ struct AllocationJson {
 impl BootstrapConfig {
     /// Create a new bootstrap configuration.
     #[must_use]
-    pub const fn new(genesis_alloc: Vec<(Address, U256)>, bootstrap_txs: Vec<Tx>) -> Self {
-        Self { genesis_alloc, bootstrap_txs }
+    pub const fn new(
+        chain_id: u64,
+        genesis_alloc: Vec<(Address, U256)>,
+        bootstrap_txs: Vec<Tx>,
+    ) -> Self {
+        Self { chain_id, genesis_alloc, bootstrap_txs, genesis_timestamp: 0 }
+    }
+
+    /// Set the genesis block timestamp.
+    #[must_use]
+    pub const fn with_genesis_timestamp(mut self, genesis_timestamp: u64) -> Self {
+        self.genesis_timestamp = genesis_timestamp;
+        self
     }
 
     /// Load bootstrap configuration from a genesis JSON file.
     pub fn load(genesis_path: &Path) -> Result<Self, BootstrapError> {
         let content = std::fs::read_to_string(genesis_path)?;
         let genesis: GenesisJson = serde_json::from_str(&content)?;
+        let GenesisJson { chain_id, timestamp, allocations } = genesis;
 
-        let mut genesis_alloc = Vec::with_capacity(genesis.allocations.len());
-        for alloc in genesis.allocations {
+        let mut genesis_alloc = Vec::with_capacity(allocations.len());
+        for alloc in allocations {
             let address = Address::from_str(&alloc.address)
                 .map_err(|e| BootstrapError::Parse(format!("invalid address: {}", e)))?;
             let balance = U256::from_str(&alloc.balance)
@@ -50,7 +66,12 @@ impl BootstrapConfig {
             genesis_alloc.push((address, balance));
         }
 
-        Ok(Self { genesis_alloc, bootstrap_txs: Vec::new() })
+        Ok(Self {
+            chain_id,
+            genesis_alloc,
+            bootstrap_txs: Vec::new(),
+            genesis_timestamp: timestamp,
+        })
     }
 }
 
@@ -86,5 +107,50 @@ impl From<std::io::Error> for BootstrapError {
 impl From<serde_json::Error> for BootstrapError {
     fn from(e: serde_json::Error) -> Self {
         Self::Json(e)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, path::PathBuf};
+
+    use super::*;
+
+    fn temp_genesis_path() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "kora-genesis-{}-{}.json",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ))
+    }
+
+    #[test]
+    fn new_defaults_genesis_timestamp_to_zero() {
+        let bootstrap = BootstrapConfig::new(1337, Vec::new(), Vec::new());
+        assert_eq!(bootstrap.chain_id, 1337);
+        assert_eq!(bootstrap.genesis_timestamp, 0);
+    }
+
+    #[test]
+    fn load_preserves_genesis_timestamp() {
+        let path = temp_genesis_path();
+        let json = r#"{
+            "chain_id": 1337,
+            "timestamp": 1700000000,
+            "allocations": [
+                {
+                    "address": "0x0000000000000000000000000000000000000001",
+                    "balance": "42"
+                }
+            ]
+        }"#;
+
+        fs::write(&path, json).expect("write genesis");
+        let bootstrap = BootstrapConfig::load(&path).expect("load genesis");
+        fs::remove_file(path).expect("remove genesis");
+
+        assert_eq!(bootstrap.chain_id, 1337);
+        assert_eq!(bootstrap.genesis_timestamp, 1_700_000_000);
+        assert_eq!(bootstrap.genesis_alloc.len(), 1);
     }
 }

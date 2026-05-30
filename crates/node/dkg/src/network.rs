@@ -121,7 +121,9 @@ impl DkgNetwork {
                 Ok((mut stream, addr)) => {
                     debug!(%addr, "Accepted connection");
 
-                    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+                    if let Err(e) = stream.set_read_timeout(Some(Duration::from_secs(5))) {
+                        warn!(%addr, %e, "Failed to set read timeout on incoming connection");
+                    }
 
                     // Read public key (32 bytes for ed25519)
                     let mut pk_bytes = [0u8; 32];

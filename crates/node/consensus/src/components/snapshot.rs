@@ -1,25 +1,43 @@
 //! In-memory snapshot store implementation.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::Arc,
 };
 
 use kora_qmdb::ChangeSet;
 use kora_traits::StateDb;
 use parking_lot::RwLock;
+use tracing::debug;
 
 use crate::{
     ConsensusError,
     traits::{Digest, Snapshot, SnapshotStore},
 };
 
-/// In-memory snapshot store.
+/// Default maximum number of persisted snapshots to retain in memory.
+///
+/// Once more than this many snapshots have been persisted, the oldest are
+/// evicted from the in-memory store. The `persisted` marker is kept so that
+/// ancestor chain-walking terminates correctly, but the heavy snapshot data
+/// (state overlay, change set, tx IDs) is freed.
+const DEFAULT_MAX_PERSISTED_RETAINED: usize = 256;
+
+/// In-memory snapshot store with bounded retention of persisted snapshots.
+///
+/// Snapshots that have been persisted to the underlying state database are
+/// evicted (oldest-first) once the number of retained persisted entries
+/// exceeds `max_persisted_retained`. This prevents unbounded memory growth
+/// on long-running nodes.
 #[derive(Debug)]
 pub struct InMemorySnapshotStore<S> {
     snapshots: Arc<RwLock<BTreeMap<Digest, Snapshot<S>>>>,
     persisted: Arc<RwLock<BTreeSet<Digest>>>,
     persisting: Arc<RwLock<BTreeSet<Digest>>>,
+    /// Insertion-ordered queue of persisted digests, used for oldest-first eviction.
+    persisted_order: Arc<RwLock<VecDeque<Digest>>>,
+    /// Maximum number of persisted snapshots to retain in memory.
+    max_persisted_retained: usize,
 }
 
 impl<S> Clone for InMemorySnapshotStore<S> {
@@ -28,19 +46,56 @@ impl<S> Clone for InMemorySnapshotStore<S> {
             snapshots: Arc::clone(&self.snapshots),
             persisted: Arc::clone(&self.persisted),
             persisting: Arc::clone(&self.persisting),
+            persisted_order: Arc::clone(&self.persisted_order),
+            max_persisted_retained: self.max_persisted_retained,
         }
     }
 }
 
 impl<S> InMemorySnapshotStore<S> {
-    /// Create a new empty snapshot store.
+    /// Create a new empty snapshot store with the default retention limit.
     #[must_use]
     pub fn new() -> Self {
+        Self::with_max_persisted_retained(DEFAULT_MAX_PERSISTED_RETAINED)
+    }
+
+    /// Create a new empty snapshot store that retains at most
+    /// `max_persisted_retained` persisted snapshots in memory.
+    #[must_use]
+    pub fn with_max_persisted_retained(max_persisted_retained: usize) -> Self {
         Self {
             snapshots: Arc::new(RwLock::new(BTreeMap::new())),
             persisted: Arc::new(RwLock::new(BTreeSet::new())),
             persisting: Arc::new(RwLock::new(BTreeSet::new())),
+            persisted_order: Arc::new(RwLock::new(VecDeque::new())),
+            max_persisted_retained,
         }
+    }
+
+    /// Return the number of snapshots currently held in memory.
+    pub fn len(&self) -> usize {
+        self.snapshots.read().len()
+    }
+
+    /// Return true if the store contains no snapshots.
+    pub fn is_empty(&self) -> bool {
+        self.snapshots.read().is_empty()
+    }
+
+    /// Return the number of digests currently marked as persisted.
+    pub fn persisted_count(&self) -> usize {
+        self.persisted.read().len()
+    }
+
+    /// Return the number of snapshots that have not yet been persisted.
+    ///
+    /// This is the count of entries in the snapshot map whose digest is not
+    /// in the persisted set.  A rising value under steady-state operation
+    /// indicates the persistence pipeline is falling behind block production.
+    pub fn unpersisted_count(&self) -> usize {
+        let snapshots = self.snapshots.read();
+        let persisted = self.persisted.read();
+        snapshots.keys().filter(|d| !persisted.contains(d)).count()
     }
 }
 
@@ -67,6 +122,53 @@ impl<S> InMemorySnapshotStore<S> {
             persisting.remove(digest);
         }
     }
+
+    /// Evict the oldest persisted snapshots that exceed the retention limit.
+    ///
+    /// After a successful `persist_snapshot` call, this method should be invoked
+    /// to free memory held by snapshots whose state has already been committed
+    /// to the persistent store (QMDB).
+    ///
+    /// The `persisted` marker is intentionally **kept** for evicted digests so
+    /// that ancestor chain-walking (`merged_changes`, `changes_for_persist`,
+    /// `collect_pending_tx_ids`) still terminates correctly at persisted
+    /// boundaries.
+    ///
+    /// Returns the number of snapshots evicted.
+    pub fn evict_persisted(&self) -> usize {
+        // Fast path: check with a read lock to avoid write-lock contention
+        // when no eviction is needed (the common case).
+        if self.persisted_order.read().len() <= self.max_persisted_retained {
+            return 0;
+        }
+
+        let mut snapshots = self.snapshots.write();
+        let persisted = self.persisted.read();
+        let mut order = self.persisted_order.write();
+
+        let mut evicted = 0usize;
+        while order.len() > self.max_persisted_retained {
+            let Some(oldest) = order.pop_front() else {
+                break;
+            };
+            // Only remove snapshot data if it is actually persisted.
+            // (Guards against stale entries in the order queue.)
+            if persisted.contains(&oldest) && snapshots.remove(&oldest).is_some() {
+                evicted += 1;
+            }
+        }
+
+        if evicted > 0 {
+            debug!(
+                evicted,
+                retained = snapshots.len(),
+                persisted = persisted.len(),
+                "evicted persisted snapshots"
+            );
+        }
+
+        evicted
+    }
 }
 
 impl<S> Default for InMemorySnapshotStore<S> {
@@ -90,8 +192,11 @@ impl<S: StateDb> SnapshotStore<S> for InMemorySnapshotStore<S> {
 
     fn mark_persisted(&self, digests: &[Digest]) {
         let mut persisted = self.persisted.write();
+        let mut order = self.persisted_order.write();
         for digest in digests {
-            persisted.insert(*digest);
+            if persisted.insert(*digest) {
+                order.push_back(*digest);
+            }
         }
     }
 
@@ -285,5 +390,189 @@ mod tests {
 
         store.mark_persisted(&[digest]);
         assert!(!store.can_persist_chain(&[digest]));
+    }
+
+    fn make_digest(byte: u8) -> Digest {
+        Digest::from([byte; 32])
+    }
+
+    fn make_snapshot(parent: Option<Digest>) -> Snapshot<MockStateDb> {
+        Snapshot::new(parent, MockStateDb, StateRoot(B256::ZERO), ChangeSet::new(), BTreeSet::new())
+    }
+
+    #[test]
+    fn evict_persisted_removes_oldest_snapshots() {
+        // Retain at most 2 persisted snapshots.
+        let store = InMemorySnapshotStore::<MockStateDb>::with_max_persisted_retained(2);
+
+        let d1 = make_digest(0x01);
+        let d2 = make_digest(0x02);
+        let d3 = make_digest(0x03);
+        let d4 = make_digest(0x04);
+
+        store.insert(d1, make_snapshot(None));
+        store.insert(d2, make_snapshot(Some(d1)));
+        store.insert(d3, make_snapshot(Some(d2)));
+        store.insert(d4, make_snapshot(Some(d3)));
+
+        // Persist d1 and d2, then evict -- both are within the limit.
+        store.mark_persisted(&[d1, d2]);
+        assert_eq!(store.evict_persisted(), 0);
+        assert_eq!(store.len(), 4);
+
+        // Persist d3 -- now 3 persisted, limit is 2, so d1 should be evicted.
+        store.mark_persisted(&[d3]);
+        assert_eq!(store.evict_persisted(), 1);
+        assert!(store.get(&d1).is_none(), "d1 should have been evicted");
+        assert!(store.get(&d2).is_some(), "d2 should still be retained");
+        assert!(store.get(&d3).is_some(), "d3 should still be retained");
+        assert!(store.get(&d4).is_some(), "d4 is not persisted, should be retained");
+
+        // The persisted marker for d1 should still be present (for chain-walking).
+        assert!(store.is_persisted(&d1));
+    }
+
+    #[test]
+    fn evict_persisted_does_not_remove_unpersisted() {
+        let store = InMemorySnapshotStore::<MockStateDb>::with_max_persisted_retained(1);
+
+        let d1 = make_digest(0x01);
+        let d2 = make_digest(0x02);
+        let d3 = make_digest(0x03);
+
+        store.insert(d1, make_snapshot(None));
+        store.insert(d2, make_snapshot(Some(d1)));
+        store.insert(d3, make_snapshot(Some(d2)));
+
+        // Only persist d1 -- within limit, no eviction.
+        store.mark_persisted(&[d1]);
+        assert_eq!(store.evict_persisted(), 0);
+
+        // Persist d2 -- now 2 persisted, limit is 1, evict d1.
+        store.mark_persisted(&[d2]);
+        assert_eq!(store.evict_persisted(), 1);
+        assert!(store.get(&d1).is_none());
+        assert!(store.get(&d2).is_some());
+        // d3 is not persisted, must not be evicted.
+        assert!(store.get(&d3).is_some());
+    }
+
+    #[test]
+    fn evict_persisted_with_zero_retention_evicts_all() {
+        let store = InMemorySnapshotStore::<MockStateDb>::with_max_persisted_retained(0);
+
+        let d1 = make_digest(0x01);
+        let d2 = make_digest(0x02);
+
+        store.insert(d1, make_snapshot(None));
+        store.insert(d2, make_snapshot(Some(d1)));
+
+        store.mark_persisted(&[d1, d2]);
+        let evicted = store.evict_persisted();
+        assert_eq!(evicted, 2);
+        assert!(store.get(&d1).is_none());
+        assert!(store.get(&d2).is_none());
+        // Persisted markers are kept.
+        assert!(store.is_persisted(&d1));
+        assert!(store.is_persisted(&d2));
+    }
+
+    #[test]
+    fn len_and_persisted_count_track_correctly() {
+        let store = InMemorySnapshotStore::<MockStateDb>::with_max_persisted_retained(1);
+
+        assert!(store.is_empty());
+        assert_eq!(store.len(), 0);
+        assert_eq!(store.persisted_count(), 0);
+
+        let d1 = make_digest(0x01);
+        let d2 = make_digest(0x02);
+
+        store.insert(d1, make_snapshot(None));
+        assert_eq!(store.len(), 1);
+
+        store.insert(d2, make_snapshot(Some(d1)));
+        assert_eq!(store.len(), 2);
+
+        store.mark_persisted(&[d1, d2]);
+        assert_eq!(store.persisted_count(), 2);
+
+        store.evict_persisted();
+        // d1 evicted from snapshots, d2 retained.
+        assert_eq!(store.len(), 1);
+        // Both remain in persisted set.
+        assert_eq!(store.persisted_count(), 2);
+    }
+
+    #[test]
+    fn evict_persisted_is_noop_within_limit() {
+        // Retention limit of 4, persist exactly 4 -- no eviction should happen.
+        let store = InMemorySnapshotStore::<MockStateDb>::with_max_persisted_retained(4);
+
+        let d1 = make_digest(0x01);
+        let d2 = make_digest(0x02);
+        let d3 = make_digest(0x03);
+        let d4 = make_digest(0x04);
+
+        store.insert(d1, make_snapshot(None));
+        store.insert(d2, make_snapshot(Some(d1)));
+        store.insert(d3, make_snapshot(Some(d2)));
+        store.insert(d4, make_snapshot(Some(d3)));
+
+        store.mark_persisted(&[d1, d2, d3, d4]);
+        assert_eq!(store.persisted_count(), 4);
+
+        // Eviction should be a no-op: exactly at the limit.
+        assert_eq!(store.evict_persisted(), 0);
+
+        // All snapshots remain in memory.
+        assert_eq!(store.len(), 4);
+        assert!(store.get(&d1).is_some());
+        assert!(store.get(&d2).is_some());
+        assert!(store.get(&d3).is_some());
+        assert!(store.get(&d4).is_some());
+    }
+
+    #[test]
+    fn mark_persisted_is_idempotent_for_order_tracking() {
+        let store = InMemorySnapshotStore::<MockStateDb>::with_max_persisted_retained(1);
+
+        let d1 = make_digest(0x01);
+        store.insert(d1, make_snapshot(None));
+
+        // Mark persisted twice -- should not duplicate in the order queue.
+        store.mark_persisted(&[d1]);
+        store.mark_persisted(&[d1]);
+
+        assert_eq!(store.persisted_count(), 1);
+        // Eviction with only 1 persisted and limit 1 should evict nothing.
+        assert_eq!(store.evict_persisted(), 0);
+    }
+
+    #[test]
+    fn unpersisted_count_tracks_correctly() {
+        let store = InMemorySnapshotStore::<MockStateDb>::with_max_persisted_retained(4);
+
+        let d1 = make_digest(0x01);
+        let d2 = make_digest(0x02);
+        let d3 = make_digest(0x03);
+
+        // Empty store has zero unpersisted.
+        assert_eq!(store.unpersisted_count(), 0);
+
+        // Insert three snapshots -- all unpersisted.
+        store.insert(d1, make_snapshot(None));
+        store.insert(d2, make_snapshot(Some(d1)));
+        store.insert(d3, make_snapshot(Some(d2)));
+        assert_eq!(store.unpersisted_count(), 3);
+        assert_eq!(store.len(), 3);
+
+        // Persist d1 -- two unpersisted remain.
+        store.mark_persisted(&[d1]);
+        assert_eq!(store.unpersisted_count(), 2);
+
+        // Persist all -- zero unpersisted.
+        store.mark_persisted(&[d2, d3]);
+        assert_eq!(store.unpersisted_count(), 0);
     }
 }

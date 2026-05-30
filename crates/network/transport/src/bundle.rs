@@ -5,7 +5,7 @@ use std::fmt;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, Handle};
 
-use crate::channels::{MarshalChannels, SimplexChannels};
+use crate::channels::{MarshalChannels, SimplexChannels, TxGossipChannel};
 
 /// Bundle of registered transport channels ready for node use.
 ///
@@ -17,6 +17,9 @@ pub struct TransportBundle<P: PublicKey, E: Clock> {
 
     /// Channels for block dissemination and backfill (marshal).
     pub marshal: MarshalChannels<P, E>,
+
+    /// Channel for transaction gossip.
+    pub tx_gossip: TxGossipChannel<P, E>,
 
     /// Network handle to keep the transport alive.
     pub handle: Handle<()>,
@@ -36,8 +39,9 @@ impl<P: PublicKey, E: Clock> TransportBundle<P, E> {
     pub const fn new(
         simplex: SimplexChannels<P, E>,
         marshal: MarshalChannels<P, E>,
+        tx_gossip: TxGossipChannel<P, E>,
         handle: Handle<()>,
     ) -> Self {
-        Self { simplex, marshal, handle }
+        Self { simplex, marshal, tx_gossip, handle }
     }
 }

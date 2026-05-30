@@ -10,11 +10,15 @@
 mod app;
 pub use app::RevmApplication;
 
+pub mod commit_marker;
+
 mod error;
 pub use error::RunnerError;
 
+mod no_sync_storage;
+
 mod runner;
-pub use runner::ProductionRunner;
+pub use runner::{ProductionRunner, runtime_storage_directory};
 
 mod scheme;
 pub use scheme::{ThresholdScheme, load_threshold_scheme};

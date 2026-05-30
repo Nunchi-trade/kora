@@ -1,0 +1,41 @@
+---
+- name: Install Docker packages
+  community.general.pacman:
+    name:
+      - docker
+      - docker-compose
+      - docker-buildx
+    state: present
+
+- name: Configure Docker daemon
+  ansible.builtin.copy:
+    content: "{{ docker_daemon_config | to_nice_json }}\n"
+    dest: /etc/docker/daemon.json
+    mode: "0644"
+  when: docker_dns_servers | default([]) | length > 0
+  notify: restart docker
+  vars:
+    docker_daemon_config:
+      dns: "{{ docker_dns_servers }}"
+
+- name: Enable and start Docker
+  ansible.builtin.systemd:
+    name: docker
+    enabled: true
+    state: started
+
+- name: Flush handlers to ensure Docker is restarted if needed
+  ansible.builtin.meta: flush_handlers
+
+- name: Check if kora-builder exists
+  ansible.builtin.command:
+    cmd: docker buildx inspect kora-builder
+  register: builder_check
+  changed_when: false
+  failed_when: false
+
+- name: Create buildx builder with host networking
+  ansible.builtin.command:
+    cmd: docker buildx create --name kora-builder --use --driver docker-container --driver-opt network=host
+  when: builder_check.rc != 0
+  changed_when: true

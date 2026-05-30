@@ -11,15 +11,15 @@ mod common;
 
 use std::{
     collections::BTreeMap,
-    future::Future,
     num::NonZeroU32,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
+use commonware_actor::Feedback;
 use commonware_consensus::{
     Heightable, Reporter,
-    marshal::{Update, core::Mailbox, standard::Standard},
+    marshal::{Start, Update, core::Mailbox, standard::Standard},
     simplex::{
         scheme::bls12381_threshold::standard as bls12381_threshold,
         types::{Activity, Finalization, Finalize, Notarization, Notarize, Proposal},
@@ -39,7 +39,7 @@ use commonware_p2p::{
     simulated::{self, Link, Network, Oracle},
 };
 use commonware_parallel::Sequential;
-use commonware_runtime::{Clock, Metrics, Quota, Runner, deterministic};
+use commonware_runtime::{Clock, Quota, Runner, Supervisor as _, deterministic};
 use commonware_utils::{Acknowledgement, NZU16, NZUsize, ordered::Set};
 use kora_marshal::{ActorInitializer, ArchiveInitializer, BroadcastInitializer, PeerInitializer};
 
@@ -63,6 +63,10 @@ const LINK: Link = Link {
 };
 const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
+fn genesis_block() -> Block {
+    Block::new(Sha256::hash(b"genesis-parent"), Height::zero(), 0)
+}
+
 /// Mock application that tracks received blocks.
 #[derive(Clone, Default)]
 struct MockApplication {
@@ -79,7 +83,7 @@ impl MockApplication {
 impl Reporter for MockApplication {
     type Activity = Update<B>;
 
-    fn report(&mut self, activity: Self::Activity) -> impl Future<Output = ()> + Send {
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
         match activity {
             Update::Block(block, ack) => {
                 let height = block.height();
@@ -90,7 +94,7 @@ impl Reporter for MockApplication {
                 *self.tip.lock().unwrap() = Some((height, commitment));
             }
         }
-        async {}
+        Feedback::Ok
     }
 }
 
@@ -126,7 +130,7 @@ async fn setup_validator(
     let backfill = control.register(1, TEST_QUOTA).await.unwrap();
 
     let resolver = PeerInitializer::init::<_, _, _, B, _, _, _>(
-        &context,
+        context.child("resolver"),
         validator.clone(),
         oracle.manager(),
         control.clone(),
@@ -135,7 +139,7 @@ async fn setup_validator(
 
     // 2. Use BroadcastInitializer::init() for the broadcast engine
     let (broadcast_engine, buffer) = BroadcastInitializer::init::<_, _, B, _>(
-        context.clone(),
+        context.child("broadcast"),
         validator.clone(),
         oracle.manager(),
         (),
@@ -143,26 +147,28 @@ async fn setup_validator(
     let network = control.register(2, TEST_QUOTA).await.unwrap();
     broadcast_engine.start(network);
 
-    // 3. Use ArchiveInitializer::init_finalizations() for finalizations archive
-    let finalizations_by_height = ArchiveInitializer::init_finalizations(
-        context.with_label("finalizations_by_height"),
+    // 3. Use ArchiveInitializer::init_prunable() for finalizations archive
+    let finalizations_by_height = ArchiveInitializer::init_prunable(
+        context.child("finalizations_by_height"),
+        "finalizations",
         S::certificate_codec_config_unbounded(),
     )
     .await
     .expect("failed to init finalizations archive");
 
-    // 4. Use ArchiveInitializer::init_blocks() for blocks archive
+    // 4. Use ArchiveInitializer::init_prunable() for blocks archive
     let finalized_blocks =
-        ArchiveInitializer::init_blocks(context.with_label("finalized_blocks"), ())
+        ArchiveInitializer::init_prunable(context.child("finalized_blocks"), "blocks", ())
             .await
             .expect("failed to init blocks archive");
 
     // 5. Use ActorInitializer::init() for the actor
     let (actor, mailbox, processed_height) = ActorInitializer::init(
-        context.clone(),
+        context.child("actor"),
         finalizations_by_height,
         finalized_blocks,
         provider,
+        Start::Genesis(genesis_block()),
         commonware_runtime::buffer::paged::CacheRef::from_pooler(
             &context,
             NZU16!(1024),
@@ -202,7 +208,7 @@ fn test_start_marshal_and_finalize_block() {
     runner.start(|mut context| async move {
         // Setup network
         let (network, mut oracle) = Network::new(
-            context.with_label("network"),
+            context.child("network"),
             simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
@@ -218,7 +224,7 @@ fn test_start_marshal_and_finalize_block() {
         // Setup a single validator using all initializers
         let validator = participants[0].clone();
         let (application, mut mailbox, processed_height) = setup_validator(
-            context.with_label("validator_0"),
+            context.child("validator"),
             &mut oracle,
             validator.clone(),
             ConstantProvider::new(schemes[0].clone()),
@@ -230,34 +236,33 @@ fn test_start_marshal_and_finalize_block() {
         assert!(application.blocks().is_empty());
 
         // Create a block
-        let parent = Sha256::hash(b"genesis");
+        let parent = genesis_block().digest();
         let block = Block::new(parent, Height::new(1), 1);
         let round = Round::new(Epoch::new(0), View::new(1));
 
         // Submit verified block
-        mailbox.verified(round, block.clone()).await;
+        let _ = mailbox.verified(round, block.clone()).await;
 
         // Create proposal
         let proposal = Proposal { round, parent: View::new(0), payload: block.digest() };
 
         // Notarize the block
         let notarization = make_notarization(proposal.clone(), &schemes, QUORUM);
-        mailbox.report(Activity::Notarization(notarization)).await;
+        mailbox.report(Activity::Notarization(notarization));
 
         // Finalize the block
         let finalization = make_finalization(proposal, &schemes, QUORUM);
-        mailbox.report(Activity::Finalization(finalization)).await;
+        mailbox.report(Activity::Finalization(finalization));
 
         // Wait for block to be delivered to application
         let mut attempts = 0;
-        while application.blocks().is_empty() && attempts < 100 {
+        while !application.blocks().contains_key(&Height::new(1)) && attempts < 100 {
             context.sleep(Duration::from_millis(10)).await;
             attempts += 1;
         }
 
         // Verify block was delivered
         let blocks = application.blocks();
-        assert_eq!(blocks.len(), 1, "Expected 1 block to be finalized");
         assert!(blocks.contains_key(&Height::new(1)));
 
         // Verify block can be retrieved from mailbox
@@ -281,7 +286,7 @@ fn test_start_marshal_multiple_validators() {
     runner.start(|mut context| async move {
         // Setup network
         let (network, mut oracle) = Network::new(
-            context.with_label("network"),
+            context.child("network"),
             simulated::Config {
                 max_size: 1024 * 1024,
                 disconnect_on_block: true,
@@ -296,7 +301,7 @@ fn test_start_marshal_multiple_validators() {
 
         // Register peer set
         let mut manager = oracle.manager();
-        manager.track(0, Set::from_iter_dedup(participants.clone())).await;
+        manager.track(0, Set::from_iter_dedup(participants.clone()));
 
         // Setup multiple validators
         let mut applications = Vec::new();
@@ -304,7 +309,7 @@ fn test_start_marshal_multiple_validators() {
 
         for (i, validator) in participants.iter().take(2).enumerate() {
             let (app, mailbox, _) = setup_validator(
-                context.with_label(&format!("validator_{i}")),
+                context.child("validator").with_attribute("index", i),
                 &mut oracle,
                 validator.clone(),
                 ConstantProvider::new(schemes[i].clone()),
@@ -318,13 +323,13 @@ fn test_start_marshal_multiple_validators() {
         setup_network_links(&mut oracle, &participants[..2], LINK).await;
 
         // Create and finalize a block - both validators verify it locally
-        let parent = Sha256::hash(b"genesis");
+        let parent = genesis_block().digest();
         let block = Block::new(parent, Height::new(1), 42);
         let round = Round::new(Epoch::new(0), View::new(1));
 
         // Both validators verify the block locally
         for mailbox in &mut mailboxes {
-            mailbox.verified(round, block.clone()).await;
+            let _ = mailbox.verified(round, block.clone()).await;
         }
 
         let proposal = Proposal { round, parent: View::new(0), payload: block.digest() };
@@ -334,13 +339,14 @@ fn test_start_marshal_multiple_validators() {
         let finalization = make_finalization(proposal, &schemes, QUORUM);
 
         for mailbox in &mut mailboxes {
-            mailbox.report(Activity::Notarization(notarization.clone())).await;
-            mailbox.report(Activity::Finalization(finalization.clone())).await;
+            mailbox.report(Activity::Notarization(notarization.clone()));
+            mailbox.report(Activity::Finalization(finalization.clone()));
         }
 
         // Wait for blocks to be delivered
         let mut attempts = 0;
-        while (applications[0].blocks().is_empty() || applications[1].blocks().is_empty())
+        while (!applications[0].blocks().contains_key(&Height::new(1))
+            || !applications[1].blocks().contains_key(&Height::new(1)))
             && attempts < 100
         {
             context.sleep(Duration::from_millis(10)).await;
@@ -348,7 +354,7 @@ fn test_start_marshal_multiple_validators() {
         }
 
         // Verify both validators received the block
-        assert_eq!(applications[0].blocks().len(), 1);
-        assert_eq!(applications[1].blocks().len(), 1);
+        assert!(applications[0].blocks().contains_key(&Height::new(1)));
+        assert!(applications[1].blocks().contains_key(&Height::new(1)));
     });
 }

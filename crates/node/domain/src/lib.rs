@@ -11,7 +11,7 @@ mod commitment;
 pub use commitment::{AccountChange, StateChanges, StateChangesCfg};
 
 mod events;
-pub use events::{LedgerEvent, LedgerEvents};
+pub use events::{LedgerEvent, LedgerEvents, MempoolEvent};
 
 mod bootstrap;
 pub use bootstrap::{BootstrapConfig, BootstrapError};

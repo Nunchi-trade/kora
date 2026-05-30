@@ -17,8 +17,11 @@ pub struct BlockExecution {
 impl BlockExecution {
     /// Execute a block's transactions against a parent snapshot.
     ///
-    /// This helper runs the executor and returns the execution outcome for callers to
-    /// compute deterministic consensus roots, persist state, or cache snapshots.
+    /// This helper runs the executor on a dedicated blocking thread via
+    /// [`tokio::task::spawn_blocking`] so that the synchronous EVM execution
+    /// does not occupy an async worker thread.  The executor, state, context,
+    /// and transactions are cloned into the blocking closure (all clones are
+    /// cheap -- Arc bumps or small structs).
     pub async fn execute<S, E>(
         parent_snapshot: &Snapshot<S>,
         executor: &E,
@@ -29,10 +32,17 @@ impl BlockExecution {
         S: StateDb,
         E: BlockExecutor<S, Tx = Bytes>,
     {
+        let executor = executor.clone();
+        let state = parent_snapshot.state.clone();
+        let context = context.clone();
         let txs_bytes: Vec<Bytes> = txs.iter().map(|tx| tx.bytes.clone()).collect();
-        let outcome = executor
-            .execute(&parent_snapshot.state, context, &txs_bytes)
-            .map_err(|e| ConsensusError::Execution(e.to_string()))?;
+
+        let outcome =
+            tokio::task::spawn_blocking(move || executor.execute(&state, &context, &txs_bytes))
+                .await
+                .map_err(|e| ConsensusError::Execution(format!("spawn_blocking join error: {e}")))?
+                .map_err(|e| ConsensusError::Execution(e.to_string()))?;
+
         Ok(Self { outcome })
     }
 }

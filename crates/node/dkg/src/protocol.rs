@@ -5,13 +5,13 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use commonware_codec::{Read as CodecRead, ReadExt, Write};
+use commonware_codec::{Read as _, ReadExt, Write};
 use commonware_cryptography::{
     Hasher as _, Sha256,
     bls12381::{
-        dkg::{
+        dkg::feldman_desmedt::{
             Dealer, DealerLog, DealerPrivMsg, DealerPubMsg, Info, Logs, Player, PlayerAck,
-            SignedDealerLog,
+            SignedDealerLog, observe,
         },
         primitives::{sharing::Mode, variant::MinSig},
     },
@@ -816,7 +816,6 @@ impl DkgParticipant {
         let mut rng = rand::rngs::OsRng;
 
         // Debug: try to observe the logs first to understand what's failing
-        use commonware_cryptography::bls12381::dkg::observe;
         match observe::<MinSig, ed25519::PublicKey, N3f1, ed25519::Batch>(
             &mut rng,
             self.logs_for_verification(),
@@ -1024,30 +1023,65 @@ impl DkgParticipant {
         {
             let max_degree = config.t();
             let mut reader = log_bytes.as_slice();
-            if let Ok(log) = SignedDealerLog::<MinSig, ed25519::PrivateKey>::read_cfg(
+            match SignedDealerLog::<MinSig, ed25519::PrivateKey>::read_cfg(
                 &mut reader,
                 &core::num::NonZeroU32::new(max_degree).unwrap(),
-            ) && let Some((dealer_pk, dealer_log)) = log.clone().check(&participant.info)
-            {
-                participant.dealer_logs.insert(dealer_pk.clone(), dealer_log);
-                participant.signed_logs.insert(dealer_pk, log.clone());
-                participant.our_signed_log = Some(log);
+            ) {
+                Ok(log) => {
+                    if let Some((dealer_pk, dealer_log)) = log.clone().check(&participant.info) {
+                        participant.dealer_logs.insert(dealer_pk.clone(), dealer_log);
+                        participant.signed_logs.insert(dealer_pk, log.clone());
+                        participant.our_signed_log = Some(log);
+                    } else {
+                        warn!(
+                            "Failed to verify our own persisted dealer log during state restoration"
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        ?e,
+                        "Failed to deserialize our own persisted dealer log during state restoration"
+                    );
+                }
             }
         }
 
-        for (pk_hex, log_bytes) in state.get_received_logs() {
+        let mut restored_log_count = 0usize;
+        let received_logs = state.get_received_logs();
+        let total_persisted_logs = received_logs.len();
+        for (pk_hex, log_bytes) in received_logs {
             let max_degree = config.t();
             let mut reader = log_bytes.as_slice();
-            if let Ok(log) = SignedDealerLog::<MinSig, ed25519::PrivateKey>::read_cfg(
+            match SignedDealerLog::<MinSig, ed25519::PrivateKey>::read_cfg(
                 &mut reader,
                 &core::num::NonZeroU32::new(max_degree).unwrap(),
-            ) && let Some((dealer_pk, dealer_log)) = log.clone().check(&participant.info)
-            {
-                let _ = pk_hex;
-                participant.dealer_logs.insert(dealer_pk.clone(), dealer_log);
-                participant.signed_logs.insert(dealer_pk, log);
+            ) {
+                Ok(log) => {
+                    if let Some((dealer_pk, dealer_log)) = log.clone().check(&participant.info) {
+                        participant.dealer_logs.insert(dealer_pk.clone(), dealer_log);
+                        participant.signed_logs.insert(dealer_pk, log);
+                        restored_log_count += 1;
+                    } else {
+                        warn!(
+                            pk_hex,
+                            "Failed to verify persisted dealer log during state restoration"
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        pk_hex,
+                        ?e,
+                        "Failed to deserialize persisted dealer log during state restoration"
+                    );
+                }
             }
         }
+        info!(
+            restored_log_count,
+            total_persisted_logs, "Restored dealer logs from persisted state"
+        );
 
         Ok(Some(participant))
     }

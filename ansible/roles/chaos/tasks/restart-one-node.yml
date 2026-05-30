@@ -1,0 +1,48 @@
+---
+# Included by chaos-rolling-restart.yml for each node_idx
+- name: "Node {{ node_idx }}: Stop"
+  ansible.builtin.command:
+    cmd: "docker compose -f devnet.yaml stop validator-node{{ node_idx }}"
+    chdir: "{{ compose_dir }}"
+
+- name: "Node {{ node_idx }}: Wait {{ stop_duration }}s"
+  ansible.builtin.pause:
+    seconds: "{{ stop_duration | int }}"
+
+- name: "Node {{ node_idx }}: Measure outage block rate"
+  ansible.builtin.uri:
+    url: "{{ prom }}/api/v1/query"
+    method: POST
+    body_format: form-urlencoded
+    body: "query=avg(rate(finalized_height[30s]))"
+    return_content: true
+  register: outage_rate
+
+- name: "Node {{ node_idx }}: Restart"
+  ansible.builtin.command:
+    cmd: "docker compose -f devnet.yaml start validator-node{{ node_idx }}"
+    chdir: "{{ compose_dir }}"
+
+- name: "Node {{ node_idx }}: Wait {{ recovery_wait }}s for recovery"
+  ansible.builtin.pause:
+    seconds: "{{ recovery_wait | int }}"
+
+- name: "Node {{ node_idx }}: Measure recovery block rate"
+  ansible.builtin.uri:
+    url: "{{ prom }}/api/v1/query"
+    method: POST
+    body_format: form-urlencoded
+    body: "query=avg(rate(finalized_height[30s]))"
+    return_content: true
+  register: recovery_rate
+
+- name: "Node {{ node_idx }}: Check catch-up logs"
+  ansible.builtin.command:
+    cmd: "docker logs {{ compose_project_name }}-validator-node{{ node_idx }}-1 --tail 5"
+  register: node_log
+
+- name: "Node {{ node_idx }}: Results"
+  ansible.builtin.debug:
+    msg: |
+      Node {{ node_idx }}: outage={{ (outage_rate.json.data.result[0].value[1] | float) | round(1) }} blocks/sec → recovery={{ (recovery_rate.json.data.result[0].value[1] | float) | round(1) }} blocks/sec
+      Logs: {{ node_log.stderr | default(node_log.stdout, true) | regex_replace('\x1b\\[[0-9;]*m', '') }}

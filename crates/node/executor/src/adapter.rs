@@ -1,8 +1,15 @@
 //! State database adapter for REVM.
 //!
 //! Note: REVM's `DatabaseRef` trait is synchronous, so we bridge async StateDb traits into
-//! the sync REVM interface. When executing inside a Tokio runtime, we use `block_in_place`
-//! so async storage can continue making progress on runtime workers.
+//! the sync REVM interface.
+//!
+//! Callers are expected to run the entire EVM execution inside
+//! `tokio::task::spawn_blocking` so that async worker threads remain free for
+//! consensus, networking, and RPC.  Inside a `spawn_blocking` thread,
+//! `block_in_place` is a no-op (tokio 1.28+) and `Handle::block_on` drives
+//! the state DB futures without starving any async workers.
+
+use std::collections::HashMap;
 
 use alloy_primitives::{Address, B256, KECCAK256_EMPTY, U256};
 use kora_traits::{StateDbError, StateDbRead};
@@ -12,6 +19,16 @@ use tokio::runtime::RuntimeFlavor;
 use crate::ExecutionError;
 
 /// Wrapper for blocking async operations in sync contexts.
+///
+/// When a tokio multi-thread runtime is available (the normal production
+/// case -- either from a `spawn_blocking` thread or an async worker),
+/// `block_in_place` + `handle.block_on` is used.  On a `spawn_blocking`
+/// thread (the expected production path), `block_in_place` is a no-op
+/// (tokio >= 1.28) and `handle.block_on` safely drives the future without
+/// starving async workers.
+///
+/// When no tokio runtime is present (e.g. synchronous unit tests), we fall
+/// back to `futures::executor::block_on`.
 fn block_on<F: std::future::Future>(f: F) -> F::Output {
     if let Ok(handle) = tokio::runtime::Handle::try_current()
         && handle.runtime_flavor() == RuntimeFlavor::MultiThread
@@ -26,13 +43,15 @@ fn block_on<F: std::future::Future>(f: F) -> F::Output {
 #[derive(Clone, Debug)]
 pub struct StateDbAdapter<S> {
     state: S,
+    /// Recent block hashes keyed by block number, used by the BLOCKHASH opcode.
+    block_hashes: HashMap<u64, B256>,
 }
 
 impl<S> StateDbAdapter<S> {
-    /// Create a new adapter wrapping the given state.
+    /// Create a new adapter wrapping the given state and recent block hashes.
     #[must_use]
-    pub const fn new(state: S) -> Self {
-        Self { state }
+    pub const fn new(state: S, block_hashes: HashMap<u64, B256>) -> Self {
+        Self { state, block_hashes }
     }
 
     /// Get the underlying state reference.
@@ -46,10 +65,15 @@ impl<S: StateDbRead> DatabaseRef for StateDbAdapter<S> {
     type Error = ExecutionError;
 
     fn basic_ref(&self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
-        match block_on(self.state.nonce(&address)) {
-            Ok(nonce) => {
-                let balance = block_on(self.state.balance(&address))?;
-                let code_hash = block_on(self.state.code_hash(&address))?;
+        // Batch all three reads into a single block_on call to reduce the
+        // overhead of the async-to-sync bridge (block_in_place + handle.block_on).
+        match block_on(async {
+            let nonce = self.state.nonce(&address).await?;
+            let balance = self.state.balance(&address).await?;
+            let code_hash = self.state.code_hash(&address).await?;
+            Ok::<_, StateDbError>((nonce, balance, code_hash))
+        }) {
+            Ok((nonce, balance, code_hash)) => {
                 Ok(Some(AccountInfo { nonce, balance, code_hash, code: None, account_id: None }))
             }
             Err(StateDbError::AccountNotFound(_)) => Ok(None),
@@ -73,19 +97,85 @@ impl<S: StateDbRead> DatabaseRef for StateDbAdapter<S> {
         }
     }
 
-    fn block_hash_ref(&self, _number: u64) -> Result<B256, Self::Error> {
-        // Block hash lookups not supported yet
-        Ok(B256::ZERO)
+    fn block_hash_ref(&self, number: u64) -> Result<B256, Self::Error> {
+        Ok(self.block_hashes.get(&number).copied().unwrap_or(B256::ZERO))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use alloy_primitives::Bytes;
+    use kora_traits::StateDbError;
+
     use super::*;
+
+    /// Minimal mock that satisfies `StateDbRead` for tests that only exercise
+    /// the block-hash lookup path and never actually call the state methods.
+    #[derive(Clone)]
+    struct NoopState;
+
+    impl StateDbRead for NoopState {
+        async fn nonce(&self, _: &Address) -> Result<u64, StateDbError> {
+            Ok(0)
+        }
+
+        async fn balance(&self, _: &Address) -> Result<U256, StateDbError> {
+            Ok(U256::ZERO)
+        }
+
+        async fn code_hash(&self, _: &Address) -> Result<B256, StateDbError> {
+            Ok(B256::ZERO)
+        }
+
+        async fn code(&self, _: &B256) -> Result<Bytes, StateDbError> {
+            Ok(Bytes::new())
+        }
+
+        async fn storage(&self, _: &Address, _: &U256) -> Result<U256, StateDbError> {
+            Ok(U256::ZERO)
+        }
+    }
 
     #[test]
     fn adapter_new() {
-        let adapter = StateDbAdapter::new(());
-        assert_eq!(adapter.state(), &());
+        let adapter = StateDbAdapter::new(NoopState, HashMap::new());
+        // Verify the adapter is created successfully; state() returns a reference.
+        let _ = adapter.state();
+    }
+
+    #[test]
+    fn block_hash_ref_returns_known_hash() {
+        let mut hashes = HashMap::new();
+        let expected = B256::repeat_byte(0xab);
+        hashes.insert(42, expected);
+        let adapter = StateDbAdapter::new(NoopState, hashes);
+
+        let result = DatabaseRef::block_hash_ref(&adapter, 42).unwrap();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn block_hash_ref_returns_zero_for_unknown() {
+        let adapter = StateDbAdapter::new(NoopState, HashMap::new());
+
+        let result = DatabaseRef::block_hash_ref(&adapter, 999).unwrap();
+        assert_eq!(result, B256::ZERO);
+    }
+
+    #[test]
+    fn block_hash_ref_multiple_entries() {
+        let mut hashes = HashMap::new();
+        let hash_10 = B256::repeat_byte(0x10);
+        let hash_11 = B256::repeat_byte(0x11);
+        let hash_12 = B256::repeat_byte(0x12);
+        hashes.insert(10, hash_10);
+        hashes.insert(11, hash_11);
+        hashes.insert(12, hash_12);
+        let adapter = StateDbAdapter::new(NoopState, hashes);
+
+        assert_eq!(DatabaseRef::block_hash_ref(&adapter, 10).unwrap(), hash_10);
+        assert_eq!(DatabaseRef::block_hash_ref(&adapter, 11).unwrap(), hash_11);
+        assert_eq!(DatabaseRef::block_hash_ref(&adapter, 12).unwrap(), hash_12);
+        assert_eq!(DatabaseRef::block_hash_ref(&adapter, 13).unwrap(), B256::ZERO);
     }
 }

@@ -1,0 +1,7 @@
+=== TEST 1: one-node restart (validator-node3) ===
+[baseline 15s]
+[stopping validator-node3]
+[while-down 30s]
+[starting validator-node3]
+[post-restart 120s]
+[completing post-restart monitor for /root/daeji/repro-logs/test1-one-node-restart-20260520T173812Z]

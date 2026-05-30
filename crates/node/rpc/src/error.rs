@@ -1,5 +1,6 @@
 //! JSON-RPC error types following Ethereum error code conventions.
 
+use alloy_primitives::Bytes;
 use jsonrpsee::types::ErrorObjectOwned;
 use thiserror::Error;
 
@@ -28,8 +29,10 @@ pub mod codes {
     pub const METHOD_NOT_SUPPORTED: i32 = -32004;
     /// Request limit exceeded.
     pub const LIMIT_EXCEEDED: i32 = -32005;
-    /// Execution error (revert, out of gas, etc.).
+    /// Execution error (out of gas, etc.).
     pub const EXECUTION_ERROR: i32 = -32015;
+    /// Execution reverted (EIP-3 standard code).
+    pub const EXECUTION_REVERTED: i32 = 3;
 }
 
 /// RPC-specific errors that can occur during request handling.
@@ -42,6 +45,10 @@ pub enum RpcError {
     /// Transaction not found.
     #[error("transaction not found")]
     TransactionNotFound,
+
+    /// Filter not found.
+    #[error("filter not found")]
+    FilterNotFound,
 
     /// Account not found.
     #[error("account not found: {0}")]
@@ -59,6 +66,10 @@ pub enum RpcError {
     #[error("execution failed: {0}")]
     ExecutionFailed(String),
 
+    /// Execution reverted with optional revert data.
+    #[error("execution reverted")]
+    ExecutionReverted(Option<Bytes>),
+
     /// State database error.
     #[error("state error: {0}")]
     StateError(String),
@@ -70,22 +81,41 @@ pub enum RpcError {
     /// Method not implemented.
     #[error("method not implemented")]
     NotImplemented,
+
+    /// Invalid method parameters.
+    #[error("invalid params: {0}")]
+    InvalidParams(String),
+
+    /// Unsupported operation (e.g. historical state queries).
+    #[error("unsupported: {0}")]
+    Unsupported(String),
 }
 
 impl From<RpcError> for ErrorObjectOwned {
     fn from(err: RpcError) -> Self {
-        let (code, message) = match &err {
-            RpcError::BlockNotFound => (codes::RESOURCE_NOT_FOUND, err.to_string()),
-            RpcError::TransactionNotFound => (codes::RESOURCE_NOT_FOUND, err.to_string()),
-            RpcError::AccountNotFound(_) => (codes::RESOURCE_NOT_FOUND, err.to_string()),
-            RpcError::InvalidBlockNumber(_) => (codes::INVALID_PARAMS, err.to_string()),
-            RpcError::InvalidTransaction(_) => (codes::INVALID_PARAMS, err.to_string()),
-            RpcError::ExecutionFailed(_) => (codes::EXECUTION_ERROR, err.to_string()),
-            RpcError::StateError(_) => (codes::INTERNAL_ERROR, err.to_string()),
-            RpcError::Internal(_) => (codes::INTERNAL_ERROR, err.to_string()),
-            RpcError::NotImplemented => (codes::METHOD_NOT_SUPPORTED, err.to_string()),
-        };
-        ErrorObjectOwned::owned(code, message, None::<()>)
+        match err {
+            RpcError::ExecutionReverted(data) => {
+                ErrorObjectOwned::owned(codes::EXECUTION_REVERTED, "execution reverted", data)
+            }
+            other => {
+                let (code, message) = match &other {
+                    RpcError::BlockNotFound => (codes::RESOURCE_NOT_FOUND, other.to_string()),
+                    RpcError::TransactionNotFound => (codes::RESOURCE_NOT_FOUND, other.to_string()),
+                    RpcError::FilterNotFound => (codes::SERVER_ERROR, other.to_string()),
+                    RpcError::AccountNotFound(_) => (codes::RESOURCE_NOT_FOUND, other.to_string()),
+                    RpcError::InvalidBlockNumber(_) => (codes::INVALID_PARAMS, other.to_string()),
+                    RpcError::InvalidTransaction(_) => (codes::INVALID_PARAMS, other.to_string()),
+                    RpcError::ExecutionFailed(_) => (codes::EXECUTION_ERROR, other.to_string()),
+                    RpcError::InvalidParams(_) => (codes::INVALID_PARAMS, other.to_string()),
+                    RpcError::StateError(_) => (codes::INTERNAL_ERROR, other.to_string()),
+                    RpcError::Internal(_) => (codes::INTERNAL_ERROR, other.to_string()),
+                    RpcError::NotImplemented => (codes::METHOD_NOT_SUPPORTED, other.to_string()),
+                    RpcError::Unsupported(_) => (codes::INVALID_PARAMS, other.to_string()),
+                    RpcError::ExecutionReverted(_) => unreachable!(),
+                };
+                ErrorObjectOwned::owned(code, message, None::<()>)
+            }
+        }
     }
 }
 
@@ -111,6 +141,7 @@ mod tests {
         assert_eq!(codes::METHOD_NOT_SUPPORTED, -32004);
         assert_eq!(codes::LIMIT_EXCEEDED, -32005);
         assert_eq!(codes::EXECUTION_ERROR, -32015);
+        assert_eq!(codes::EXECUTION_REVERTED, 3);
     }
 
     #[test]
@@ -123,6 +154,12 @@ mod tests {
     fn rpc_error_display_transaction_not_found() {
         let err = RpcError::TransactionNotFound;
         assert_eq!(err.to_string(), "transaction not found");
+    }
+
+    #[test]
+    fn rpc_error_display_filter_not_found() {
+        let err = RpcError::FilterNotFound;
+        assert_eq!(err.to_string(), "filter not found");
     }
 
     #[test]
@@ -184,6 +221,14 @@ mod tests {
     }
 
     #[test]
+    fn rpc_error_to_error_object_filter_not_found() {
+        let err = RpcError::FilterNotFound;
+        let obj: ErrorObjectOwned = err.into();
+        assert_eq!(obj.code(), codes::SERVER_ERROR);
+        assert_eq!(obj.message(), "filter not found");
+    }
+
+    #[test]
     fn rpc_error_to_error_object_account_not_found() {
         let err = RpcError::AccountNotFound("0xabc".to_string());
         let obj: ErrorObjectOwned = err.into();
@@ -234,9 +279,69 @@ mod tests {
     }
 
     #[test]
+    fn rpc_error_display_invalid_params() {
+        let err = RpcError::InvalidParams("block range exceeds maximum".to_string());
+        assert_eq!(err.to_string(), "invalid params: block range exceeds maximum");
+    }
+
+    #[test]
+    fn rpc_error_to_error_object_invalid_params() {
+        let err = RpcError::InvalidParams("too wide".to_string());
+        let obj: ErrorObjectOwned = err.into();
+        assert_eq!(obj.code(), codes::INVALID_PARAMS);
+        assert!(obj.message().contains("too wide"));
+    }
+
+    #[test]
+    fn rpc_error_display_unsupported() {
+        let err = RpcError::Unsupported("historical state not available".to_string());
+        assert_eq!(err.to_string(), "unsupported: historical state not available");
+    }
+
+    #[test]
+    fn rpc_error_to_error_object_unsupported() {
+        let err = RpcError::Unsupported("historical state".to_string());
+        let obj: ErrorObjectOwned = err.into();
+        assert_eq!(obj.code(), codes::INVALID_PARAMS);
+        assert!(obj.message().contains("historical state"));
+    }
+
+    #[test]
     fn rpc_error_debug() {
         let err = RpcError::BlockNotFound;
-        let debug_str = format!("{:?}", err);
+        let debug_str = format!("{err:?}");
         assert!(debug_str.contains("BlockNotFound"));
+    }
+
+    #[test]
+    fn rpc_error_display_execution_reverted() {
+        let err = RpcError::ExecutionReverted(Some(Bytes::from_static(&[0x08, 0xc3, 0x79, 0xa0])));
+        assert_eq!(err.to_string(), "execution reverted");
+    }
+
+    #[test]
+    fn rpc_error_display_execution_reverted_none() {
+        let err = RpcError::ExecutionReverted(None);
+        assert_eq!(err.to_string(), "execution reverted");
+    }
+
+    #[test]
+    fn rpc_error_to_error_object_execution_reverted_with_data() {
+        let data = Bytes::from_static(&[0x08, 0xc3, 0x79, 0xa0]);
+        let err = RpcError::ExecutionReverted(Some(data));
+        let obj: ErrorObjectOwned = err.into();
+        assert_eq!(obj.code(), codes::EXECUTION_REVERTED);
+        assert_eq!(obj.message(), "execution reverted");
+        // data field should be present (not null)
+        assert!(obj.data().is_some());
+    }
+
+    #[test]
+    fn rpc_error_to_error_object_execution_reverted_without_data() {
+        let err = RpcError::ExecutionReverted(None);
+        let obj: ErrorObjectOwned = err.into();
+        assert_eq!(obj.code(), codes::EXECUTION_REVERTED);
+        assert_eq!(obj.message(), "execution reverted");
+        assert!(obj.data().is_none());
     }
 }

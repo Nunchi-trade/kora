@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 # Local crates
+kora-config.workspace = true
 kora-consensus.workspace = true
 kora-crypto = { workspace = true, features = ["test-utils"] }
 kora-domain = { workspace = true, features = ["evm"] }

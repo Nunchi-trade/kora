@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 # Local crates
 kora-domain = { path = "../domain", features = ["evm"] }
+kora-metrics = { path = "../metrics" }
 kora-traits = { path = "../../storage/traits" }
 
 # Alloy
@@ -27,6 +28,7 @@ sha3.workspace = true
 
 # Concurrency
 parking_lot.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 
 # Error handling
 thiserror.workspace = true
@@ -37,4 +39,4 @@ tracing.workspace = true
 [dev-dependencies]
 rstest.workspace = true
 rand.workspace = true
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt", "macros", "sync"] }

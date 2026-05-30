@@ -15,4 +15,6 @@ mod store;
 pub use store::BlockIndex;
 
 mod types;
-pub use types::{IndexStats, IndexedBlock, IndexedLog, IndexedReceipt, IndexedTransaction};
+pub use types::{
+    EMPTY_ROOT_HASH, IndexStats, IndexedBlock, IndexedLog, IndexedReceipt, IndexedTransaction,
+};

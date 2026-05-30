@@ -2,6 +2,10 @@
 ignore = [
     # paste is a transitive dep from alloy-primitives
     "RUSTSEC-2024-0436",
+    # ark-relations 0.5.1 enables tracing-subscriber 0.2 through its std
+    # feature, and commonware-cryptography 2026.5.0 currently depends on that
+    # arkworks line. Remove this once commonware can move to ark-relations >=0.6.
+    "RUSTSEC-2025-0055",
 ]
 
 [licenses]
@@ -17,7 +21,6 @@ allow = [
     "Zlib",
     "CC0-1.0",
     "BSL-1.0",
-    "OpenSSL",
 ]
 confidence-threshold = 0.8
 
@@ -25,10 +28,7 @@ confidence-threshold = 0.8
 multiple-versions = "allow"
 wildcards = "allow"
 skip = [
-    "block-buffer",
-    "digest",
     "getrandom",
-    "windows-sys",
     "windows-link",
 ]
 

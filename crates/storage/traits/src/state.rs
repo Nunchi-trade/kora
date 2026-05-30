@@ -34,6 +34,18 @@ pub trait StateDbRead: Clone + Send + Sync + 'static {
         slot: &U256,
     ) -> impl Future<Output = Result<U256, StateDbError>> + Send;
 
+    /// Returns `true` if the REVM `DatabaseCommit` side-channel recorded a
+    /// commit failure since the last call, and clears the flag.
+    ///
+    /// Backends whose `DatabaseCommit::commit()` can fail (e.g. QMDB) set an
+    /// internal flag because the REVM trait is infallible. The executor calls
+    /// this after the transaction loop to detect silent failures.
+    ///
+    /// The default implementation returns `false` (no failure).
+    fn take_commit_failure(&self) -> bool {
+        false
+    }
+
     /// Check if an account exists.
     fn exists(&self, address: &Address) -> impl Future<Output = Result<bool, StateDbError>> + Send {
         let address = *address;

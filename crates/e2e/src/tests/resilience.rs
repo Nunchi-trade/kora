@@ -11,7 +11,6 @@ use crate::{TestConfig, TestHarness, TestSetup};
 
 /// Test with high network latency.
 #[test]
-#[ignore = "flaky when run in parallel - run with --test-threads=1"]
 fn test_high_latency_network() {
     let high_latency_link = SimLinkConfig {
         latency: Duration::from_millis(100),
@@ -54,26 +53,43 @@ fn test_network_jitter() {
     assert_eq!(outcome.blocks_finalized, 5);
 }
 
-/// Test that consensus works with varying validator counts.
+fn run_validator_count(n: usize) {
+    let config = TestConfig::default().with_validators(n).with_max_blocks(3).with_seed(n as u64);
+
+    let setup = TestSetup::simple_transfer(config.chain_id);
+
+    let outcome =
+        TestHarness::run(config, setup).unwrap_or_else(|e| panic!("{n} validators failed: {e}"));
+
+    assert_eq!(outcome.blocks_finalized, 3, "Failed with {n} validators");
+}
+
+/// Test that consensus works with four validators.
 #[test]
-#[ignore = "flaky when run in parallel - run with --test-threads=1"]
-fn test_varying_validator_counts() {
-    for n in [4, 5, 6, 7] {
-        let config =
-            TestConfig::default().with_validators(n).with_max_blocks(3).with_seed(n as u64);
+fn test_four_validator_count() {
+    run_validator_count(4);
+}
 
-        let setup = TestSetup::simple_transfer(config.chain_id);
+/// Test that consensus works with five validators.
+#[test]
+fn test_five_validator_count() {
+    run_validator_count(5);
+}
 
-        let outcome = TestHarness::run(config.clone(), setup)
-            .unwrap_or_else(|e| panic!("{n} validators failed: {e}"));
+/// Test that consensus works with six validators.
+#[test]
+fn test_six_validator_count() {
+    run_validator_count(6);
+}
 
-        assert_eq!(outcome.blocks_finalized, 3, "Failed with {n} validators");
-    }
+/// Test that consensus works with seven validators.
+#[test]
+fn test_seven_validator_count() {
+    run_validator_count(7);
 }
 
 /// Test longer chains to detect state accumulation issues.
 #[test]
-#[ignore = "flaky when run in parallel - run with --test-threads=1"]
 fn test_longer_chain() {
     let config = TestConfig::default()
         .with_validators(4)
@@ -105,7 +121,6 @@ fn test_sustained_throughput() {
 
 /// Test that different seeds produce different (but valid) outcomes.
 #[test]
-#[ignore = "flaky when run in parallel - run with --test-threads=1"]
 fn test_different_seeds_different_paths() {
     let setup = TestSetup::simple_transfer(1337);
     let timeout = std::time::Duration::from_secs(45);
@@ -134,7 +149,6 @@ fn test_different_seeds_different_paths() {
 
 /// Stress test with maximum transactions.
 #[test]
-#[ignore = "slow stress test"]
 fn test_stress_max_transactions() {
     let config = TestConfig::default()
         .with_validators(4)
@@ -151,7 +165,6 @@ fn test_stress_max_transactions() {
 
 /// Stress test with many blocks.
 #[test]
-#[ignore = "slow stress test"]
 fn test_stress_many_blocks() {
     let config = TestConfig::default()
         .with_validators(4)

@@ -4,7 +4,7 @@
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use tracing::{debug, info, warn};
+use tracing::{error, info, warn};
 
 use crate::{
     DkgConfig, DkgError, DkgOutput, DkgPhase, PersistedDkgState,
@@ -48,10 +48,10 @@ impl DkgCeremony {
         info!(
             validator_index = self.config.validator_index,
             n = self.config.n(),
-            t = self.config.t(),
+            quorum = self.config.t(),
             is_leader = self.is_leader(),
             force_restart = self.force_restart,
-            "Starting interactive DKG ceremony"
+            "Starting interactive DKG ceremony (quorum determined by N3f1)"
         );
 
         // Check if we already have output
@@ -227,6 +227,19 @@ impl DkgCeremony {
             tokio::time::sleep(backoff.next_delay()).await;
         }
 
+        let received = participant.received_dealer_count();
+        let acks_sent = participant.acks_sent_count();
+        let required = participant.required_dealer_logs();
+        let total = participant.total_participants();
+        error!(
+            received,
+            acks_sent,
+            required,
+            total,
+            timeout_secs = PHASE2_MAX_TIMEOUT_SECS,
+            "Phase 2 TIMEOUT: failed to collect all dealer messages within deadline. \
+             This typically indicates network connectivity issues between DKG participants."
+        );
         Err(DkgError::Timeout)
     }
 
@@ -274,10 +287,18 @@ impl DkgCeremony {
             tokio::time::sleep(backoff.next_delay()).await;
         }
 
+        let ready = participant.ready_count();
+        let total = participant.total_participants();
+        error!(
+            ready,
+            total,
+            timeout_secs = PHASE2_MAX_TIMEOUT_SECS,
+            "Phase 2.5 TIMEOUT: not all participants signaled ready within deadline. \
+             Some nodes may have failed to receive or send acks."
+        );
         Err(DkgError::CeremonyFailed(format!(
             "Phase 2.5 timeout: only {}/{} participants ready",
-            participant.ready_count(),
-            participant.total_participants()
+            ready, total
         )))
     }
 
@@ -338,22 +359,32 @@ impl DkgCeremony {
                 && last_request_time.elapsed() >= Duration::from_secs(5)
                 && let Some(leader_pk) = self.config.participants.first()
             {
-                debug!(logs, required, "Requesting logs from leader");
+                info!(logs, required, "Requesting dealer logs from leader");
                 let request_msg = ProtocolMessage::new(
                     participant.ceremony_id(),
                     ProtocolMessageKind::RequestLogs,
                 );
-                let _ = network.send_to(leader_pk, &request_msg);
+                if let Err(e) = network.send_to(leader_pk, &request_msg) {
+                    warn!(?e, "Failed to send log request to leader");
+                }
                 last_request_time = Instant::now();
             }
 
             tokio::time::sleep(backoff.next_delay()).await;
         }
 
+        let logs = participant.dealer_log_count();
+        let required = participant.required_dealer_logs();
+        error!(
+            logs,
+            required,
+            timeout_secs = PHASE4_MAX_TIMEOUT_SECS,
+            "Phase 4 TIMEOUT: failed to collect enough dealer logs within deadline. \
+             Some dealers may have failed to finalize or broadcast their logs."
+        );
         Err(DkgError::CeremonyFailed(format!(
             "Phase 4 timeout: only collected {}/{} dealer logs",
-            participant.dealer_log_count(),
-            participant.required_dealer_logs()
+            logs, required
         )))
     }
 
@@ -386,12 +417,16 @@ impl DkgCeremony {
             match target {
                 Some(pk) => {
                     if let Err(e) = network.send_to(&pk, &msg) {
-                        debug!(?pk, ?e, "Failed to send to peer");
+                        warn!(
+                            ?pk,
+                            ?e,
+                            "Failed to send DKG message to peer (will retry on next cycle)"
+                        );
                     }
                 }
                 None => {
                     if let Err(e) = network.broadcast(&msg) {
-                        debug!(?e, "Failed to broadcast");
+                        warn!(?e, "Failed to broadcast DKG message (will retry on next cycle)");
                     }
                 }
             }

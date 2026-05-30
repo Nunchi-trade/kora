@@ -1,0 +1,165 @@
+---
+# Comprehensive diagnostic snapshot of the devnet
+#
+# Usage:
+#   ansible-playbook playbooks/diagnose.yml -i inventory/hosts.yml
+#
+# Collects: block rate, heights, peer counts, resolver state, resource usage,
+# recent warnings/errors, txpool state, and alert status.
+#
+- name: Devnet diagnostic snapshot
+  hosts: devnet
+  become: true
+  vars:
+    prom: "http://localhost:{{ prometheus_port }}"
+
+  tasks:
+    # -- Consensus health --
+    - name: Query block rate
+      ansible.builtin.uri:
+        url: "{{ prom }}/api/v1/query"
+        method: POST
+        body_format: form-urlencoded
+        body: "query=avg(rate(finalized_height[30s]))"
+        return_content: true
+      register: block_rate
+      ignore_errors: true
+
+    - name: Query finalized heights
+      ansible.builtin.uri:
+        url: "{{ prom }}/api/v1/query"
+        method: POST
+        body_format: form-urlencoded
+        body: "query=finalized_height"
+        return_content: true
+      register: heights
+      ignore_errors: true
+
+    - name: Query skip rate
+      ansible.builtin.uri:
+        url: "{{ prom }}/api/v1/query"
+        method: POST
+        body_format: form-urlencoded
+        body: "query=1 - avg(rate(finalized_height[1m])) / avg(rate(current_view[1m]))"
+        return_content: true
+      register: skip_rate
+      ignore_errors: true
+
+    # -- Resolver & P2P --
+    - name: Query resolver blocked peers
+      ansible.builtin.uri:
+        url: "{{ prom }}/api/v1/query"
+        method: POST
+        body_format: form-urlencoded
+        body: "query=engine_resolver_resolver_peers_blocked"
+        return_content: true
+      register: blocked_peers
+      ignore_errors: true
+
+    - name: Query P2P dropped messages
+      ansible.builtin.uri:
+        url: "{{ prom }}/api/v1/query"
+        method: POST
+        body_format: form-urlencoded
+        body: "query=sum(rate(network_router_messages_dropped_total[1m]))"
+        return_content: true
+      register: dropped_msgs
+      ignore_errors: true
+
+    # -- Resources --
+    - name: Query memory usage
+      ansible.builtin.uri:
+        url: "{{ prom }}/api/v1/query"
+        method: POST
+        body_format: form-urlencoded
+        body: "query=process_resident_memory_bytes"
+        return_content: true
+      register: memory
+      ignore_errors: true
+
+    # -- Container status --
+    - name: Check container status
+      ansible.builtin.command:
+        cmd: docker ps --format "table {{'{{'}}.Names{{'}}'}}\t{{'{{'}}.Status{{'}}'}}"
+      register: docker_status
+
+    # -- Recent warnings --
+    - name: Collect unique warnings per node
+      ansible.builtin.shell: |
+        for n in $(seq 0 {{ (num_validators | int) - 1 }}); do
+          echo "--- node$n ---"
+          docker logs {{ compose_project_name }}-validator-node${n}-1 --since 5m 2>&1 \
+            | grep -oP 'WARN\s+\S+::\S+' | sort | uniq -c | sort -rn | head -10
+        done
+      register: warnings
+
+    # -- Firing alerts --
+    - name: Check firing alerts
+      ansible.builtin.uri:
+        url: "{{ prom }}/api/v1/alerts"
+        return_content: true
+      register: alerts
+      ignore_errors: true
+
+    # -- Txpool state --
+    - name: Query txpool status on node0
+      ansible.builtin.uri:
+        url: "http://localhost:8545"
+        method: POST
+        body_format: json
+        body:
+          jsonrpc: "2.0"
+          method: txpool_status
+          params: []
+          id: 1
+        return_content: true
+      register: txpool
+      ignore_errors: true
+
+    # -- Report --
+    - name: "=== DIAGNOSTIC REPORT ==="
+      ansible.builtin.debug:
+        msg: |
+          ╔══════════════════════════════════════════════════╗
+          ║           DEVNET DIAGNOSTIC SNAPSHOT             ║
+          ╚══════════════════════════════════════════════════╝
+
+          ── Consensus ──
+          Block rate: {{ (block_rate.json.data.result[0].value[1] | default('N/A') | float) | round(1) }} blocks/sec
+          Skip rate:  {{ ((skip_rate.json.data.result[0].value[1] | default('0') | float) * 100) | round(1) }}%
+          Heights:
+          {% for r in heights.json.data.result | default([]) %}
+            {{ r.metric.instance }}: {{ r.value[1] }}
+          {% endfor %}
+
+          ── Resolver & P2P ──
+          Blocked peers:
+          {% for r in blocked_peers.json.data.result | default([]) %}
+            {{ r.metric.instance }}: {{ r.value[1] }}
+          {% endfor %}
+          Dropped msgs/sec: {{ (dropped_msgs.json.data.result[0].value[1] | default('0') | float) | round(1) }}
+
+          ── Resources ──
+          Memory (RSS):
+          {% for r in memory.json.data.result | default([]) %}
+            {{ r.metric.instance }}: {{ (r.value[1] | float / 1048576) | round(0) }} MB
+          {% endfor %}
+
+          ── Containers ──
+          {{ docker_status.stdout }}
+
+          ── Txpool (node0) ──
+          {{ txpool.json.result | default('unavailable') }}
+
+          ── Firing Alerts ──
+          {% for a in alerts.json.data.alerts | default([]) %}
+          {% if a.state == 'firing' %}
+            [{{ a.labels.severity | default('?') }}] {{ a.labels.alertname }}: {{ a.annotations.summary | default('') }}
+          {% endif %}
+          {% endfor %}
+          {% if alerts.json.data.alerts | default([]) | selectattr('state', 'eq', 'firing') | list | length == 0 %}
+            None firing
+          {% endif %}
+
+          ── Recent Warnings (last 5m) ──
+          {{ warnings.stdout }}

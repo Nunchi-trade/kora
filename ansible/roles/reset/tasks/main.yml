@@ -1,0 +1,37 @@
+---
+- name: Stop and remove all containers and volumes
+  ansible.builtin.command:
+    cmd: >
+      docker compose -f {{ compose_file }}
+      --profile observability --profile interactive-dkg
+      down -v --remove-orphans
+  changed_when: true
+  failed_when: false
+
+- name: Remove Docker image
+  ansible.builtin.command:
+    cmd: docker rmi {{ docker_image }}
+  when: reset_remove_image | default(false) | bool
+  changed_when: true
+  failed_when: false
+
+- name: Prune dangling images
+  ansible.builtin.command:
+    cmd: docker image prune -f
+  changed_when: true
+
+- name: Remove project volumes
+  ansible.builtin.shell: |
+    docker volume ls --quiet --filter "name={{ compose_project_name }}" | xargs -r docker volume rm
+  changed_when: true
+  failed_when: false
+
+- name: Prune all dangling volumes
+  ansible.builtin.command:
+    cmd: docker volume prune -f
+  changed_when: true
+  when: reset_prune_all_volumes | default(false) | bool
+
+- name: Print reset status
+  ansible.builtin.debug:
+    msg: "Devnet reset complete. Run deploy.yml for a fresh start."

@@ -24,6 +24,14 @@ pub enum BackendError {
     /// State root computation failed.
     #[error("root computation failed: {0}")]
     RootComputation(String),
+
+    /// Cross-partition commit sequences are inconsistent.
+    ///
+    /// Indicates a partial commit occurred due to a crash between sequential
+    /// partition writes. The node cannot safely start; see issue #88 for
+    /// block replay recovery.
+    #[error("inconsistent partitions: {0}")]
+    InconsistentPartitions(String),
 }
 
 #[cfg(test)]

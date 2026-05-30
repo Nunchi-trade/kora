@@ -15,6 +15,7 @@ workspace = true
 kora-consensus = { path = "../consensus" }
 kora-domain = { path = "../domain" }
 kora-executor = { path = "../executor" }
+kora-metrics = { path = "../metrics" }
 kora-indexer = { path = "../../storage/indexer" }
 kora-ledger = { path = "../ledger" }
 kora-overlay = { path = "../../storage/overlay" }
@@ -22,6 +23,7 @@ kora-qmdb-ledger = { path = "../../storage/qmdb-ledger" }
 kora-rpc = { path = "../rpc" }
 
 # Commonware
+commonware-actor.workspace = true
 commonware-codec.workspace = true
 commonware-consensus.workspace = true
 commonware-cryptography.workspace = true
@@ -33,5 +35,16 @@ alloy-consensus.workspace = true
 alloy-eips.workspace = true
 alloy-primitives.workspace = true
 
+# Error handling
+thiserror.workspace = true
+
+# Async runtime
+tokio.workspace = true
+
 # Tracing
 tracing.workspace = true
+
+[dev-dependencies]
+k256.workspace = true
+sha3.workspace = true
+tempfile.workspace = true

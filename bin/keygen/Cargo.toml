@@ -16,7 +16,8 @@ commonware-cryptography.workspace = true
 commonware-codec.workspace = true
 commonware-utils.workspace = true
 
-ed25519-consensus = "2"
+alloy-primitives.workspace = true
+k256.workspace = true
 
 clap.workspace = true
 serde.workspace = true

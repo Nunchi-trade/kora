@@ -1,0 +1,69 @@
+server:
+  http_listen_port: 9080
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: docker
+    docker_sd_configs:
+      # WARNING: Mounting the Docker socket grants root-equivalent access to the host.
+      # This configuration is intended for LOCAL DEVELOPMENT / DEVNET use only.
+      # Do NOT use this in production — use a log driver or sidecar pattern instead.
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+        filters:
+          - name: label
+            values: ["com.docker.compose.project=kora-devnet"]
+    relabel_configs:
+      # Extract container name
+      - source_labels: ['__meta_docker_container_name']
+        regex: '/(.*)'
+        target_label: container
+      # Extract compose service name
+      - source_labels: ['__meta_docker_container_label_com_docker_compose_service']
+        target_label: service
+      # Extract compose project
+      - source_labels: ['__meta_docker_container_label_com_docker_compose_project']
+        target_label: project
+      # Add node_type label (validator, secondary, init, dkg)
+      - source_labels: ['__meta_docker_container_label_com_docker_compose_service']
+        regex: 'validator-node(\d+)'
+        target_label: node_type
+        replacement: validator
+      - source_labels: ['__meta_docker_container_label_com_docker_compose_service']
+        regex: 'secondary-node(\d+)'
+        target_label: node_type
+        replacement: secondary
+      # Extract validator index
+      - source_labels: ['__meta_docker_container_label_com_docker_compose_service']
+        regex: '(?:validator|secondary)-node(\d+)'
+        target_label: node_index
+    pipeline_stages:
+      # Parse tracing-subscriber output: "2026-05-21T12:00:00.000Z  WARN module::path: message key=value"
+      - regex:
+          expression: '^(?P<timestamp>\S+)\s+(?P<level>\w+)\s+(?P<module>[^:]+):\s+(?P<message>.*)$'
+      - labels:
+          level:
+          module:
+      - timestamp:
+          source: timestamp
+          format: RFC3339Nano
+      # Extract specific warning/error patterns for fast filtering
+      - match:
+          selector: '{level="WARN"}'
+          stages:
+            - regex:
+                expression: '(?P<warn_type>invalid data received|ledger\.submit_tx returned false|validator rejected tx|state root mismatch|missing parent snapshot|execution failed)'
+            - labels:
+                warn_type:
+      - match:
+          selector: '{level="ERROR"}'
+          stages:
+            - regex:
+                expression: '(?P<error_type>task panicked|failed to persist|failed to execute|failed to compute)'
+            - labels:
+                error_type:

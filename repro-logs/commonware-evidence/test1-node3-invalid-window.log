@@ -1,0 +1,10 @@
+validator-node3-1  | [2m2026-05-20T17:39:16.067112Z[0m [32m INFO[0m [2mcommonware_consensus::marshal::core::cache[0m[2m:[0m restored verified archive [3melapsed[0m[2m=[0m1.799176ms
+validator-node3-1  | [2m2026-05-20T17:39:16.068196Z[0m [32m INFO[0m [2mcommonware_consensus::marshal::core::cache[0m[2m:[0m restored notarized archive [3melapsed[0m[2m=[0m2.871159ms
+validator-node3-1  | [2m2026-05-20T17:39:16.069165Z[0m [32m INFO[0m [2mcommonware_consensus::marshal::core::cache[0m[2m:[0m restored notarizations archive [3melapsed[0m[2m=[0m3.837296ms
+validator-node3-1  | [2m2026-05-20T17:39:16.070087Z[0m [32m INFO[0m [2mcommonware_consensus::marshal::core::cache[0m[2m:[0m restored finalizations archive [3melapsed[0m[2m=[0m4.756403ms
+validator-node3-1  | [2m2026-05-20T17:39:16.105565Z[0m [32m INFO[0m [2mcommonware_consensus::simplex::actors::voter::actor[0m[2m:[0m consensus initialized [3mcurrent_view[0m[2m=[0m36404 [3melapsed[0m[2m=[0m28.277193ms
+validator-node3-1  | [2m2026-05-20T17:39:16.296762Z[0m [33m WARN[0m [2mcommonware_resolver::p2p::engine[0m[2m:[0m invalid data received [3mpeer[0m[2m=[0mfcd86abea94795b4d89b3332e1cedf937b55119d391e17bdeff8762a6ec54e8a
+validator-node3-1  | [2m2026-05-20T17:39:16.296866Z[0m [33m WARN[0m [2mcommonware_resolver::p2p::engine[0m[2m:[0m invalid data received [3mpeer[0m[2m=[0mfcd86abea94795b4d89b3332e1cedf937b55119d391e17bdeff8762a6ec54e8a
+validator-node3-1  | [2m2026-05-20T17:39:16.296939Z[0m [33m WARN[0m [2mcommonware_resolver::p2p::engine[0m[2m:[0m invalid data received [3mpeer[0m[2m=[0mfcd86abea94795b4d89b3332e1cedf937b55119d391e17bdeff8762a6ec54e8a
+validator-node3-1  | [2m2026-05-20T17:39:16.297011Z[0m [33m WARN[0m [2mcommonware_resolver::p2p::engine[0m[2m:[0m invalid data received [3mpeer[0m[2m=[0mfcd86abea94795b4d89b3332e1cedf937b55119d391e17bdeff8762a6ec54e8a
+validator-node3-1  | [2m2026-05-20T17:39:16.297072Z[0m [33m WARN[0m [2mcommonware_resolver::p2p::engine[0m[2m:[0m invalid data received [3mpeer[0m[2m=[0mfcd86abea94795b4d89b3332e1cedf937b55119d391e17bdeff8762a6ec54e8a

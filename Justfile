@@ -3,14 +3,22 @@ default:
     @just --list
 
 # Run the full CI suite
-ci: fmt clippy test deny
+ci: fmt build-all-locked clippy test test-e2e test-doc deny
 
 # Run all checks
-check: fmt clippy test
+check: fmt build-all-locked clippy test test-e2e test-doc
 
-# Run tests
+# Run non-e2e tests
 test:
-    cargo nextest run --workspace --all-features
+    cargo nextest run --workspace --all-features --exclude kora-e2e --no-tests=pass
+
+# Run e2e tests serially
+test-e2e:
+    cargo nextest run -p kora-e2e --all-features --run-ignored all -j1 --no-tests=fail
+
+# Run doc tests
+test-doc:
+    cargo test --workspace --all-features --doc
 
 # Build in release mode
 build:
@@ -18,7 +26,11 @@ build:
 
 # Build all targets
 build-all:
-    cargo build --all-targets
+    cargo build --workspace --all-targets
+
+# Build all targets with the checked-in lockfile
+build-all-locked:
+    cargo build --workspace --all-targets --locked
 
 # Check formatting
 fmt:
@@ -69,18 +81,38 @@ devnet-status:
 devnet-stats:
     cd docker && just stats
 
+# Devnet health diagnostics report
+devnet-health:
+    cd docker && just health
+
 # Build docker images
 docker-build:
     cd docker && just build
 
 # Run load generator against devnet
 loadgen *args:
-    cargo run --release --bin loadgen -- {{args}}
+    cargo run --release -p loadgen --bin loadgen -- {{args}}
 
 # Quick load test (1000 txs)
 loadtest:
-    cargo run --release --bin loadgen -- --total-txs 1000
+    cargo run --release -p loadgen --bin loadgen -- --total-txs 1000 --broadcast-rpc-urls http://127.0.0.1:8546,http://127.0.0.1:8547,http://127.0.0.1:8548
 
 # Stress test (10000 txs with 50 accounts)
 stresstest:
-    cargo run --release --bin loadgen -- --total-txs 10000 --accounts 50
+    cargo run --release -p loadgen --bin loadgen -- --total-txs 10000 --accounts 50 --broadcast-rpc-urls http://127.0.0.1:8546,http://127.0.0.1:8547,http://127.0.0.1:8548
+
+# Provision the remote server (one-time)
+remote-provision:
+    cd ansible && ansible-playbook playbooks/provision.yml
+
+# Deploy to remote server
+remote-deploy *args:
+    cd ansible && ansible-playbook playbooks/deploy.yml {{args}}
+
+# Reset remote devnet (clean slate)
+remote-reset:
+    cd ansible && ansible-playbook playbooks/reset.yml
+
+# Start observability on remote
+remote-observe:
+    cd ansible && ansible-playbook playbooks/observe.yml

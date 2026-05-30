@@ -1,0 +1,33 @@
+---
+- name: Update pacman cache
+  community.general.pacman:
+    update_cache: true
+
+- name: Install base packages
+  community.general.pacman:
+    name:
+      - base-devel
+      - git
+      - rsync
+      - curl
+      - jq
+      - htop
+      - python
+      - nftables
+    state: present
+
+- name: Set timezone to UTC
+  community.general.timezone:
+    name: UTC
+
+- name: Enable and start systemd-timesyncd (NTP)
+  ansible.builtin.systemd:
+    name: systemd-timesyncd
+    enabled: true
+    state: started
+
+- name: Create project directory
+  ansible.builtin.file:
+    path: "{{ remote_project_dir }}"
+    state: directory
+    mode: "0755"

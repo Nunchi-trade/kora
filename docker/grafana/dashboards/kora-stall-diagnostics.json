@@ -1,0 +1,506 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 2,
+  "id": null,
+  "links": [
+    {"title": "Overview Dashboard", "url": "/d/kora-overview", "type": "link"},
+    {"title": "Performance & Block Time", "url": "/d/kora-performance", "type": "link"},
+    {"title": "Logs Explorer", "url": "/d/kora-logs", "type": "link"}
+  ],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "id": 200,
+      "title": "Stall Detection",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Zero means consensus is stalled. This is the single most important metric.",
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "red", "value": null}, {"color": "yellow", "value": 0.01}, {"color": "green", "value": 0.5}
+          ]},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 4, "w": 4, "x": 0, "y": 1},
+      "id": 201,
+      "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "targets": [{"expr": "avg(rate(finalized_height[1m]))", "refId": "A"}],
+      "title": "Blocks/sec",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Percentage of consensus rounds that produced no block. >30% preceded the production stall.",
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null}, {"color": "yellow", "value": 0.1}, {"color": "red", "value": 0.3}
+          ]},
+          "unit": "percentunit"
+        }
+      },
+      "gridPos": {"h": 4, "w": 4, "x": 4, "y": 1},
+      "id": 202,
+      "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "targets": [{"expr": "1 - (avg(rate(finalized_height[5m])) / avg(rate(engine_voter_state_current_view[5m])))", "refId": "A"}],
+      "title": "Skip Rate",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Nodes where view is advancing (>0 means consensus is trying but failing to finalize).",
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "red", "value": null}, {"color": "yellow", "value": 3}, {"color": "green", "value": 4}
+          ]}
+        }
+      },
+      "gridPos": {"h": 4, "w": 4, "x": 8, "y": 1},
+      "id": 203,
+      "options": {"colorMode": "background", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "targets": [{"expr": "count(rate(engine_voter_state_current_view{job=\"kora-validators\"}[1m]) > 0)", "refId": "A"}],
+      "title": "Nodes w/ Active Views",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Nodes with finalization rate > 0. If active views > finalizing nodes, blocks are being proposed but not finalized.",
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "red", "value": null}, {"color": "yellow", "value": 3}, {"color": "green", "value": 4}
+          ]}
+        }
+      },
+      "gridPos": {"h": 4, "w": 4, "x": 12, "y": 1},
+      "id": 204,
+      "options": {"colorMode": "background", "graphMode": "none", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "targets": [{"expr": "count(rate(finalized_height{job=\"kora-validators\"}[1m]) > 0)", "refId": "A"}],
+      "title": "Nodes Finalizing",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Max height minus min height across validators. >10 means a node is falling behind.",
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null}, {"color": "yellow", "value": 5}, {"color": "red", "value": 50}
+          ]},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 4, "w": 4, "x": 16, "y": 1},
+      "id": 205,
+      "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "targets": [{"expr": "max(finalized_height{job=\"kora-validators\"}) - min(finalized_height{job=\"kora-validators\"})", "refId": "A"}],
+      "title": "Height Drift",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 10}
+          ]},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 4, "w": 4, "x": 20, "y": 1},
+      "id": 206,
+      "options": {"colorMode": "background", "graphMode": "area", "reduceOptions": {"calcs": ["lastNotNull"]}},
+      "targets": [{"expr": "sum(rate(engine_voter_state_nullifications_total[5m]))", "refId": "A"}],
+      "title": "Nullifications/s",
+      "type": "stat"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 5},
+      "id": 210,
+      "title": "Per-Node Consensus State",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Current consensus view per node. Nodes stuck at a fixed view have crashed or stalled.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 5, "spanNulls": false, "showPoints": "never"},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 6},
+      "id": 211,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "engine_voter_state_current_view", "legendFormat": "Node {{validator_index}}", "refId": "A"}
+      ],
+      "title": "Current View per Node",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Finalized height per node. A node stuck at a low height while others advance indicates catch-up failure.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 5, "spanNulls": false, "showPoints": "never"},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 6},
+      "id": 212,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "finalized_height", "legendFormat": "Node {{validator_index}}", "refId": "A"}
+      ],
+      "title": "Finalized Height per Node",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "View advancement rate. A node with view rate > 0 but finalization rate = 0 is stuck in nullification loop.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 5, "spanNulls": false, "showPoints": "never"},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 6},
+      "id": 213,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "rate(engine_voter_state_current_view{job=\"kora-validators\"}[1m])", "legendFormat": "Node {{validator_index}} view/s", "refId": "A"},
+        {"expr": "rate(finalized_height{job=\"kora-validators\"}[1m])", "legendFormat": "Node {{validator_index}} finalized/s", "refId": "B"}
+      ],
+      "title": "View Rate vs Finalization Rate",
+      "type": "timeseries"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 13},
+      "id": 220,
+      "title": "Nullification & Timeout Analysis",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Nullification rate per node. If all nodes nullify at similar rates, the problem is systemic (mempool/executor). If one node is much higher, that node is struggling.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 2, "fillOpacity": 10, "spanNulls": false, "showPoints": "never"},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 14},
+      "id": 221,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "rate(engine_voter_state_nullifications_total[5m])", "legendFormat": "Node {{validator_index}}", "refId": "A"}
+      ],
+      "title": "Nullifications/s per Node",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Timeout reasons stacked. MissingProposal = leader didn't propose (executor/mempool issue). LeaderTimeout = proposal too slow.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 20, "spanNulls": false, "showPoints": "never", "stacking": {"mode": "normal"}},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 14},
+      "id": 222,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "sum by (reason) (rate(engine_voter_state_timeouts_total[5m]))", "legendFormat": "{{reason}}", "refId": "A"}
+      ],
+      "title": "Timeouts by Reason",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Cumulative nullification ratio — total nullifications / total views. The production failure showed 33%.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 2, "fillOpacity": 5, "spanNulls": false, "showPoints": "never", "thresholdsStyle": {"mode": "area"}},
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null}, {"color": "yellow", "value": 0.1}, {"color": "red", "value": 0.3}
+          ]},
+          "unit": "percentunit", "min": 0, "max": 1
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 14},
+      "id": 223,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+      "targets": [
+        {"expr": "1 - (rate(finalized_height[5m]) / rate(engine_voter_state_current_view[5m]))", "legendFormat": "Node {{validator_index}}", "refId": "A"}
+      ],
+      "title": "Skip Rate per Node",
+      "type": "timeseries"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 21},
+      "id": 230,
+      "title": "Block Building & Execution",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Time to build blocks. If approaching the 2s leader timeout, proposals will fail.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 5, "spanNulls": false, "showPoints": "never", "thresholdsStyle": {"mode": "line"}},
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 2}
+          ]},
+          "unit": "s"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 22},
+      "id": 231,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "rate(marshaled_build_duration_sum[1m]) / rate(marshaled_build_duration_count[1m])", "legendFormat": "Node {{validator_index}}", "refId": "A"}
+      ],
+      "title": "Block Build Duration (2s timeout line)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Finalization latency per node. Spikes indicate consensus struggling to gather 2/3+ votes.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 5, "spanNulls": false, "showPoints": "never", "thresholdsStyle": {"mode": "line"}},
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null}, {"color": "yellow", "value": 0.5}, {"color": "red", "value": 2}
+          ]},
+          "unit": "s"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 22},
+      "id": 232,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "rate(engine_voter_finalization_latency_sum[1m]) / rate(engine_voter_finalization_latency_count[1m])", "legendFormat": "Node {{validator_index}}", "refId": "A"}
+      ],
+      "title": "Finalization Latency",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "BLS signature verification latency. Spikes here indicate crypto bottleneck.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 5, "spanNulls": false, "showPoints": "never"},
+          "unit": "s"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 22},
+      "id": 233,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "rate(engine_batcher_verify_latency_sum[1m]) / rate(engine_batcher_verify_latency_count[1m])", "legendFormat": "Node {{validator_index}}", "refId": "A"}
+      ],
+      "title": "Signature Verify Latency",
+      "type": "timeseries"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 29},
+      "id": 240,
+      "title": "Network & P2P Health",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Broadcast get success vs failure. High failure rate = P2P connectivity issues, possible resolver blocking.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 10, "spanNulls": false, "showPoints": "never"},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 30},
+      "id": 241,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "rate(broadcast_get_total{status=\"Success\"}[1m])", "legendFormat": "Node {{validator_index}} success", "refId": "A"},
+        {"expr": "rate(broadcast_get_total{status=\"Failure\"}[1m])", "legendFormat": "Node {{validator_index}} failure", "refId": "B"}
+      ],
+      "title": "Broadcast Success vs Failure",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Consensus message types over time. Drop to zero means consensus stopped communicating.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 10, "spanNulls": false, "showPoints": "never", "stacking": {"mode": "normal"}},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 30},
+      "id": 242,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "sum by (message) (rate(engine_voter_outbound_messages_total[1m]))", "legendFormat": "{{message}}", "refId": "A"}
+      ],
+      "title": "Consensus Message Types",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Network bandwidth per node. Sudden drop to zero means network isolation.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 5, "spanNulls": false, "showPoints": "never"},
+          "unit": "Bps"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 30},
+      "id": 243,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "rate(runtime_outbound_bandwidth_total[1m])", "legendFormat": "Node {{validator_index}} out", "refId": "A"},
+        {"expr": "rate(runtime_inbound_bandwidth_total[1m])", "legendFormat": "Node {{validator_index}} in", "refId": "B"}
+      ],
+      "title": "Network Bandwidth",
+      "type": "timeseries"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 37},
+      "id": 250,
+      "title": "Prometheus Alerts",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Active Prometheus alert rules. Red = firing, orange = pending, green = inactive.",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 38},
+      "id": 251,
+      "options": {},
+      "targets": [
+        {"expr": "ALERTS{alertstate=\"firing\"}", "legendFormat": "{{ alertname }} ({{ instance }})", "refId": "A"}
+      ],
+      "title": "Firing Alerts",
+      "type": "table",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"filterable": true}
+        }
+      },
+      "transformations": [
+        {"id": "labelsToFields", "options": {}},
+        {"id": "organize", "options": {"excludeByName": {"Time": false, "__name__": true, "Value": true}}}
+      ]
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 46},
+      "id": 260,
+      "title": "Resource Correlation",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Memory per node. Sustained growth without plateau suggests unbounded mempool or state leak.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 5, "spanNulls": false, "showPoints": "never", "thresholdsStyle": {"mode": "line"}},
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null}, {"color": "red", "value": 2000000000}
+          ]},
+          "unit": "bytes"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 47},
+      "id": 261,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "runtime_process_rss", "legendFormat": "Node {{validator_index}}", "refId": "A"}
+      ],
+      "title": "Memory (RSS) per Node",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Disk I/O per node. Spikes correlate with finalization. Drop to zero means no blocks persisted.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 5, "spanNulls": false, "showPoints": "never"},
+          "unit": "Bps"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 47},
+      "id": 262,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "rate(runtime_storage_write_bytes_total[1m])", "legendFormat": "Node {{validator_index}} write", "refId": "A"},
+        {"expr": "rate(runtime_storage_read_bytes_total[1m])", "legendFormat": "Node {{validator_index}} read", "refId": "B"}
+      ],
+      "title": "Disk I/O",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "description": "Active async tasks. Sudden changes indicate task crashes or spawning storms.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"lineWidth": 1, "fillOpacity": 5, "spanNulls": false, "showPoints": "never"},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 47},
+      "id": 263,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "runtime_tasks_running", "legendFormat": "Node {{validator_index}} running", "refId": "A"}
+      ],
+      "title": "Active Tasks",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 38,
+  "tags": ["kora", "diagnostics"],
+  "templating": {"list": []},
+  "time": {"from": "now-30m", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Kora Stall Diagnostics",
+  "uid": "kora-stall-diagnostics",
+  "version": 1
+}

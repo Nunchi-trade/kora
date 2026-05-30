@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -e
+set -eo pipefail
 
 # Parse arguments
 INTERACTIVE_DKG=false
@@ -161,15 +161,22 @@ clear_dkg_outputs() {
 
 clear_runtime_state() {
     for volume in \
-        kora-devnet_data_node0 \
-        kora-devnet_data_node1 \
-        kora-devnet_data_node2 \
-        kora-devnet_data_node3 \
-        kora-devnet_data_secondary0; do
+        kora-devnet_runtime_node0 \
+        kora-devnet_runtime_node1 \
+        kora-devnet_runtime_node2 \
+        kora-devnet_runtime_node3 \
+        kora-devnet_runtime_secondary0; do
         docker volume inspect "$volume" >/dev/null 2>&1 || continue
-        docker run --rm -v "${volume}:/data" alpine \
-            rm -rf /data/runtime >/dev/null 2>&1 || true
+        docker run --rm -v "${volume}:/runtime" alpine \
+            sh -c 'rm -rf /runtime/* /runtime/.[!.]* /runtime/..?*' >/dev/null 2>&1 || true
     done
+}
+
+clear_startup_barrier() {
+    local volume="kora-devnet_startup_barrier"
+    docker volume inspect "$volume" >/dev/null 2>&1 || return 0
+    docker run --rm -v "${volume}:/barrier" alpine \
+        sh -c 'rm -f /barrier/*.ready' >/dev/null 2>&1 || true
 }
 
 cd "$(dirname "$0")/.."
@@ -309,10 +316,16 @@ print_phase "2/3" "Starting validators and secondary peers"
 docker compose -f compose/devnet.yaml stop \
     validator-node0 validator-node1 validator-node2 validator-node3 secondary-node0 >/dev/null 2>&1 || true
 clear_runtime_state
+clear_startup_barrier
 
-run_with_spinner "Launching validator and secondary containers..." docker compose -f compose/devnet.yaml ${COMPOSE_PROFILES:+--profile observability} up -d \
-    validator-node0 validator-node1 validator-node2 validator-node3 secondary-node0 \
-    ${COMPOSE_PROFILES:+prometheus grafana}
+if [[ "${COMPOSE_PROFILES:-}" == *observability* ]]; then
+    run_with_spinner "Launching validator, secondary, and observability containers..." docker compose -f compose/devnet.yaml --profile observability up -d \
+        validator-node0 validator-node1 validator-node2 validator-node3 secondary-node0 \
+        prometheus grafana loki promtail
+else
+    run_with_spinner "Launching validator and secondary containers..." docker compose -f compose/devnet.yaml up -d \
+        validator-node0 validator-node1 validator-node2 validator-node3 secondary-node0
+fi
 
 # Wait for validators with spinner
 start_time=$(date +%s)

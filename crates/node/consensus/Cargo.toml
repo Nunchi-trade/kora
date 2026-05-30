@@ -18,6 +18,7 @@ kora-traits = { path = "../../storage/traits" }
 # Alloy
 alloy-primitives.workspace = true
 alloy-consensus.workspace = true
+alloy-eips.workspace = true
 
 # Commonware
 commonware-cryptography.workspace = true
@@ -25,13 +26,19 @@ commonware-cryptography.workspace = true
 # Synchronization
 parking_lot.workspace = true
 
+# Logging
+tracing.workspace = true
+
 # Error handling
 thiserror.workspace = true
 
 # Async
 futures.workspace = true
+tokio = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
+k256.workspace = true
+kora-domain = { path = "../domain", features = ["evm"] }
 rstest = "0.24"
 tokio = { workspace = true, features = ["rt", "macros"] }
 

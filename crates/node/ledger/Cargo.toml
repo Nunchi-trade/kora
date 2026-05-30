@@ -18,8 +18,10 @@ kora-overlay = { path = "../../storage/overlay" }
 kora-qmdb = { path = "../../storage/qmdb" }
 kora-qmdb-ledger = { path = "../../storage/qmdb-ledger" }
 kora-traits = { path = "../../storage/traits" }
+kora-txpool = { path = "../txpool" }
 
 # Commonware
+commonware-consensus.workspace = true
 commonware-cryptography.workspace = true
 commonware-runtime.workspace = true
 
@@ -28,12 +30,17 @@ alloy-primitives.workspace = true
 
 # Async
 futures.workspace = true
+tokio.workspace = true
 
 # Error handling
 thiserror.workspace = true
 
+# Logging
+tracing.workspace = true
+
 [dev-dependencies]
 # Local crates
+kora-config = { path = "../config" }
 kora-executor = { path = "../executor" }
 
 # Commonware

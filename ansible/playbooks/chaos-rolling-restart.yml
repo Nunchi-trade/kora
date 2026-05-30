@@ -1,0 +1,72 @@
+---
+# Chaos test: rolling restart of all validators one at a time
+#
+# Usage:
+#   ansible-playbook playbooks/chaos-rolling-restart.yml -i inventory/hosts.yml \
+#     -e stop_duration=30 -e recovery_wait=60
+#
+# Simulates a rolling upgrade: stop each node, wait, restart, verify health,
+# then move to the next node. Reports whether each node recovers and whether
+# the network survives the full rolling restart.
+#
+- name: "Chaos: Rolling Restart Test"
+  hosts: devnet
+  become: true
+  vars:
+    stop_duration: "{{ stop_duration | default(30) }}"
+    recovery_wait: "{{ recovery_wait | default(60) }}"
+    compose_dir: "{{ remote_project_dir }}/docker/compose"
+    prom: "http://localhost:{{ prometheus_port }}"
+
+  tasks:
+    - name: "Baseline: capture block rate"
+      ansible.builtin.uri:
+        url: "{{ prom }}/api/v1/query"
+        method: POST
+        body_format: form-urlencoded
+        body: "query=avg(rate(finalized_height[30s]))"
+        return_content: true
+      register: baseline
+
+    - name: Show baseline
+      ansible.builtin.debug:
+        msg: "Baseline: {{ (baseline.json.data.result[0].value[1] | float) | round(1) }} blocks/sec"
+
+    - name: "Rolling restart: iterate through nodes 0-3"
+      ansible.builtin.include_tasks:
+        file: ../roles/chaos/tasks/restart-one-node.yml
+      loop: "{{ range(num_validators | int) | list }}"
+      loop_control:
+        loop_var: node_idx
+
+    - name: "Final: check all heights"
+      ansible.builtin.uri:
+        url: "{{ prom }}/api/v1/query"
+        method: POST
+        body_format: form-urlencoded
+        body: "query=finalized_height"
+        return_content: true
+      register: final_heights
+
+    - name: "Final: check block rate"
+      ansible.builtin.uri:
+        url: "{{ prom }}/api/v1/query"
+        method: POST
+        body_format: form-urlencoded
+        body: "query=avg(rate(finalized_height[30s]))"
+        return_content: true
+      register: final_rate
+
+    - name: "=== ROLLING RESTART RESULTS ==="
+      ansible.builtin.debug:
+        msg: |
+          Rolling restart complete.
+          Baseline: {{ (baseline.json.data.result[0].value[1] | float) | round(1) }} blocks/sec
+          Final:    {{ (final_rate.json.data.result[0].value[1] | float) | round(1) }} blocks/sec
+
+          Final heights:
+          {% for r in final_heights.json.data.result %}
+            {{ r.metric.instance }}: {{ r.value[1] }}
+          {% endfor %}
+
+          VERDICT: {% if (final_rate.json.data.result[0].value[1] | float) > 1.0 %}PASS - network survived{% else %}FAIL - network degraded or stalled{% endif %}

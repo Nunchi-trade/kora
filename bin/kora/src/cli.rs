@@ -1,10 +1,12 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use clap::{Parser, Subcommand};
+use commonware_runtime::Supervisor as _;
+use commonware_utils::{Faults, N3f1};
 use kora_config::NodeConfig;
 use kora_domain::BootstrapConfig;
 use kora_rpc::NodeState;
-use kora_runner::{ProductionRunner, load_threshold_scheme};
+use kora_runner::{ProductionRunner, load_threshold_scheme, runtime_storage_directory};
 use kora_service::LegacyNodeService;
 
 #[derive(Parser, Debug)]
@@ -49,6 +51,14 @@ pub(crate) struct DkgArgs {
 pub(crate) struct ValidatorArgs {
     #[arg(long)]
     pub peers: Option<PathBuf>,
+
+    /// Prometheus metrics server bind address.
+    #[arg(long, default_value = "0.0.0.0:9002")]
+    pub metrics_addr: String,
+
+    /// Enable P2P transaction gossip between validators.
+    #[arg(long, default_value = "false")]
+    pub tx_gossip: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -56,6 +66,14 @@ pub(crate) struct SecondaryArgs {
     /// Path to peers.json file containing primary and secondary peer information.
     #[arg(long)]
     pub peers: PathBuf,
+
+    /// JSON-RPC server bind address (reserved for future read-only RPC).
+    #[arg(long, default_value = "0.0.0.0:8545")]
+    pub rpc_addr: String,
+
+    /// Prometheus metrics server bind address.
+    #[arg(long, default_value = "0.0.0.0:9002")]
+    pub metrics_addr: String,
 }
 
 impl Cli {
@@ -97,11 +115,21 @@ impl Cli {
             .position(|pk| *pk == my_pk)
             .ok_or_else(|| eyre::eyre!("Our public key not found in participants list"))?;
 
+        let n = peers.participants.len();
+        let quorum = N3f1::quorum(n);
+        tracing::info!(
+            n = n,
+            quorum = quorum,
+            max_faulty = n as u32 - quorum,
+            "Consensus quorum determined by N3f1: need {} of {} validators active",
+            quorum,
+            n
+        );
+
         let dkg_config = DkgConfig {
             identity_key,
             validator_index,
             participants: peers.participants,
-            threshold: peers.threshold,
             chain_id: node_config.chain_id,
             data_dir: node_config.data_dir.clone(),
             listen_addr: node_config.network.listen_addr.parse()?,
@@ -125,6 +153,10 @@ impl Cli {
 
     fn run_validator(&self, args: &ValidatorArgs) -> eyre::Result<()> {
         let mut config = self.load_config()?;
+
+        if args.tx_gossip {
+            config.network.tx_gossip = true;
+        }
 
         tracing::info!(chain_id = config.chain_id, "Starting validator");
 
@@ -158,24 +190,57 @@ impl Cli {
             .map_err(|e| eyre::eyre!("Failed to load genesis: {}", e))?;
         tracing::info!(allocations = bootstrap.genesis_alloc.len(), "Loaded genesis configuration");
 
-        let rpc_addr: std::net::SocketAddr = "0.0.0.0:8545".parse()?;
-        let node_state = NodeState::new(config.chain_id, dkg_output.share_index);
+        if bootstrap.chain_id != config.chain_id {
+            return Err(eyre::eyre!(
+                "genesis.json chain_id ({}) does not match node chain_id ({})",
+                bootstrap.chain_id,
+                config.chain_id
+            ));
+        }
 
-        let runner = ProductionRunner::new(
-            scheme,
-            config.chain_id,
-            kora_config::DEFAULT_GAS_LIMIT,
-            bootstrap,
-        )
-        .with_rpc(node_state, rpc_addr)
-        .with_secondary_peers(secondary_participants);
+        let rpc_addr: std::net::SocketAddr = config.rpc.http_addr.parse().map_err(|err| {
+            eyre::eyre!("invalid rpc.http_addr '{}': {}", config.rpc.http_addr, err)
+        })?;
+        let validator_count = u32::try_from(dkg_output.participants).map_err(|_| {
+            eyre::eyre!("DKG participant count {} exceeds u32::MAX", dkg_output.participants)
+        })?;
+        if validator_count == 0 {
+            return Err(eyre::eyre!("DKG participant count must be non-zero"));
+        }
+        let validator_index = dkg_output.share_index;
+        if validator_index >= validator_count {
+            return Err(eyre::eyre!(
+                "DKG share_index ({validator_index}) must be less than participant count ({validator_count})"
+            ));
+        }
+
+        let quorum = N3f1::quorum(validator_count as usize);
+        tracing::info!(
+            validator_count = validator_count,
+            quorum = quorum,
+            max_faulty = validator_count - quorum,
+            "Consensus requires {} of {} validators active (N3f1 BFT)",
+            quorum,
+            validator_count
+        );
+
+        let node_state =
+            NodeState::with_validator_count(config.chain_id, validator_index, validator_count);
+
+        let metrics_addr: std::net::SocketAddr = args.metrics_addr.parse().map_err(|err| {
+            eyre::eyre!("invalid --metrics-addr '{}': {}", args.metrics_addr, err)
+        })?;
+        let runner = ProductionRunner::new(scheme, config.chain_id, bootstrap)
+            .with_rpc(node_state, rpc_addr)
+            .with_metrics_addr(metrics_addr)
+            .with_secondary_peers(secondary_participants);
 
         runner.run_standalone(config).map_err(|e| eyre::eyre!("Runner failed: {}", e.0))
     }
 
     fn run_secondary(&self, args: &SecondaryArgs) -> eyre::Result<()> {
         use commonware_p2p::{Manager, TrackedPeers};
-        use commonware_runtime::Runner;
+        use commonware_runtime::{Clock as _, Metrics as _, Runner, Spawner};
         use commonware_utils::ordered::Set;
         use kora_transport::NetworkConfigExt;
 
@@ -191,21 +256,41 @@ impl Cli {
             ));
         }
 
+        let validator_count = peers.participants.len();
+        let secondary_count = peers.secondary_participants.len();
+
+        // Parse and validate addresses early so we fail before starting the runtime.
+        let metrics_addr: std::net::SocketAddr = args.metrics_addr.parse().map_err(|err| {
+            eyre::eyre!("invalid --metrics-addr '{}': {}", args.metrics_addr, err)
+        })?;
+        let _rpc_addr: std::net::SocketAddr = args
+            .rpc_addr
+            .parse()
+            .map_err(|err| eyre::eyre!("invalid --rpc-addr '{}': {}", args.rpc_addr, err))?;
+
         tracing::info!(
             chain_id = config.chain_id,
             bootstrap_peers = config.network.bootstrap_peers.len(),
-            secondary_peers = peers.secondary_participants.len(),
+            secondary_peers = secondary_count,
             "Starting secondary peer"
         );
+        tracing::warn!("Secondary node is in follower mode - read-only RPC not yet implemented");
 
+        let runtime_dir = runtime_storage_directory(&config.data_dir);
+        tracing::info!(
+            runtime_dir = %runtime_dir.display(),
+            worker_threads = config.worker_threads,
+            "Starting Commonware runtime"
+        );
         let executor = commonware_runtime::tokio::Runner::new(
             commonware_runtime::tokio::Config::default()
-                .with_storage_directory(config.data_dir.join("runtime")),
+                .with_storage_directory(runtime_dir)
+                .with_worker_threads(config.worker_threads),
         );
         executor.start(|context| async move {
             let mut transport = config
                 .network
-                .build_local_transport(identity_key, context.clone())
+                .build_local_transport(identity_key, context.child("transport"))
                 .map_err(|e| eyre::eyre!("failed to build transport: {}", e))?;
 
             transport
@@ -216,12 +301,67 @@ impl Cli {
                         Set::from_iter_dedup(peers.participants),
                         Set::from_iter_dedup(peers.secondary_participants),
                     ),
-                )
-                .await;
+                );
 
             tracing::info!("secondary peer joined network");
-            futures::future::pending::<()>().await;
-            #[allow(unreachable_code)]
+
+            // Spawn a metrics server so Prometheus can scrape this node.
+            let metrics_context = Arc::new(context.child("metrics_endpoint"));
+            context.child("metrics").shared(true).spawn(move |_| async move {
+                let app = axum::Router::new().route(
+                    "/metrics",
+                    axum::routing::get(move || {
+                        let metrics_context = metrics_context.clone();
+                        async move {
+                            let body = metrics_context.encode();
+                            (
+                                axum::http::StatusCode::OK,
+                                [(
+                                    axum::http::header::CONTENT_TYPE,
+                                    "application/openmetrics-text; version=1.0.0; charset=utf-8",
+                                )],
+                                body,
+                            )
+                        }
+                    }),
+                );
+
+                let listener = match tokio::net::TcpListener::bind(metrics_addr).await {
+                    Ok(l) => l,
+                    Err(e) => {
+                        tracing::error!(addr = %metrics_addr, error = %e, "Failed to bind metrics server");
+                        return;
+                    }
+                };
+
+                tracing::info!(addr = %metrics_addr, "Starting metrics server");
+                if let Err(e) = axum::serve(listener, app).await {
+                    tracing::error!(error = %e, "Metrics server error");
+                }
+            });
+
+            // Spawn periodic health logging.
+            context.child("health").shared(true).spawn(move |ctx| async move {
+                let interval = std::time::Duration::from_secs(30);
+                loop {
+                    ctx.sleep(interval).await;
+                    tracing::info!(
+                        validators = validator_count,
+                        secondary_peers = secondary_count,
+                        "Secondary node health: connected to P2P network"
+                    );
+                }
+            });
+
+            // Block until shutdown signal (SIGTERM / SIGINT / Ctrl-C).
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("failed to register SIGTERM handler");
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {},
+                _ = sigterm.recv() => {},
+            }
+            tracing::info!("Received shutdown signal, stopping secondary node...");
             Ok::<(), eyre::Error>(())
         })
     }
@@ -240,7 +380,6 @@ impl Cli {
 struct PeersInfo {
     participants: Vec<commonware_cryptography::ed25519::PublicKey>,
     secondary_participants: Vec<commonware_cryptography::ed25519::PublicKey>,
-    threshold: u32,
     bootstrappers: Vec<(commonware_cryptography::ed25519::PublicKey, String)>,
 }
 
@@ -253,14 +392,16 @@ fn format_bootstrappers(
         .collect()
 }
 
+/// Load peers configuration from a JSON file.
+///
+/// Accepts peers.json files with either "quorum" (new format) or "threshold"
+/// (legacy format) key -- both are ignored at runtime since the quorum is
+/// always computed from the validator count via N3f1.
 fn load_peers(path: &PathBuf) -> eyre::Result<PeersInfo> {
     use commonware_codec::ReadExt;
 
     let content = std::fs::read_to_string(path)?;
     let json: serde_json::Value = serde_json::from_str(&content)?;
-
-    let threshold =
-        json["threshold"].as_u64().ok_or_else(|| eyre::eyre!("missing threshold"))? as u32;
 
     let participants_hex: Vec<String> = json["participants"]
         .as_array()
@@ -290,7 +431,7 @@ fn load_peers(path: &PathBuf) -> eyre::Result<PeersInfo> {
         bootstrappers.push((pk, addr_str.to_string()));
     }
 
-    Ok(PeersInfo { participants, secondary_participants, threshold, bootstrappers })
+    Ok(PeersInfo { participants, secondary_participants, bootstrappers })
 }
 
 fn parse_public_keys(

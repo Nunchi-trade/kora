@@ -1,6 +1,10 @@
 global:
-  scrape_interval: 15s
-  evaluation_interval: 15s
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+  - /etc/prometheus/recording-rules.yml
 
 scrape_configs:
   - job_name: 'prometheus'
@@ -18,4 +22,14 @@ scrape_configs:
       - source_labels: [__address__]
         regex: 'validator-node(\d+):.*'
         target_label: validator_index
+        replacement: '$1'
+
+  - job_name: 'kora-secondary'
+    static_configs:
+      - targets:
+        - 'secondary-node0:9002'
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: 'secondary-node(\d+):.*'
+        target_label: secondary_index
         replacement: '$1'

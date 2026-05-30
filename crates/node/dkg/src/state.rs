@@ -3,6 +3,7 @@
 use std::{collections::BTreeMap, path::Path};
 
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use crate::{CeremonySession, DkgError};
 
@@ -155,7 +156,13 @@ impl PersistedDkgState {
 
     /// Get our signed dealer log bytes.
     pub fn get_our_signed_log(&self) -> Option<Vec<u8>> {
-        self.our_signed_log.as_ref().and_then(|s| hex::decode(s).ok())
+        self.our_signed_log.as_ref().and_then(|s| match hex::decode(s) {
+            Ok(bytes) => Some(bytes),
+            Err(e) => {
+                warn!(%e, "Failed to hex-decode persisted dealer log (our_signed_log)");
+                None
+            }
+        })
     }
 
     /// Add a received dealer log.
@@ -167,7 +174,13 @@ impl PersistedDkgState {
     pub fn get_received_logs(&self) -> BTreeMap<String, Vec<u8>> {
         self.received_logs
             .iter()
-            .filter_map(|(k, v)| hex::decode(v).ok().map(|bytes| (k.clone(), bytes)))
+            .filter_map(|(k, v)| match hex::decode(v) {
+                Ok(bytes) => Some((k.clone(), bytes)),
+                Err(e) => {
+                    warn!(pk_hex = %k, %e, "Failed to hex-decode persisted dealer log (received_logs)");
+                    None
+                }
+            })
             .collect()
     }
 }

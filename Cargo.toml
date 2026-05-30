@@ -48,6 +48,7 @@ codegen-units = 1
 # Local crates
 kora-builder = { path = "crates/node/builder" }
 kora-domain = { path = "crates/node/domain" }
+kora-metrics = { path = "crates/node/metrics" }
 kora-cli = { path = "crates/utilities/cli" }
 kora-crypto = { path = "crates/utilities/crypto" }
 kora-backend = { path = "crates/storage/backend" }
@@ -74,18 +75,19 @@ kora-rpc = { path = "crates/node/rpc" }
 kora-txpool = { path = "crates/node/txpool" }
 kora-e2e = { path = "crates/e2e" }
 
-commonware-p2p = "2026.4.0"
-commonware-utils = "2026.4.0"
-commonware-codec = "2026.4.0"
-commonware-stream = "2026.4.0"
-commonware-macros = "2026.4.0"
-commonware-storage = "2026.4.0"
-commonware-runtime = "2026.4.0"
-commonware-resolver = "2026.4.0"
-commonware-parallel = "2026.4.0"
-commonware-broadcast = "2026.4.0"
-commonware-consensus = "2026.4.0"
-commonware-cryptography = "2026.4.0"
+commonware-p2p = "2026.5.0"
+commonware-actor = "2026.5.0"
+commonware-utils = "2026.5.0"
+commonware-codec = "2026.5.0"
+commonware-stream = "2026.5.0"
+commonware-macros = "2026.5.0"
+commonware-storage = "2026.5.0"
+commonware-runtime = "2026.5.0"
+commonware-resolver = "2026.5.0"
+commonware-parallel = "2026.5.0"
+commonware-broadcast = "2026.5.0"
+commonware-consensus = "2026.5.0"
+commonware-cryptography = "2026.5.0"
 
 # Alloy
 alloy-primitives = "1.0"
@@ -94,7 +96,7 @@ alloy-eips = "1.0"
 alloy-rlp = "0.3"
 
 # Execution
-revm = { version = "38.0.0", default-features = false }
+revm = { version = "38.0.0", default-features = false, features = ["optional_balance_check", "optional_no_base_fee"] }
 alloy-evm = { version = "0.34.0", default-features = false }
 
 # Async
@@ -111,7 +113,7 @@ clap = { version = "4", features = ["derive"] }
 
 # Tracing
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Error handling
 thiserror = "2"
@@ -134,6 +136,7 @@ k256 = "0.13"
 sha3 = "0.10"
 
 # HTTP
+axum = "0.8"
 reqwest = { version = "0.12", features = ["json"] }
 
 # Testing

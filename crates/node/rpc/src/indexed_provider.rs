@@ -16,10 +16,18 @@ use crate::{
     error::RpcError,
     state_provider::StateProvider,
     types::{
-        BlockNumberOrTag, BlockTag, BlockTransactions, CallRequest, RpcBlock, RpcLog, RpcLogFilter,
-        RpcTransaction, RpcTransactionReceipt,
+        BlockNumberOrTag, BlockTag, BlockTransactions, CallRequest, EMPTY_UNCLE_HASH,
+        EMPTY_WITHDRAWALS_ROOT, RpcBlock, RpcLog, RpcLogFilter, RpcTransaction,
+        RpcTransactionReceipt,
     },
 };
+
+/// Maximum block range allowed for a single `eth_getLogs` query.
+///
+/// Ranges exceeding this limit are rejected with an invalid-params error to
+/// prevent unbounded iteration from monopolising the RPC thread. The value is
+/// aligned with Infura's 10 000-block cap.
+const MAX_LOG_BLOCK_RANGE: u64 = 10_000;
 
 /// State provider that combines indexed block data with live state queries.
 ///
@@ -32,20 +40,26 @@ pub struct IndexedStateProvider<S> {
     index: Arc<BlockIndex>,
     state: S,
     executor: Arc<RevmExecutor>,
+    fee_recipient: Address,
 }
 
 impl<S> IndexedStateProvider<S> {
     /// Creates a new indexed state provider with an explicit executor.
     #[must_use]
-    pub const fn new(index: Arc<BlockIndex>, state: S, executor: Arc<RevmExecutor>) -> Self {
-        Self { index, state, executor }
+    pub const fn new(
+        index: Arc<BlockIndex>,
+        state: S,
+        executor: Arc<RevmExecutor>,
+        fee_recipient: Address,
+    ) -> Self {
+        Self { index, state, executor, fee_recipient }
     }
 
     /// Creates a new indexed state provider with a default executor for the
     /// given chain id.
     #[must_use]
     pub fn with_chain_id(index: Arc<BlockIndex>, state: S, chain_id: u64) -> Self {
-        Self::new(index, state, Arc::new(RevmExecutor::new(chain_id)))
+        Self::new(index, state, Arc::new(RevmExecutor::new(chain_id)), Address::ZERO)
     }
 }
 
@@ -55,6 +69,7 @@ impl<S: Clone> Clone for IndexedStateProvider<S> {
             index: Arc::clone(&self.index),
             state: self.state.clone(),
             executor: Arc::clone(&self.executor),
+            fee_recipient: self.fee_recipient,
         }
     }
 }
@@ -64,24 +79,35 @@ impl<S: StateDbRead + Send + Sync + 'static> StateProvider for IndexedStateProvi
     async fn balance(
         &self,
         address: Address,
-        _block: Option<BlockNumberOrTag>,
+        block: Option<BlockNumberOrTag>,
     ) -> Result<U256, RpcError> {
-        self.state.balance(&address).await.map_err(state_error_to_rpc)
+        self.reject_historical_block(&block)?;
+        match self.state.balance(&address).await {
+            Ok(balance) => Ok(balance),
+            Err(StateDbError::AccountNotFound(_)) => Ok(U256::ZERO),
+            Err(e) => Err(state_error_to_rpc(e)),
+        }
     }
 
     async fn nonce(
         &self,
         address: Address,
-        _block: Option<BlockNumberOrTag>,
+        block: Option<BlockNumberOrTag>,
     ) -> Result<u64, RpcError> {
-        self.state.nonce(&address).await.map_err(state_error_to_rpc)
+        self.reject_historical_block(&block)?;
+        match self.state.nonce(&address).await {
+            Ok(nonce) => Ok(nonce),
+            Err(StateDbError::AccountNotFound(_)) => Ok(0),
+            Err(e) => Err(state_error_to_rpc(e)),
+        }
     }
 
     async fn code(
         &self,
         address: Address,
-        _block: Option<BlockNumberOrTag>,
+        block: Option<BlockNumberOrTag>,
     ) -> Result<Bytes, RpcError> {
+        self.reject_historical_block(&block)?;
         // EIP-1474: `eth_getCode` MUST return `0x` for unknown accounts and
         // for EOAs without code, NOT an error. Many tools branch on
         // `getCode === '0x'` to decide "is this a contract?".
@@ -104,9 +130,14 @@ impl<S: StateDbRead + Send + Sync + 'static> StateProvider for IndexedStateProvi
         &self,
         address: Address,
         slot: U256,
-        _block: Option<BlockNumberOrTag>,
+        block: Option<BlockNumberOrTag>,
     ) -> Result<U256, RpcError> {
-        self.state.storage(&address, &slot).await.map_err(state_error_to_rpc)
+        self.reject_historical_block(&block)?;
+        match self.state.storage(&address, &slot).await {
+            Ok(value) => Ok(value),
+            Err(StateDbError::AccountNotFound(_)) => Ok(U256::ZERO),
+            Err(e) => Err(state_error_to_rpc(e)),
+        }
     }
 
     async fn block_by_number(
@@ -147,6 +178,7 @@ impl<S: StateDbRead + Send + Sync + 'static> StateProvider for IndexedStateProvi
         request: CallRequest,
         block: Option<BlockNumberOrTag>,
     ) -> Result<Bytes, RpcError> {
+        self.reject_historical_block(&block)?;
         let block_ctx = self.block_context_for(block)?;
         let params = call_request_to_params(request);
         self.executor.simulate_call(&self.state, params, &block_ctx).map_err(execution_error_to_rpc)
@@ -157,24 +189,54 @@ impl<S: StateDbRead + Send + Sync + 'static> StateProvider for IndexedStateProvi
         request: CallRequest,
         block: Option<BlockNumberOrTag>,
     ) -> Result<u64, RpcError> {
+        self.reject_historical_block(&block)?;
         let block_ctx = self.block_context_for(block)?;
         let params = call_request_to_params(request);
         self.executor.estimate_gas(&self.state, params, &block_ctx).map_err(execution_error_to_rpc)
     }
 
     async fn get_logs(&self, filter: RpcLogFilter) -> Result<Vec<RpcLog>, RpcError> {
-        let from_block =
-            filter.from_block.as_ref().map(|b| self.resolve_block_number(b)).transpose()?;
-        let to_block =
-            filter.to_block.as_ref().map(|b| self.resolve_block_number(b)).transpose()?;
+        // EIP-234: blockHash is mutually exclusive with fromBlock/toBlock.
+        if filter.block_hash.is_some() && (filter.from_block.is_some() || filter.to_block.is_some())
+        {
+            return Err(RpcError::InvalidParams(
+                "blockHash is mutually exclusive with fromBlock/toBlock".into(),
+            ));
+        }
 
         let mut log_filter = LogFilter::new();
-        if let Some(from) = from_block {
-            log_filter = log_filter.from_block(from);
+
+        if let Some(block_hash) = &filter.block_hash {
+            // Single-block query by hash per EIP-234.
+            let block = self
+                .index
+                .get_block_by_hash(block_hash)
+                .ok_or_else(|| RpcError::InvalidParams("block not found".into()))?;
+            log_filter = log_filter.from_block(block.number).to_block(block.number);
+        } else {
+            let head = self.index.head_block_number();
+            let from_block =
+                filter.from_block.as_ref().map(|b| self.resolve_block_number(b)).transpose()?;
+            let to_block =
+                filter.to_block.as_ref().map(|b| self.resolve_block_number(b)).transpose()?;
+
+            let from = from_block.unwrap_or(0);
+            let to = to_block.unwrap_or(head).min(head);
+
+            if from > to {
+                return Err(RpcError::InvalidParams(
+                    "fromBlock must not be greater than toBlock".into(),
+                ));
+            }
+            if to.saturating_sub(from) > MAX_LOG_BLOCK_RANGE {
+                return Err(RpcError::InvalidParams(format!(
+                    "block range exceeds maximum of {MAX_LOG_BLOCK_RANGE}"
+                )));
+            }
+
+            log_filter = log_filter.from_block(from).to_block(to);
         }
-        if let Some(to) = to_block {
-            log_filter = log_filter.to_block(to);
-        }
+
         if let Some(addr_filter) = filter.address {
             log_filter = log_filter.address(addr_filter.into_vec());
         }
@@ -186,18 +248,18 @@ impl<S: StateDbRead + Send + Sync + 'static> StateProvider for IndexedStateProvi
             }
         }
 
-        let indexed_logs = self.index.get_logs(&log_filter);
-        let block_number = self.index.head_block_number();
-        let logs = indexed_logs
+        let logs = self
+            .index
+            .get_logs(&log_filter)
             .into_iter()
             .map(|log| RpcLog {
                 address: log.address,
                 topics: log.topics,
                 data: log.data,
-                block_number: U64::from(block_number),
-                transaction_hash: B256::ZERO,
-                transaction_index: U64::ZERO,
-                block_hash: B256::ZERO,
+                block_number: U64::from(log.block_number),
+                transaction_hash: log.transaction_hash,
+                transaction_index: U64::from(log.transaction_index),
+                block_hash: log.block_hash,
                 log_index: U64::from(log.log_index),
                 removed: false,
             })
@@ -207,6 +269,43 @@ impl<S: StateDbRead + Send + Sync + 'static> StateProvider for IndexedStateProvi
 }
 
 impl<S> IndexedStateProvider<S> {
+    /// Reject requests for historical or future state that we cannot serve.
+    ///
+    /// Kora uses QMDB which only maintains the latest state. We accept
+    /// `None`, `latest`, `pending`, `safe`, `finalized`, and the current
+    /// head block number; everything else returns an explicit error instead
+    /// of silently returning the latest state.
+    ///
+    /// In Simplex BFT all committed blocks are immediately finalized, so
+    /// `safe` and `finalized` are semantically equivalent to `latest`.
+    fn reject_historical_block(&self, block: &Option<BlockNumberOrTag>) -> Result<(), RpcError> {
+        match block {
+            None
+            | Some(BlockNumberOrTag::Latest)
+            | Some(BlockNumberOrTag::Tag(
+                BlockTag::Latest | BlockTag::Pending | BlockTag::Safe | BlockTag::Finalized,
+            )) => Ok(()),
+            Some(BlockNumberOrTag::Number(n)) => {
+                let head = self.index.head_block_number();
+                let requested = n.to::<u64>();
+                if requested == head {
+                    Ok(())
+                } else if requested > head {
+                    Err(RpcError::InvalidBlockNumber(format!(
+                        "block not yet available (requested {requested}, head {head})",
+                    )))
+                } else {
+                    Err(RpcError::Unsupported(format!(
+                        "historical state not available (block {requested})",
+                    )))
+                }
+            }
+            Some(BlockNumberOrTag::Tag(tag)) => {
+                Err(RpcError::Unsupported(format!("historical state not available (tag {tag:?})",)))
+            }
+        }
+    }
+
     fn indexed_block_to_rpc(&self, block: IndexedBlock, full_transactions: bool) -> RpcBlock {
         let transactions = if full_transactions {
             let txs = self
@@ -223,24 +322,27 @@ impl<S> IndexedStateProvider<S> {
         RpcBlock {
             hash: block.hash,
             parent_hash: block.parent_hash,
+            sha3_uncles: EMPTY_UNCLE_HASH,
             number: U64::from(block.number),
             state_root: block.state_root,
-            transactions_root: B256::ZERO,
-            receipts_root: B256::ZERO,
-            logs_bloom: Bytes::new(),
+            transactions_root: block.transactions_root,
+            receipts_root: block.receipts_root,
+            logs_bloom: Bytes::copy_from_slice(block.logs_bloom.as_slice()),
             timestamp: U64::from(block.timestamp),
             gas_limit: U64::from(block.gas_limit),
             gas_used: U64::from(block.gas_used),
             extra_data: Bytes::new(),
-            mix_hash: B256::ZERO,
+            mix_hash: block.mix_hash,
             nonce: Default::default(),
             base_fee_per_gas: block.base_fee_per_gas.map(U256::from),
-            miner: Address::ZERO,
+            miner: self.fee_recipient,
             difficulty: U256::ZERO,
             total_difficulty: U256::ZERO,
             uncles: vec![],
-            size: U64::ZERO,
+            size: U64::from(block.size),
             transactions,
+            withdrawals: vec![],
+            withdrawals_root: EMPTY_WITHDRAWALS_ROOT,
         }
     }
 
@@ -269,6 +371,7 @@ impl<S> IndexedStateProvider<S> {
             Some(b) => self.resolve_block_number(&b)?,
             None => self.index.head_block_number(),
         };
+        let recent_hashes = self.index.recent_block_hashes(block_num);
         if let Some(indexed) = self.index.get_block_by_number(block_num) {
             let header = Header {
                 number: indexed.number,
@@ -277,7 +380,8 @@ impl<S> IndexedStateProvider<S> {
                 base_fee_per_gas: indexed.base_fee_per_gas,
                 ..Header::default()
             };
-            Ok(BlockContext::new(header, indexed.parent_hash, B256::ZERO))
+            Ok(BlockContext::new(header, indexed.parent_hash, B256::ZERO)
+                .with_recent_block_hashes(recent_hashes))
         } else {
             let header = Header {
                 number: 0,
@@ -310,12 +414,15 @@ fn call_request_to_params(req: CallRequest) -> CallParams {
 fn execution_error_to_rpc(err: kora_executor::ExecutionError) -> RpcError {
     use kora_executor::ExecutionError as E;
     match err {
-        E::Revert(data) => RpcError::ExecutionFailed(format!("execution reverted: {data}")),
+        E::Revert(data) => RpcError::ExecutionReverted(Some(data)),
         E::TxExecution(msg) | E::InvalidTx(msg) | E::TxDecode(msg) | E::BlockValidation(msg) => {
             RpcError::ExecutionFailed(msg)
         }
         E::State(s) => state_error_to_rpc(s),
         E::CodeNotFound(h) => RpcError::StateError(format!("code not found: {h}")),
+        E::StateCommit => {
+            RpcError::Internal("QMDB commit failed during block execution".to_string())
+        }
     }
 }
 
@@ -342,17 +449,18 @@ fn indexed_tx_to_rpc(tx: IndexedTransaction) -> RpcTransaction {
         gas: U64::from(tx.gas_limit),
         gas_price: U256::from(tx.gas_price),
         input: tx.input,
-        tx_type: U64::ZERO,
-        chain_id: None,
-        max_fee_per_gas: None,
-        max_priority_fee_per_gas: None,
-        v: U64::ZERO,
-        r: U256::ZERO,
-        s: U256::ZERO,
+        tx_type: U64::from(tx.tx_type),
+        chain_id: tx.chain_id.map(U64::from),
+        max_fee_per_gas: tx.max_fee_per_gas.map(U256::from),
+        max_priority_fee_per_gas: tx.max_priority_fee_per_gas.map(U256::from),
+        v: U256::from(tx.v),
+        r: tx.r,
+        s: tx.s,
     }
 }
 
 fn indexed_receipt_to_rpc(receipt: IndexedReceipt) -> RpcTransactionReceipt {
+    let logs_bloom = Bytes::copy_from_slice(receipt.logs_bloom.as_slice());
     let logs = receipt
         .logs
         .into_iter()
@@ -360,10 +468,10 @@ fn indexed_receipt_to_rpc(receipt: IndexedReceipt) -> RpcTransactionReceipt {
             address: log.address,
             topics: log.topics,
             data: log.data,
-            block_number: U64::from(receipt.block_number),
-            transaction_hash: receipt.transaction_hash,
-            transaction_index: U64::from(receipt.transaction_index),
-            block_hash: receipt.block_hash,
+            block_number: U64::from(log.block_number),
+            transaction_hash: log.transaction_hash,
+            transaction_index: U64::from(log.transaction_index),
+            block_hash: log.block_hash,
             log_index: U64::from(log.log_index),
             removed: false,
         })
@@ -380,15 +488,16 @@ fn indexed_receipt_to_rpc(receipt: IndexedReceipt) -> RpcTransactionReceipt {
         gas_used: U64::from(receipt.gas_used),
         contract_address: receipt.contract_address,
         logs,
-        logs_bloom: Bytes::new(),
-        tx_type: U64::ZERO,
+        logs_bloom,
+        tx_type: U64::from(receipt.tx_type),
         status: if receipt.status { U64::from(1) } else { U64::ZERO },
-        effective_gas_price: U256::ZERO,
+        effective_gas_price: U256::from(receipt.effective_gas_price),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use alloy_primitives::Bloom;
     use kora_indexer::IndexedLog;
 
     use super::*;
@@ -449,10 +558,15 @@ mod tests {
             number,
             parent_hash: B256::ZERO,
             state_root: B256::ZERO,
+            transactions_root: B256::ZERO,
+            receipts_root: B256::ZERO,
             timestamp: 1000 + number,
             gas_limit: 30_000_000,
             gas_used: 21_000,
             base_fee_per_gas: Some(1_000_000_000),
+            mix_hash: B256::ZERO,
+            logs_bloom: Bloom::ZERO,
+            size: 508,
             transaction_hashes: vec![],
         }
     }
@@ -468,6 +582,13 @@ mod tests {
             value: U256::ZERO,
             gas_limit: 21_000,
             gas_price: 1_000_000_000,
+            tx_type: 0,
+            chain_id: Some(1337),
+            max_fee_per_gas: None,
+            max_priority_fee_per_gas: None,
+            v: 27,
+            r: U256::from(1),
+            s: U256::from(2),
             input: Bytes::new(),
             nonce: 0,
         }
@@ -489,9 +610,97 @@ mod tests {
                 topics: vec![],
                 data: Bytes::new(),
                 log_index: 0,
+                block_number,
+                block_hash,
+                transaction_hash: tx_hash,
+                transaction_index: 0,
             }],
+            logs_bloom: Bloom::ZERO,
+            tx_type: 0,
+            effective_gas_price: 1_000_000_000,
             status: true,
         }
+    }
+
+    #[test]
+    fn indexed_tx_preserves_eip1559_fields() {
+        let block_hash = B256::repeat_byte(1);
+        let tx_hash = B256::repeat_byte(2);
+        let tx = IndexedTransaction {
+            hash: tx_hash,
+            block_hash,
+            block_number: 7,
+            index: 3,
+            from: Address::repeat_byte(0xaa),
+            to: Some(Address::repeat_byte(0xbb)),
+            value: U256::from(10),
+            gas_limit: 50_000,
+            gas_price: 20_000_000_000,
+            tx_type: 2,
+            chain_id: Some(1337),
+            max_fee_per_gas: Some(20_000_000_000),
+            max_priority_fee_per_gas: Some(1_500_000_000),
+            v: 1,
+            r: U256::from(123),
+            s: U256::from(456),
+            input: Bytes::from_static(&[0xde, 0xad]),
+            nonce: 9,
+        };
+
+        let rpc_tx = indexed_tx_to_rpc(tx);
+
+        assert_eq!(rpc_tx.hash, tx_hash);
+        assert_eq!(rpc_tx.block_hash, Some(block_hash));
+        assert_eq!(rpc_tx.transaction_index, Some(U64::from(3)));
+        assert_eq!(rpc_tx.tx_type, U64::from(2));
+        assert_eq!(rpc_tx.chain_id, Some(U64::from(1337)));
+        assert_eq!(rpc_tx.max_fee_per_gas, Some(U256::from(20_000_000_000u64)));
+        assert_eq!(rpc_tx.max_priority_fee_per_gas, Some(U256::from(1_500_000_000u64)));
+        assert_eq!(rpc_tx.v, U256::from(1));
+        assert_eq!(rpc_tx.r, U256::from(123));
+        assert_eq!(rpc_tx.s, U256::from(456));
+    }
+
+    #[test]
+    fn indexed_receipt_preserves_fee_type_bloom_and_log_metadata() {
+        let block_hash = B256::repeat_byte(1);
+        let tx_hash = B256::repeat_byte(2);
+        let receipt = IndexedReceipt {
+            transaction_hash: tx_hash,
+            block_hash,
+            block_number: 5,
+            transaction_index: 1,
+            from: Address::repeat_byte(0xaa),
+            to: Some(Address::repeat_byte(0xbb)),
+            cumulative_gas_used: 50_000,
+            gas_used: 29_000,
+            contract_address: None,
+            logs: vec![IndexedLog {
+                address: Address::repeat_byte(0xcc),
+                topics: vec![B256::repeat_byte(0xdd)],
+                data: Bytes::from_static(&[0x01, 0x02]),
+                log_index: 4,
+                block_number: 5,
+                block_hash,
+                transaction_hash: tx_hash,
+                transaction_index: 1,
+            }],
+            logs_bloom: Bloom::repeat_byte(0xab),
+            tx_type: 2,
+            effective_gas_price: 12_000_000_000,
+            status: true,
+        };
+
+        let rpc_receipt = indexed_receipt_to_rpc(receipt);
+
+        assert_eq!(rpc_receipt.tx_type, U64::from(2));
+        assert_eq!(rpc_receipt.effective_gas_price, U256::from(12_000_000_000u64));
+        assert_eq!(rpc_receipt.logs_bloom.len(), 256);
+        assert_eq!(rpc_receipt.logs_bloom[0], 0xab);
+        assert_eq!(rpc_receipt.logs[0].block_number, U64::from(5));
+        assert_eq!(rpc_receipt.logs[0].block_hash, block_hash);
+        assert_eq!(rpc_receipt.logs[0].transaction_hash, tx_hash);
+        assert_eq!(rpc_receipt.logs[0].transaction_index, U64::from(1));
     }
 
     #[tokio::test]
@@ -510,6 +719,34 @@ mod tests {
 
         let nonce = provider.nonce(Address::ZERO, None).await.unwrap();
         assert_eq!(nonce, 42);
+    }
+
+    #[tokio::test]
+    async fn test_missing_account_balance_returns_zero() {
+        let index = Arc::new(BlockIndex::new());
+        let provider = IndexedStateProvider::with_chain_id(index, MissingAccountState, 1337);
+
+        let balance = provider.balance(Address::repeat_byte(0xaa), None).await.unwrap();
+        assert_eq!(balance, U256::ZERO);
+    }
+
+    #[tokio::test]
+    async fn test_missing_account_nonce_returns_zero() {
+        let index = Arc::new(BlockIndex::new());
+        let provider = IndexedStateProvider::with_chain_id(index, MissingAccountState, 1337);
+
+        let nonce = provider.nonce(Address::repeat_byte(0xaa), None).await.unwrap();
+        assert_eq!(nonce, 0);
+    }
+
+    #[tokio::test]
+    async fn test_missing_account_storage_returns_zero() {
+        let index = Arc::new(BlockIndex::new());
+        let provider = IndexedStateProvider::with_chain_id(index, MissingAccountState, 1337);
+
+        let value =
+            provider.storage(Address::repeat_byte(0xaa), U256::from(7), None).await.unwrap();
+        assert_eq!(value, U256::ZERO);
     }
 
     #[tokio::test]
@@ -610,6 +847,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_logs_returns_indexed_block_and_transaction_metadata() {
+        let index = Arc::new(BlockIndex::new());
+        let block_hash = B256::repeat_byte(5);
+        let tx_hash = B256::repeat_byte(2);
+        let log_address = Address::repeat_byte(0xcc);
+        let receipt = IndexedReceipt {
+            transaction_hash: tx_hash,
+            block_hash,
+            block_number: 5,
+            transaction_index: 2,
+            from: Address::repeat_byte(0xaa),
+            to: Some(Address::repeat_byte(0xbb)),
+            cumulative_gas_used: 42_000,
+            gas_used: 21_000,
+            contract_address: None,
+            logs: vec![IndexedLog {
+                address: log_address,
+                topics: vec![B256::repeat_byte(0xdd)],
+                data: Bytes::from_static(&[0x01]),
+                log_index: 9,
+                block_number: 5,
+                block_hash,
+                transaction_hash: tx_hash,
+                transaction_index: 2,
+            }],
+            logs_bloom: Bloom::ZERO,
+            tx_type: 2,
+            effective_gas_price: 12_000_000_000,
+            status: true,
+        };
+        index.insert_block(
+            create_test_block(5, block_hash),
+            vec![create_test_tx(tx_hash, block_hash, 5)],
+            vec![receipt],
+        );
+        index.insert_block(create_test_block(10, B256::repeat_byte(10)), vec![], vec![]);
+
+        let provider = IndexedStateProvider::with_chain_id(index, MockState, 1337);
+        let logs = provider
+            .get_logs(RpcLogFilter {
+                from_block: Some(BlockNumberOrTag::Number(U64::from(5))),
+                to_block: Some(BlockNumberOrTag::Number(U64::from(5))),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].address, log_address);
+        assert_eq!(logs[0].block_number, U64::from(5));
+        assert_eq!(logs[0].block_hash, block_hash);
+        assert_eq!(logs[0].transaction_hash, tx_hash);
+        assert_eq!(logs[0].transaction_index, U64::from(2));
+        assert_eq!(logs[0].log_index, U64::from(9));
+    }
+
+    #[tokio::test]
     async fn test_block_number() {
         let index = Arc::new(BlockIndex::new());
         index.insert_block(create_test_block(5, B256::repeat_byte(5)), vec![], vec![]);
@@ -637,5 +931,265 @@ mod tests {
             .await
             .unwrap();
         assert!(block.is_none());
+    }
+
+    // --- reject_historical_block tests ---
+
+    #[tokio::test]
+    async fn balance_with_none_block_succeeds() {
+        let index = Arc::new(BlockIndex::new());
+        index.insert_block(create_test_block(5, B256::repeat_byte(5)), vec![], vec![]);
+        let provider = IndexedStateProvider::with_chain_id(index, MockState, 1337);
+
+        let balance = provider.balance(Address::ZERO, None).await.unwrap();
+        assert_eq!(balance, U256::from(1000));
+    }
+
+    #[tokio::test]
+    async fn balance_with_latest_tag_succeeds() {
+        let index = Arc::new(BlockIndex::new());
+        index.insert_block(create_test_block(5, B256::repeat_byte(5)), vec![], vec![]);
+        let provider = IndexedStateProvider::with_chain_id(index, MockState, 1337);
+
+        let balance = provider
+            .balance(Address::ZERO, Some(BlockNumberOrTag::Tag(BlockTag::Latest)))
+            .await
+            .unwrap();
+        assert_eq!(balance, U256::from(1000));
+    }
+
+    #[tokio::test]
+    async fn balance_with_latest_default_succeeds() {
+        let index = Arc::new(BlockIndex::new());
+        index.insert_block(create_test_block(5, B256::repeat_byte(5)), vec![], vec![]);
+        let provider = IndexedStateProvider::with_chain_id(index, MockState, 1337);
+
+        let balance =
+            provider.balance(Address::ZERO, Some(BlockNumberOrTag::Latest)).await.unwrap();
+        assert_eq!(balance, U256::from(1000));
+    }
+
+    #[tokio::test]
+    async fn balance_with_pending_tag_succeeds() {
+        let index = Arc::new(BlockIndex::new());
+        index.insert_block(create_test_block(5, B256::repeat_byte(5)), vec![], vec![]);
+        let provider = IndexedStateProvider::with_chain_id(index, MockState, 1337);
+
+        let balance = provider
+            .balance(Address::ZERO, Some(BlockNumberOrTag::Tag(BlockTag::Pending)))
+            .await
+            .unwrap();
+        assert_eq!(balance, U256::from(1000));
+    }
+
+    #[tokio::test]
+    async fn balance_with_current_block_number_succeeds() {
+        let index = Arc::new(BlockIndex::new());
+        index.insert_block(create_test_block(5, B256::repeat_byte(5)), vec![], vec![]);
+        let provider = IndexedStateProvider::with_chain_id(index, MockState, 1337);
+
+        let balance = provider
+            .balance(Address::ZERO, Some(BlockNumberOrTag::Number(U64::from(5))))
+            .await
+            .unwrap();
+        assert_eq!(balance, U256::from(1000));
+    }
+
+    #[tokio::test]
+    async fn balance_with_historical_block_number_returns_error() {
+        let index = Arc::new(BlockIndex::new());
+        index.insert_block(create_test_block(10, B256::repeat_byte(10)), vec![], vec![]);
+        let provider = IndexedStateProvider::with_chain_id(index, MockState, 1337);
+
+        let err = provider
+            .balance(Address::ZERO, Some(BlockNumberOrTag::Number(U64::from(5))))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RpcError::Unsupported(_)));
+        assert!(err.to_string().contains("historical state not available"));
+    }
+
+    #[tokio::test]
+    async fn balance_with_future_block_number_returns_error() {
+        let index = Arc::new(BlockIndex::new());
+        index.insert_block(create_test_block(10, B256::repeat_byte(10)), vec![], vec![]);
+        let provider = IndexedStateProvider::with_chain_id(index, MockState, 1337);
+
+        let err = provider
+            .balance(Address::ZERO, Some(BlockNumberOrTag::Number(U64::from(20))))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RpcError::InvalidBlockNumber(_)));
+        assert!(err.to_string().contains("block not yet available"));
+    }
+
+    #[tokio::test]
+    async fn nonce_with_historical_block_number_returns_error() {
+        let index = Arc::new(BlockIndex::new());
+        index.insert_block(create_test_block(10, B256::repeat_byte(10)), vec![], vec![]);
+        let provider = IndexedStateProvider::with_chain_id(index, MockState, 1337);
+
+        let err = provider
+            .nonce(Address::ZERO, Some(BlockNumberOrTag::Number(U64::from(3))))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RpcError::Unsupported(_)));
+    }
+
+    #[tokio::test]
+    async fn code_with_historical_block_number_returns_error() {
+        let index = Arc::new(BlockIndex::new());
+        index.insert_block(create_test_block(10, B256::repeat_byte(10)), vec![], vec![]);
+        let provider = IndexedStateProvider::with_chain_id(index, MockState, 1337);
+
+        let err = provider
+            .code(Address::ZERO, Some(BlockNumberOrTag::Number(U64::from(3))))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RpcError::Unsupported(_)));
+    }
+
+    #[tokio::test]
+    async fn storage_with_historical_block_number_returns_error() {
+        let index = Arc::new(BlockIndex::new());
+        index.insert_block(create_test_block(10, B256::repeat_byte(10)), vec![], vec![]);
+        let provider = IndexedStateProvider::with_chain_id(index, MockState, 1337);
+
+        let err = provider
+            .storage(Address::ZERO, U256::from(1), Some(BlockNumberOrTag::Number(U64::from(3))))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RpcError::Unsupported(_)));
+    }
+
+    #[tokio::test]
+    async fn call_with_historical_block_number_returns_error() {
+        let index = Arc::new(BlockIndex::new());
+        index.insert_block(create_test_block(10, B256::repeat_byte(10)), vec![], vec![]);
+        let provider = IndexedStateProvider::with_chain_id(index, MockState, 1337);
+
+        let err = provider
+            .call(CallRequest::default(), Some(BlockNumberOrTag::Number(U64::from(3))))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RpcError::Unsupported(_)));
+        assert!(err.to_string().contains("historical state not available"));
+    }
+
+    #[tokio::test]
+    async fn call_with_future_block_number_returns_error() {
+        let index = Arc::new(BlockIndex::new());
+        index.insert_block(create_test_block(10, B256::repeat_byte(10)), vec![], vec![]);
+        let provider = IndexedStateProvider::with_chain_id(index, MockState, 1337);
+
+        let err = provider
+            .call(CallRequest::default(), Some(BlockNumberOrTag::Number(U64::from(20))))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RpcError::InvalidBlockNumber(_)));
+        assert!(err.to_string().contains("block not yet available"));
+    }
+
+    #[tokio::test]
+    async fn estimate_gas_with_historical_block_number_returns_error() {
+        let index = Arc::new(BlockIndex::new());
+        index.insert_block(create_test_block(10, B256::repeat_byte(10)), vec![], vec![]);
+        let provider = IndexedStateProvider::with_chain_id(index, MockState, 1337);
+
+        let err = provider
+            .estimate_gas(CallRequest::default(), Some(BlockNumberOrTag::Number(U64::from(3))))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RpcError::Unsupported(_)));
+        assert!(err.to_string().contains("historical state not available"));
+    }
+
+    #[tokio::test]
+    async fn estimate_gas_with_future_block_number_returns_error() {
+        let index = Arc::new(BlockIndex::new());
+        index.insert_block(create_test_block(10, B256::repeat_byte(10)), vec![], vec![]);
+        let provider = IndexedStateProvider::with_chain_id(index, MockState, 1337);
+
+        let err = provider
+            .estimate_gas(CallRequest::default(), Some(BlockNumberOrTag::Number(U64::from(20))))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RpcError::InvalidBlockNumber(_)));
+        assert!(err.to_string().contains("block not yet available"));
+    }
+
+    #[tokio::test]
+    async fn balance_with_earliest_tag_returns_error() {
+        let index = Arc::new(BlockIndex::new());
+        index.insert_block(create_test_block(5, B256::repeat_byte(5)), vec![], vec![]);
+        let provider = IndexedStateProvider::with_chain_id(index, MockState, 1337);
+
+        let err = provider
+            .balance(Address::ZERO, Some(BlockNumberOrTag::Tag(BlockTag::Earliest)))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RpcError::Unsupported(_)));
+        assert!(err.to_string().contains("historical state not available"));
+    }
+
+    #[tokio::test]
+    async fn balance_with_safe_tag_succeeds() {
+        let index = Arc::new(BlockIndex::new());
+        index.insert_block(create_test_block(5, B256::repeat_byte(5)), vec![], vec![]);
+        let provider = IndexedStateProvider::with_chain_id(index, MockState, 1337);
+
+        // In BFT consensus all committed blocks are immediately finalized,
+        // so "safe" is semantically equivalent to "latest".
+        let balance = provider
+            .balance(Address::ZERO, Some(BlockNumberOrTag::Tag(BlockTag::Safe)))
+            .await
+            .unwrap();
+        assert_eq!(balance, U256::from(1000));
+    }
+
+    #[tokio::test]
+    async fn balance_with_finalized_tag_succeeds() {
+        let index = Arc::new(BlockIndex::new());
+        index.insert_block(create_test_block(5, B256::repeat_byte(5)), vec![], vec![]);
+        let provider = IndexedStateProvider::with_chain_id(index, MockState, 1337);
+
+        // In BFT consensus all committed blocks are immediately finalized,
+        // so "finalized" is semantically equivalent to "latest".
+        let balance = provider
+            .balance(Address::ZERO, Some(BlockNumberOrTag::Tag(BlockTag::Finalized)))
+            .await
+            .unwrap();
+        assert_eq!(balance, U256::from(1000));
+    }
+
+    #[tokio::test]
+    async fn nonce_with_none_block_succeeds() {
+        let index = Arc::new(BlockIndex::new());
+        index.insert_block(create_test_block(5, B256::repeat_byte(5)), vec![], vec![]);
+        let provider = IndexedStateProvider::with_chain_id(index, MockState, 1337);
+
+        let nonce = provider.nonce(Address::ZERO, None).await.unwrap();
+        assert_eq!(nonce, 42);
+    }
+
+    #[tokio::test]
+    async fn storage_with_none_block_succeeds() {
+        let index = Arc::new(BlockIndex::new());
+        index.insert_block(create_test_block(5, B256::repeat_byte(5)), vec![], vec![]);
+        let provider = IndexedStateProvider::with_chain_id(index, MockState, 1337);
+
+        let value = provider.storage(Address::ZERO, U256::from(1), None).await.unwrap();
+        assert_eq!(value, U256::from(123));
+    }
+
+    #[tokio::test]
+    async fn code_with_none_block_succeeds() {
+        let index = Arc::new(BlockIndex::new());
+        index.insert_block(create_test_block(5, B256::repeat_byte(5)), vec![], vec![]);
+        let provider = IndexedStateProvider::with_chain_id(index, MockState, 1337);
+
+        // MockState returns B256::ZERO code_hash, so code() returns empty bytes
+        let code = provider.code(Address::ZERO, None).await.unwrap();
+        assert!(code.is_empty());
     }
 }

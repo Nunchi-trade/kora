@@ -12,13 +12,15 @@ pub use bundle::TransportBundle;
 
 mod channels;
 pub use channels::{
-    CHANNEL_BACKFILL, CHANNEL_BLOCKS, CHANNEL_CERTS, CHANNEL_RESOLVER, CHANNEL_VOTES,
-    MarshalChannels, Receiver, Sender, SimplexChannels,
+    CHANNEL_BACKFILL, CHANNEL_BLOCKS, CHANNEL_CERTS, CHANNEL_RESOLVER, CHANNEL_TX_GOSSIP,
+    CHANNEL_VOTES, MarshalChannels, Receiver, Sender, SimplexChannels, TxGossipChannel,
 };
 
 mod config;
 pub use config::{
-    DEFAULT_BACKLOG, DEFAULT_MAX_MESSAGE_SIZE, DEFAULT_NAMESPACE, TransportConfig, TransportParsing,
+    DEFAULT_BACKLOG, DEFAULT_BLOCK_BACKLOG, DEFAULT_CONSENSUS_BACKLOG, DEFAULT_GOSSIP_BACKLOG,
+    DEFAULT_MAX_MESSAGE_SIZE, DEFAULT_NAMESPACE, DEFAULT_RESOLVER_BACKLOG, TransportConfig,
+    TransportParsing,
 };
 
 mod error;

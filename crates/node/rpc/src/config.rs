@@ -17,6 +17,11 @@ pub struct RpcServerConfig {
     pub rate_limit: RateLimitConfig,
     /// Maximum number of concurrent connections.
     pub max_connections: u32,
+    /// Maximum number of WebSocket subscriptions per connection.
+    pub max_subscriptions_per_connection: u32,
+    /// Maximum number of calls allowed in a single JSON-RPC batch request.
+    /// `0` disables batch requests entirely.
+    pub max_batch_size: u32,
 }
 
 impl RpcServerConfig {
@@ -29,6 +34,8 @@ impl RpcServerConfig {
             cors: CorsConfig::default(),
             rate_limit: RateLimitConfig::default(),
             max_connections: 100,
+            max_subscriptions_per_connection: 32,
+            max_batch_size: 100,
         }
     }
 
@@ -51,10 +58,40 @@ impl RpcServerConfig {
         self
     }
 
+    /// Set rate limit including burst size.
+    #[must_use]
+    pub const fn with_rate_limit_burst(
+        mut self,
+        requests_per_second: u64,
+        burst_size: u64,
+    ) -> Self {
+        self.rate_limit.requests_per_second = requests_per_second;
+        self.rate_limit.burst_size = burst_size;
+        self
+    }
+
     /// Set maximum connections.
     #[must_use]
     pub const fn with_max_connections(mut self, max_connections: u32) -> Self {
         self.max_connections = max_connections;
+        self
+    }
+
+    /// Set the maximum number of WebSocket subscriptions per connection.
+    #[must_use]
+    pub const fn with_max_subscriptions_per_connection(
+        mut self,
+        max_subscriptions_per_connection: u32,
+    ) -> Self {
+        self.max_subscriptions_per_connection = max_subscriptions_per_connection;
+        self
+    }
+
+    /// Set the maximum number of calls in a single batch request.
+    /// `0` disables batch requests entirely.
+    #[must_use]
+    pub const fn with_max_batch_size(mut self, max_batch_size: u32) -> Self {
+        self.max_batch_size = max_batch_size;
         self
     }
 }
@@ -68,6 +105,8 @@ impl Default for RpcServerConfig {
             cors: CorsConfig::default(),
             rate_limit: RateLimitConfig::default(),
             max_connections: 100,
+            max_subscriptions_per_connection: 32,
+            max_batch_size: 100,
         }
     }
 }
@@ -130,7 +169,7 @@ impl CorsConfig {
 /// Rate limiting configuration.
 #[derive(Clone, Debug)]
 pub struct RateLimitConfig {
-    /// Maximum requests per second per client.
+    /// Maximum requests per second enforced by the server.
     pub requests_per_second: u64,
     /// Burst size for rate limiting.
     pub burst_size: u64,
@@ -147,6 +186,11 @@ impl RateLimitConfig {
     pub const fn disabled() -> Self {
         Self { requests_per_second: u64::MAX, burst_size: u64::MAX }
     }
+
+    /// Return whether rate limiting is disabled.
+    pub const fn is_disabled(&self) -> bool {
+        self.requests_per_second == u64::MAX
+    }
 }
 
 #[cfg(test)]
@@ -160,6 +204,8 @@ mod tests {
         assert_eq!(config.jsonrpc_addr, "127.0.0.1:8545".parse().unwrap());
         assert_eq!(config.chain_id, 1);
         assert_eq!(config.max_connections, 100);
+        assert_eq!(config.max_subscriptions_per_connection, 32);
+        assert_eq!(config.max_batch_size, 100);
     }
 
     #[test]
@@ -172,6 +218,7 @@ mod tests {
         assert_eq!(config.jsonrpc_addr, jsonrpc);
         assert_eq!(config.chain_id, 42);
         assert_eq!(config.max_connections, 100);
+        assert_eq!(config.max_subscriptions_per_connection, 32);
     }
 
     #[test]
@@ -198,21 +245,45 @@ mod tests {
     }
 
     #[test]
+    fn rpc_server_config_with_rate_limit_burst() {
+        let config = RpcServerConfig::default().with_rate_limit_burst(500, 750);
+        assert_eq!(config.rate_limit.requests_per_second, 500);
+        assert_eq!(config.rate_limit.burst_size, 750);
+    }
+
+    #[test]
     fn rpc_server_config_with_max_connections() {
         let config = RpcServerConfig::default().with_max_connections(200);
         assert_eq!(config.max_connections, 200);
     }
 
     #[test]
+    fn rpc_server_config_with_max_subscriptions_per_connection() {
+        let config = RpcServerConfig::default().with_max_subscriptions_per_connection(16);
+        assert_eq!(config.max_subscriptions_per_connection, 16);
+    }
+
+    #[test]
+    fn rpc_server_config_with_max_batch_size() {
+        let config = RpcServerConfig::default().with_max_batch_size(50);
+        assert_eq!(config.max_batch_size, 50);
+    }
+
+    #[test]
     fn rpc_server_config_chained_builder() {
         let config = RpcServerConfig::default()
             .with_cors_origins(vec!["*".to_string()])
-            .with_rate_limit(1000)
-            .with_max_connections(50);
+            .with_rate_limit_burst(1000, 1500)
+            .with_max_connections(50)
+            .with_max_subscriptions_per_connection(24)
+            .with_max_batch_size(200);
 
         assert_eq!(config.cors.allowed_origins, vec!["*"]);
         assert_eq!(config.rate_limit.requests_per_second, 1000);
+        assert_eq!(config.rate_limit.burst_size, 1500);
         assert_eq!(config.max_connections, 50);
+        assert_eq!(config.max_subscriptions_per_connection, 24);
+        assert_eq!(config.max_batch_size, 200);
     }
 
     #[test]
@@ -258,6 +329,12 @@ mod tests {
         let config = RateLimitConfig::disabled();
         assert_eq!(config.requests_per_second, u64::MAX);
         assert_eq!(config.burst_size, u64::MAX);
+        assert!(config.is_disabled());
+    }
+
+    #[test]
+    fn rate_limit_config_default_is_not_disabled() {
+        assert!(!RateLimitConfig::default().is_disabled());
     }
 
     #[test]

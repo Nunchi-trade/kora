@@ -8,7 +8,9 @@ use kora_domain::Tx;
 use kora_traits::StateDbRead;
 use sha3::{Digest, Keccak256};
 
-use crate::{config::PoolConfig, error::TxPoolError, ordering::OrderedTransaction};
+use crate::{
+    config::PoolConfig, error::TxPoolError, ordering::OrderedTransaction, pool::TransactionPool,
+};
 
 const TX_BASE_GAS: u64 = 21000;
 const TX_DATA_ZERO_GAS: u64 = 4;
@@ -44,12 +46,21 @@ pub struct TransactionValidator<S> {
     chain_id: u64,
     state: S,
     config: PoolConfig,
+    pool: Option<TransactionPool>,
 }
 
 impl<S: StateDbRead> TransactionValidator<S> {
     /// Creates a new transaction validator.
     pub const fn new(chain_id: u64, state: S, config: PoolConfig) -> Self {
-        Self { chain_id, state, config }
+        Self { chain_id, state, config, pool: None }
+    }
+
+    /// Attach a transaction pool so the validator can reject same-nonce
+    /// duplicates at ingress time.
+    #[must_use]
+    pub fn with_pool(mut self, pool: TransactionPool) -> Self {
+        self.pool = Some(pool);
+        self
     }
 
     /// Validates a raw transaction.
@@ -97,6 +108,15 @@ impl<S: StateDbRead> TransactionValidator<S> {
         let max_accepted_nonce = state_nonce.saturating_add(self.config.max_txs_per_sender as u64);
         if nonce > max_accepted_nonce {
             return Err(TxPoolError::NonceGap { got: nonce, expected: state_nonce });
+        }
+
+        // Reject if the pool already contains a transaction from this sender
+        // with the same nonce.  This prevents same-nonce conflicts from
+        // passing validation when only finalized state is checked.
+        if let Some(pool) = &self.pool
+            && pool.has_nonce(&sender, nonce)
+        {
+            return Err(TxPoolError::NonceAlreadyInPool { sender, nonce });
         }
 
         let max_cost = max_tx_cost(&envelope);
@@ -466,7 +486,7 @@ mod tests {
 
         let state =
             MockState::new().with_account(sender, 0, U256::from(1_000_000_000_000_000_000u64));
-        let config = PoolConfig::default().with_min_gas_price(1_000_000_000);
+        let config = PoolConfig::default(); // min_gas_price defaults to 1 gwei
         let validator = TransactionValidator::new(chain_id, state, config);
 
         let result = validator.validate(raw_tx).await;
@@ -853,5 +873,167 @@ mod tests {
         let invalid_tx = Tx::new(Bytes::from(vec![0xffu8; 100]));
         let result = validator.validate(invalid_tx).await;
         assert!(matches!(result, Err(TxPoolError::DecodeError(_))));
+    }
+
+    /// Sign a transaction with a given key and return (sender, signed_envelope, raw_bytes).
+    fn sign_eip1559_tx_with_key(
+        signing_key: &SigningKey,
+        chain_id: u64,
+        nonce: u64,
+        gas_limit: u64,
+        max_fee_per_gas: u128,
+        value: U256,
+        to: Option<Address>,
+    ) -> (Address, TxEnvelope, Tx) {
+        let verifying_key = signing_key.verifying_key();
+        let pubkey = verifying_key.to_encoded_point(false);
+        let pubkey_bytes = pubkey.as_bytes();
+        let pubkey_hash = sha3::Keccak256::digest(&pubkey_bytes[1..]);
+        let sender = Address::from_slice(&pubkey_hash[12..]);
+
+        let tx = TxEip1559 {
+            chain_id,
+            nonce,
+            gas_limit,
+            max_fee_per_gas,
+            max_priority_fee_per_gas: max_fee_per_gas,
+            to: to.map(TxKind::Call).unwrap_or(TxKind::Create),
+            value,
+            access_list: Default::default(),
+            input: Bytes::new(),
+        };
+
+        let sig_hash = tx.signature_hash();
+        let (sig, recovery_id) = signing_key.sign_prehash_recoverable(sig_hash.as_slice()).unwrap();
+        let r = U256::from_be_slice(&sig.r().to_bytes());
+        let s = U256::from_be_slice(&sig.s().to_bytes());
+        let v = recovery_id.is_y_odd();
+        let signature = Signature::new(r, s, v);
+
+        let signed = tx.into_signed(signature);
+        let envelope = TxEnvelope::from(signed);
+        let mut raw_bytes = Vec::new();
+        envelope.encode_2718(&mut raw_bytes);
+
+        (sender, envelope, Tx::new(raw_bytes.into()))
+    }
+
+    #[tokio::test]
+    async fn reject_nonce_already_in_pool() {
+        let chain_id = 1u64;
+        let key = SigningKey::random(&mut OsRng);
+        let (sender, _, raw_tx1) = sign_eip1559_tx_with_key(
+            &key,
+            chain_id,
+            0,
+            21000,
+            1_000_000_000,
+            U256::from(1000),
+            Some(Address::ZERO),
+        );
+        // Create a second tx with the same sender+nonce but different value.
+        let (_, _, raw_tx2) = sign_eip1559_tx_with_key(
+            &key,
+            chain_id,
+            0,
+            21000,
+            1_000_000_000,
+            U256::from(2000),
+            Some(Address::ZERO),
+        );
+
+        let state =
+            MockState::new().with_account(sender, 0, U256::from(1_000_000_000_000_000_000u64));
+        let pool = TransactionPool::new(PoolConfig::default());
+
+        // Validate and insert the first transaction into the pool.
+        let config = PoolConfig::default();
+        let validator = TransactionValidator::new(chain_id, state.clone(), config.clone())
+            .with_pool(pool.clone());
+        let validated = validator.validate(raw_tx1).await.unwrap();
+        pool.add(validated.into_ordered(0)).unwrap();
+
+        // The second tx with the same sender+nonce should be rejected.
+        let validator2 = TransactionValidator::new(chain_id, state, config).with_pool(pool);
+        let result = validator2.validate(raw_tx2).await;
+        assert!(
+            matches!(result, Err(TxPoolError::NonceAlreadyInPool { nonce: 0, .. })),
+            "expected NonceAlreadyInPool, got: {:?}",
+            result,
+        );
+    }
+
+    #[tokio::test]
+    async fn allow_different_nonce_with_pool() {
+        // A transaction with a different nonce should still pass when
+        // the pool has a tx from the same sender at a lower nonce.
+        let chain_id = 1u64;
+        let key = SigningKey::random(&mut OsRng);
+        let (sender, _, raw_tx0) = sign_eip1559_tx_with_key(
+            &key,
+            chain_id,
+            0,
+            21000,
+            1_000_000_000,
+            U256::from(1000),
+            Some(Address::ZERO),
+        );
+        let (_, _, raw_tx1) = sign_eip1559_tx_with_key(
+            &key,
+            chain_id,
+            1,
+            21000,
+            1_000_000_000,
+            U256::from(1000),
+            Some(Address::ZERO),
+        );
+
+        let state =
+            MockState::new().with_account(sender, 0, U256::from(1_000_000_000_000_000_000u64));
+        let pool = TransactionPool::new(PoolConfig::default());
+
+        let config = PoolConfig::default();
+        let validator = TransactionValidator::new(chain_id, state.clone(), config.clone())
+            .with_pool(pool.clone());
+        let validated = validator.validate(raw_tx0).await.unwrap();
+        pool.add(validated.into_ordered(0)).unwrap();
+
+        // nonce 1 should pass
+        let validator2 = TransactionValidator::new(chain_id, state, config).with_pool(pool);
+        assert!(validator2.validate(raw_tx1).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn allow_same_nonce_without_pool() {
+        // Without a pool attached, the validator cannot detect same-nonce
+        // conflicts.  Both transactions should pass validation independently.
+        let chain_id = 1u64;
+        let key = SigningKey::random(&mut OsRng);
+        let (sender, _, raw_tx1) = sign_eip1559_tx_with_key(
+            &key,
+            chain_id,
+            0,
+            21000,
+            1_000_000_000,
+            U256::from(1000),
+            Some(Address::ZERO),
+        );
+        let (_, _, raw_tx2) = sign_eip1559_tx_with_key(
+            &key,
+            chain_id,
+            0,
+            21000,
+            1_000_000_000,
+            U256::from(2000),
+            Some(Address::ZERO),
+        );
+
+        let state =
+            MockState::new().with_account(sender, 0, U256::from(1_000_000_000_000_000_000u64));
+        let config = PoolConfig::default();
+        let validator = TransactionValidator::new(chain_id, state, config);
+
+        assert!(validator.validate(raw_tx1).await.is_ok());
+        assert!(validator.validate(raw_tx2).await.is_ok());
     }
 }

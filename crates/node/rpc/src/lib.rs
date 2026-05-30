@@ -13,18 +13,30 @@ pub use error::{RpcError, codes as error_codes};
 
 mod eth;
 pub use eth::{
-    EthApiImpl, EthApiServer, FeeHistory, NetApiImpl, NetApiServer, TxSubmitCallback,
-    TxSubmitFuture, Web3ApiImpl, Web3ApiServer,
+    EthApiImpl, EthApiServer, FeeHistory, GasOracleConfig, NetApiImpl, NetApiServer,
+    TxSubmitCallback, TxSubmitFuture, Web3ApiImpl, Web3ApiServer,
 };
+
+mod filters;
+pub use filters::FilterChanges;
 
 mod kora;
 pub use kora::{KoraApiImpl, KoraApiServer};
 
+mod txpool;
+pub use txpool::{TxpoolApiImpl, TxpoolApiServer, TxpoolContent, TxpoolInspect, TxpoolStatus};
+
 mod server;
 pub use server::{JsonRpcServer, RpcServer, RpcServerHandle, ServerError};
 
+mod subscription;
+pub use subscription::{
+    MEMPOOL_EVENT_CHANNEL_CAPACITY, MempoolEventSender, PENDING_TX_CHANNEL_CAPACITY,
+    PendingTxEvent, PendingTxEventSender, PendingTxInfo, mempool_event_channel, pending_tx_channel,
+};
+
 mod state;
-pub use state::{NodeState, NodeStatus};
+pub use state::{NodeState, NodeStatus, PartitionStatus};
 
 mod state_provider;
 pub use state_provider::{NoopStateProvider, StateProvider};

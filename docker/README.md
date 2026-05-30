@@ -45,7 +45,7 @@ Run from repository root (`just <cmd>`) or from `docker/` directory (`just <cmd>
 |---------|-------------|
 | `just devnet` | Start devnet with interactive DKG (production-like) |
 | `just trusted-devnet` | Start devnet with trusted dealer DKG (fast, insecure) |
-| `just devnet-down` | Stop all containers (preserves state) |
+| `just devnet-down` | Stop all containers (preserves keys/config volumes; runtime state is ephemeral) |
 | `just devnet-reset` | Stop and delete all state (fresh DKG on next start) |
 | `just devnet-logs` | Stream validator logs |
 | `just devnet-status` | Show container status and endpoints |
@@ -61,7 +61,7 @@ Run from repository root (`just <cmd>`) or from `docker/` directory (`just <cmd>
 | `just devnet` | Start devnet with interactive DKG (production-like) |
 | `just trusted-devnet` | Start devnet with trusted dealer DKG (fast, insecure) |
 | `just devnet-minimal` | Start devnet without observability stack |
-| `just down` | Stop all containers (preserves state) |
+| `just down` | Stop all containers (preserves keys/config volumes; runtime state is ephemeral) |
 | `just reset` | Stop and delete all state (fresh DKG on next start) |
 | `just restart` | Stop and restart the devnet |
 | `just restart-validators` | Restart only validator nodes |
@@ -164,10 +164,14 @@ Environment variables (set in `.env` or export):
 |----------|---------|-------------|
 | `CHAIN_ID` | 1337 | Chain identifier |
 | `RUST_LOG` | info | Log level (trace, debug, info, warn, error) |
+| `KORA_RUNTIME_DIR` | /runtime | Commonware runtime storage directory. The Docker devnet mounts per-node named volumes here so consensus state survives container restarts. |
+| `KORA_CHECKPOINT_INTERVAL` | 256 | Number of finalized blocks between durable QMDB state checkpoints. Finalized block/certificate archives remain on disk; on restart, nodes replay any archive tail after the last checkpoint. |
 | `COMPOSE_PROFILES` | observability | Comma-separated profiles (observability, distributed-dkg) |
 | `VALIDATOR_INDEX` | - | Node index (0-3), set per container |
+| `VALIDATOR_COUNT` | 0 | Total number of validators. When > 0, entrypoint waits for all validators via a shared barrier volume before starting consensus |
 | `IS_BOOTSTRAP` | - | Whether node is bootstrap node |
 | `BOOTSTRAP_PEERS` | - | Bootstrap peer addresses |
+| `PEER_NODES` | - | Comma-separated list of all validator hostnames (e.g. node0,node1,node2,node3) |
 | `HEALTHCHECK_MODE` | - | Health check mode (dkg, ready) |
 
 ## Secondary Peers

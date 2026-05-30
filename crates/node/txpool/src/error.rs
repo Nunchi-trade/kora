@@ -89,6 +89,15 @@ pub enum TxPoolError {
     #[error("transaction already exists")]
     AlreadyExists,
 
+    /// A transaction with the same sender and nonce already exists in the pool.
+    #[error("nonce {nonce} already in pool for sender {sender}")]
+    NonceAlreadyInPool {
+        /// Sender address.
+        sender: Address,
+        /// Conflicting nonce.
+        nonce: u64,
+    },
+
     /// An error occurred while accessing state.
     #[error("state error: {0}")]
     StateError(String),
@@ -197,6 +206,15 @@ mod tests {
     fn test_replacement_underpriced_display() {
         let err = TxPoolError::ReplacementUnderpriced;
         assert_eq!(err.to_string(), "replacement transaction underpriced");
+    }
+
+    #[test]
+    fn test_nonce_already_in_pool_display() {
+        let addr = Address::repeat_byte(0xab);
+        let err = TxPoolError::NonceAlreadyInPool { sender: addr, nonce: 7 };
+        let display = err.to_string();
+        assert!(display.contains("nonce 7"));
+        assert!(display.contains("already in pool"));
     }
 
     #[test]

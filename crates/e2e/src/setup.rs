@@ -4,8 +4,18 @@ use std::time::Duration;
 
 use alloy_primitives::{Address, U256};
 use k256::ecdsa::SigningKey;
+use kora_config::INITIAL_BASE_FEE;
 use kora_domain::{BootstrapConfig, Tx, evm::Evm};
 use kora_transport_sim::SimLinkConfig;
+
+const TEST_INITIAL_BALANCE: u64 = 1_000_000_000_000_000_000;
+const TRANSFER_GAS_LIMIT: u64 = 21_000;
+const TRANSFER_MAX_FEE_PER_GAS: u128 = INITIAL_BASE_FEE as u128;
+const TRANSFER_MAX_PRIORITY_FEE_PER_GAS: u128 = 0;
+
+fn transfer_gas_cost(tx_count: usize) -> U256 {
+    U256::from(TRANSFER_GAS_LIMIT) * U256::from(INITIAL_BASE_FEE) * U256::from(tx_count)
+}
 
 /// Configuration for an e2e test run.
 #[derive(Clone, Debug)]
@@ -111,17 +121,25 @@ impl TestSetup {
         let sender = Evm::address_from_key(&sender_key);
         let receiver = Evm::address_from_key(&receiver_key);
 
-        let initial_balance = U256::from(1_000_000u64);
+        let initial_balance = U256::from(TEST_INITIAL_BALANCE);
         let transfer_amount = U256::from(100u64);
 
-        let tx =
-            Evm::sign_eip1559_transfer(&sender_key, chain_id, receiver, transfer_amount, 0, 21_000);
+        let tx = Evm::sign_eip1559_transfer(
+            &sender_key,
+            chain_id,
+            receiver,
+            transfer_amount,
+            0,
+            TRANSFER_GAS_LIMIT,
+            TRANSFER_MAX_FEE_PER_GAS,
+            TRANSFER_MAX_PRIORITY_FEE_PER_GAS,
+        );
 
         Self {
             genesis_alloc: vec![(sender, initial_balance), (receiver, U256::ZERO)],
             bootstrap_txs: vec![tx],
             expected_balances: vec![
-                (sender, initial_balance - transfer_amount),
+                (sender, initial_balance - transfer_amount - transfer_gas_cost(1)),
                 (receiver, transfer_amount),
             ],
         }
@@ -133,7 +151,7 @@ impl TestSetup {
         let mut bootstrap_txs = Vec::with_capacity(count);
         let mut expected_balances = Vec::with_capacity(count * 2);
 
-        let initial_balance = U256::from(1_000_000u64);
+        let initial_balance = U256::from(TEST_INITIAL_BALANCE);
         let transfer_amount = U256::from(100u64);
 
         for i in 0..count {
@@ -153,11 +171,14 @@ impl TestSetup {
                 receiver,
                 transfer_amount,
                 0,
-                21_000,
+                TRANSFER_GAS_LIMIT,
+                TRANSFER_MAX_FEE_PER_GAS,
+                TRANSFER_MAX_PRIORITY_FEE_PER_GAS,
             );
             bootstrap_txs.push(tx);
 
-            expected_balances.push((sender, initial_balance - transfer_amount));
+            expected_balances
+                .push((sender, initial_balance - transfer_amount - transfer_gas_cost(1)));
             expected_balances.push((receiver, transfer_amount));
         }
 
@@ -171,7 +192,7 @@ impl TestSetup {
         let sender = Evm::address_from_key(&sender_key);
         let receiver = Evm::address_from_key(&receiver_key);
 
-        let initial_balance = U256::from(10_000_000u64);
+        let initial_balance = U256::from(TEST_INITIAL_BALANCE);
         let transfer_amount = U256::from(100u64);
 
         let mut bootstrap_txs = Vec::with_capacity(tx_count);
@@ -182,25 +203,28 @@ impl TestSetup {
                 receiver,
                 transfer_amount,
                 nonce as u64,
-                21_000,
+                TRANSFER_GAS_LIMIT,
+                TRANSFER_MAX_FEE_PER_GAS,
+                TRANSFER_MAX_PRIORITY_FEE_PER_GAS,
             );
             bootstrap_txs.push(tx);
         }
 
         let total_transferred = transfer_amount * U256::from(tx_count);
+        let total_gas_cost = transfer_gas_cost(tx_count);
 
         Self {
             genesis_alloc: vec![(sender, initial_balance), (receiver, U256::ZERO)],
             bootstrap_txs,
             expected_balances: vec![
-                (sender, initial_balance - total_transferred),
+                (sender, initial_balance - total_transferred - total_gas_cost),
                 (receiver, total_transferred),
             ],
         }
     }
 
     /// Convert to bootstrap config.
-    pub fn to_bootstrap(&self) -> BootstrapConfig {
-        BootstrapConfig::new(self.genesis_alloc.clone(), self.bootstrap_txs.clone())
+    pub fn to_bootstrap(&self, chain_id: u64) -> BootstrapConfig {
+        BootstrapConfig::new(chain_id, self.genesis_alloc.clone(), self.bootstrap_txs.clone())
     }
 }

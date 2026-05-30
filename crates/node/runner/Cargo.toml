@@ -11,6 +11,7 @@ description = "Production node runner for Kora validators"
 kora-config.workspace = true
 kora-consensus.workspace = true
 kora-domain.workspace = true
+kora-metrics.workspace = true
 kora-dkg.workspace = true
 kora-executor.workspace = true
 kora-indexer.workspace = true
@@ -28,18 +29,29 @@ kora-txpool.workspace = true
 commonware-codec.workspace = true
 commonware-consensus.workspace = true
 commonware-cryptography.workspace = true
+commonware-actor.workspace = true
 commonware-p2p.workspace = true
-commonware-parallel.workspace = true
 commonware-runtime.workspace = true
+commonware-storage.workspace = true
 commonware-utils.workspace = true
 
 alloy-consensus = { workspace = true }
 alloy-primitives.workspace = true
 
+axum.workspace = true
+bytes.workspace = true
 futures.workspace = true
+governor.workspace = true
+prometheus-client.workspace = true
+parking_lot.workspace = true
+hex.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
 rand.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

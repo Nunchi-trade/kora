@@ -8,7 +8,7 @@ use std::num::{NonZeroU64, NonZeroUsize};
 use commonware_consensus::{
     Block,
     marshal::{
-        Config,
+        Config, Start,
         core::{Actor, Mailbox},
         standard::Standard,
         store::{Blocks, Certificates},
@@ -17,7 +17,7 @@ use commonware_consensus::{
     types::{Epoch, FixedEpocher, Height, ViewDelta},
 };
 use commonware_cryptography::certificate::Provider;
-use commonware_parallel::Sequential;
+use commonware_parallel::{Sequential, Strategy};
 use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner, Storage, buffer::paged::CacheRef};
 use commonware_utils::{Acknowledgement, NZU64, NZUsize};
 use rand_core::CryptoRngCore;
@@ -45,26 +45,34 @@ impl ActorInitializer {
     /// The default mailbox size.
     pub const DEFAULT_MAILBOX_SIZE: usize = 1024;
 
-    /// The default view retention timeout (10 views).
-    pub const DEFAULT_VIEW_RETENTION_TIMEOUT: ViewDelta = ViewDelta::new(10);
+    /// The default view retention timeout.
+    ///
+    /// 256 views provides ~2.7 seconds of catch-up history at 93 blocks/s,
+    /// which is sufficient for consensus. The previous value of 2560 retained
+    /// ~27 seconds of cache data across 4 cache types, wasting ~10x more memory.
+    pub const DEFAULT_VIEW_RETENTION_TIMEOUT: ViewDelta = ViewDelta::new(256);
 
     /// The default maximum number of blocks to repair at once.
-    pub const DEFAULT_MAX_REPAIR: NonZeroUsize = NZUsize!(10);
+    pub const DEFAULT_MAX_REPAIR: NonZeroUsize = NZUsize!(128);
 
     /// The default prunable items per section.
-    pub const DEFAULT_PRUNABLE_ITEMS_PER_SECTION: NonZeroU64 = NZU64!(10);
+    ///
+    /// Pruning operates at section granularity -- items are only freed when an
+    /// entire section falls below the retention window. A smaller section size
+    /// (256 vs 4096) makes pruning more responsive and reduces peak memory.
+    pub const DEFAULT_PRUNABLE_ITEMS_PER_SECTION: NonZeroU64 = NZU64!(256);
 
     /// The default replay buffer size.
-    pub const DEFAULT_REPLAY_BUFFER: NonZeroUsize = NZUsize!(1024);
+    pub const DEFAULT_REPLAY_BUFFER: NonZeroUsize = NZUsize!(8 * 1024 * 1024);
 
     /// The default key write buffer size.
-    pub const DEFAULT_KEY_WRITE_BUFFER: NonZeroUsize = NZUsize!(1024);
+    pub const DEFAULT_KEY_WRITE_BUFFER: NonZeroUsize = NZUsize!(1024 * 1024);
 
     /// The default value write buffer size.
-    pub const DEFAULT_VALUE_WRITE_BUFFER: NonZeroUsize = NZUsize!(1024);
+    pub const DEFAULT_VALUE_WRITE_BUFFER: NonZeroUsize = NZUsize!(1024 * 1024);
 
     /// The default blocks per epoch.
-    pub const DEFAULT_BLOCKS_PER_EPOCH: NonZeroU64 = NZU64!(20);
+    pub const DEFAULT_BLOCKS_PER_EPOCH: NonZeroU64 = NZU64!(u64::MAX);
 
     /// The default partition prefix.
     pub const DEFAULT_PARTITION_PREFIX: &'static str = "marshal";
@@ -99,6 +107,7 @@ impl ActorInitializer {
         finalizations_by_height: FC,
         finalized_blocks: FB,
         provider: P,
+        start: Start<P::Scheme, B::Digest, B>,
         page_cache: CacheRef,
         block_codec_config: B::Cfg,
     ) -> (
@@ -114,11 +123,50 @@ impl ActorInitializer {
         FB: Blocks<Block = B>,
         A: Acknowledgement,
     {
+        Self::init_with_strategy(
+            context,
+            finalizations_by_height,
+            finalized_blocks,
+            provider,
+            start,
+            page_cache,
+            block_codec_config,
+            Sequential,
+        )
+        .await
+    }
+
+    /// Initializes the marshal actor with a custom verification strategy.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub async fn init_with_strategy<E, B, P, FC, FB, A, S>(
+        context: E,
+        finalizations_by_height: FC,
+        finalized_blocks: FB,
+        provider: P,
+        start: Start<P::Scheme, B::Digest, B>,
+        page_cache: CacheRef,
+        block_codec_config: B::Cfg,
+        strategy: S,
+    ) -> (
+        Actor<E, Standard<B>, P, FC, FB, FixedEpocher, S, A>,
+        Mailbox<P::Scheme, Standard<B>>,
+        Height,
+    )
+    where
+        E: BufferPooler + CryptoRngCore + Spawner + Metrics + Clock + Storage,
+        B: Block,
+        P: Provider<Scope = Epoch, Scheme: Scheme<B::Digest>>,
+        FC: Certificates<BlockDigest = B::Digest, Commitment = B::Digest, Scheme = P::Scheme>,
+        FB: Blocks<Block = B>,
+        A: Acknowledgement,
+        S: Strategy,
+    {
         let config = Config {
             provider,
+            start,
             epocher: FixedEpocher::new(Self::DEFAULT_BLOCKS_PER_EPOCH),
             partition_prefix: Self::DEFAULT_PARTITION_PREFIX.to_string(),
-            mailbox_size: Self::DEFAULT_MAILBOX_SIZE,
+            mailbox_size: NZUsize!(Self::DEFAULT_MAILBOX_SIZE),
             view_retention_timeout: Self::DEFAULT_VIEW_RETENTION_TIMEOUT,
             prunable_items_per_section: Self::DEFAULT_PRUNABLE_ITEMS_PER_SECTION,
             page_cache,
@@ -128,22 +176,25 @@ impl ActorInitializer {
             block_codec_config,
             max_repair: Self::DEFAULT_MAX_REPAIR,
             max_pending_acks: NZUsize!(1024),
-            strategy: Sequential,
+            strategy,
         };
 
-        Actor::init(context, finalizations_by_height, finalized_blocks, config).await
+        let (actor, mailbox, processed_height) =
+            Actor::init(context, finalizations_by_height, finalized_blocks, config).await;
+        (actor, mailbox, processed_height.unwrap_or_else(Height::zero))
     }
 
     /// Initializes the marshal actor with a custom partition prefix.
     ///
     /// This is the same as [`init`](Self::init) but allows specifying a custom partition prefix
     /// for storage isolation. Useful for testing multiple nodes in the same process.
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     pub async fn init_with_partition<E, B, P, FC, FB, A>(
         context: E,
         finalizations_by_height: FC,
         finalized_blocks: FB,
         provider: P,
+        start: Start<P::Scheme, B::Digest, B>,
         page_cache: CacheRef,
         block_codec_config: B::Cfg,
         partition_prefix: impl Into<String>,
@@ -162,9 +213,10 @@ impl ActorInitializer {
     {
         let config = Config {
             provider,
+            start,
             epocher: FixedEpocher::new(Self::DEFAULT_BLOCKS_PER_EPOCH),
             partition_prefix: partition_prefix.into(),
-            mailbox_size: Self::DEFAULT_MAILBOX_SIZE,
+            mailbox_size: NZUsize!(Self::DEFAULT_MAILBOX_SIZE),
             view_retention_timeout: Self::DEFAULT_VIEW_RETENTION_TIMEOUT,
             prunable_items_per_section: Self::DEFAULT_PRUNABLE_ITEMS_PER_SECTION,
             page_cache,
@@ -177,7 +229,9 @@ impl ActorInitializer {
             strategy: Sequential,
         };
 
-        Actor::init(context, finalizations_by_height, finalized_blocks, config).await
+        let (actor, mailbox, processed_height) =
+            Actor::init(context, finalizations_by_height, finalized_blocks, config).await;
+        (actor, mailbox, processed_height.unwrap_or_else(Height::zero))
     }
 }
 
@@ -188,13 +242,13 @@ mod tests {
     #[test]
     fn test_defaults() {
         assert_eq!(ActorInitializer::DEFAULT_MAILBOX_SIZE, 1024);
-        assert_eq!(ActorInitializer::DEFAULT_VIEW_RETENTION_TIMEOUT, ViewDelta::new(10));
-        assert_eq!(ActorInitializer::DEFAULT_MAX_REPAIR.get(), 10);
-        assert_eq!(ActorInitializer::DEFAULT_PRUNABLE_ITEMS_PER_SECTION.get(), 10);
-        assert_eq!(ActorInitializer::DEFAULT_REPLAY_BUFFER.get(), 1024);
-        assert_eq!(ActorInitializer::DEFAULT_KEY_WRITE_BUFFER.get(), 1024);
-        assert_eq!(ActorInitializer::DEFAULT_VALUE_WRITE_BUFFER.get(), 1024);
-        assert_eq!(ActorInitializer::DEFAULT_BLOCKS_PER_EPOCH.get(), 20);
+        assert_eq!(ActorInitializer::DEFAULT_VIEW_RETENTION_TIMEOUT, ViewDelta::new(256));
+        assert_eq!(ActorInitializer::DEFAULT_MAX_REPAIR.get(), 128);
+        assert_eq!(ActorInitializer::DEFAULT_PRUNABLE_ITEMS_PER_SECTION.get(), 256);
+        assert_eq!(ActorInitializer::DEFAULT_REPLAY_BUFFER.get(), 8 * 1024 * 1024);
+        assert_eq!(ActorInitializer::DEFAULT_KEY_WRITE_BUFFER.get(), 1024 * 1024);
+        assert_eq!(ActorInitializer::DEFAULT_VALUE_WRITE_BUFFER.get(), 1024 * 1024);
+        assert_eq!(ActorInitializer::DEFAULT_BLOCKS_PER_EPOCH.get(), u64::MAX);
         assert_eq!(ActorInitializer::DEFAULT_PARTITION_PREFIX, "marshal");
     }
 }

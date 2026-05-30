@@ -37,6 +37,17 @@ pub enum ExecutionError {
     /// Code not found for hash.
     #[error("code not found: {0}")]
     CodeNotFound(B256),
+
+    /// QMDB commit failed during block execution.
+    ///
+    /// The REVM `DatabaseCommit` trait is infallible, so a QMDB write failure
+    /// during inter-transaction state commit cannot be propagated through the
+    /// return type. Instead, the storage layer sets an atomic flag that the
+    /// executor checks after the transaction loop. When this error is returned,
+    /// one or more transactions in the block may have executed against stale
+    /// state and the block's results must be discarded.
+    #[error("QMDB commit failed during block execution — results are unreliable")]
+    StateCommit,
 }
 
 impl DBErrorMarker for ExecutionError {}

@@ -134,13 +134,14 @@ mod tests {
 
     impl ConsensusApplication for MockApp {
         fn propose(&self, _parent: Digest) -> Result<Block, ConsensusError> {
-            Ok(Block {
-                parent: kora_domain::BlockId(alloy_primitives::B256::ZERO),
-                height: 0,
-                prevrandao: alloy_primitives::B256::ZERO,
-                state_root: kora_domain::StateRoot(alloy_primitives::B256::ZERO),
-                txs: Vec::new(),
-            })
+            Ok(Block::new(
+                kora_domain::BlockId(alloy_primitives::B256::ZERO),
+                0,
+                0,
+                alloy_primitives::B256::ZERO,
+                kora_domain::StateRoot(alloy_primitives::B256::ZERO),
+                Vec::new(),
+            ))
         }
 
         fn verify(&self, block: &Block) -> Result<Digest, ConsensusError> {
@@ -164,13 +165,14 @@ mod tests {
     #[test]
     fn mock_app_verify() {
         let app = MockApp;
-        let block = Block {
-            parent: kora_domain::BlockId(alloy_primitives::B256::ZERO),
-            height: 0,
-            prevrandao: alloy_primitives::B256::ZERO,
-            state_root: kora_domain::StateRoot(alloy_primitives::B256::ZERO),
-            txs: Vec::new(),
-        };
+        let block = Block::new(
+            kora_domain::BlockId(alloy_primitives::B256::ZERO),
+            0,
+            0,
+            alloy_primitives::B256::ZERO,
+            kora_domain::StateRoot(alloy_primitives::B256::ZERO),
+            Vec::new(),
+        );
         let digest = app.verify(&block).unwrap();
         assert_eq!(digest, block.commitment());
     }

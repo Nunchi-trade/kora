@@ -10,14 +10,26 @@ volumes:
   data_node2:
   data_node3:
   data_secondary0:
+  runtime_node0:
+  runtime_node1:
+  runtime_node2:
+  runtime_node3:
+  runtime_secondary0:
   shared_config:
+  startup_barrier:
   prometheus_data:
   grafana_data:
+  loki_data:
 
 x-node-common: &node-common
   image: kora:local
   networks:
     - kora-net
+  logging:
+    driver: json-file
+    options:
+      max-size: "50m"
+      max-file: "5"
   environment:
     - RUST_LOG=${RUST_LOG:-info}
     - CHAIN_ID=${CHAIN_ID:-1337}
@@ -25,15 +37,39 @@ x-node-common: &node-common
 x-validator-common: &validator-common
   <<: *node-common
   restart: unless-stopped
+  init: true
+  stop_grace_period: 5s
+  stop_signal: SIGTERM
+  read_only: true
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  ulimits:
+    nofile:
+      soft: 65536
+      hard: 65536
+    core: 0
+  deploy:
+    resources:
+      limits:
+        memory: 4G
+        cpus: "2"
+        pids: 4096
+  tmpfs:
+    - /tmp:size=64m,mode=1777
   healthcheck:
     test: ["CMD", "/scripts/healthcheck.sh"]
-    interval: 10s
-    timeout: 5s
-    retries: 3
-    start_period: 30s
+    interval: 30s
+    timeout: 10s
+    retries: 6
+    start_period: 120s
   environment:
     - RUST_LOG=${RUST_LOG:-info}
     - CHAIN_ID=${CHAIN_ID:-1337}
+    - KORA_RUNTIME_DIR=${KORA_RUNTIME_DIR:-/runtime}
+    - KORA_CHECKPOINT_INTERVAL=${KORA_CHECKPOINT_INTERVAL:-256}
+    - TX_GOSSIP=${TX_GOSSIP:-true}
     - HEALTHCHECK_MODE=ready
 
 services:
@@ -48,11 +84,10 @@ services:
         /usr/local/bin/keygen setup \
           --validators=4 \
           --secondary-peers=1 \
-          --threshold=3 \
           --chain-id=${CHAIN_ID:-1337} \
           --output-dir=/shared && \
         echo "[init] Setting permissions..." && \
-        chown -R 1000:1000 /shared/node0 /shared/node1 /shared/node2 /shared/node3 /shared/secondary0 && \
+        chown -R 1000:1000 /shared/node0 /shared/node1 /shared/node2 /shared/node3 /shared/secondary0 /barrier && \
         echo "[init] Setup complete (run DKG ceremony next)"
     volumes:
       - shared_config:/shared
@@ -61,6 +96,7 @@ services:
       - data_node2:/shared/node2
       - data_node3:/shared/node3
       - data_secondary0:/shared/secondary0
+      - startup_barrier:/barrier
 
   # Setup + trusted dealer DKG (for fast local dev)
   init-config:
@@ -69,20 +105,24 @@ services:
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |
+        if [ -f /shared/node0/share.key ] && [ -f /shared/node0/output.json ]; then
+            echo "[init] DKG already completed, skipping"
+            exit 0
+        fi
+        echo "[init] Clearing startup barrier from previous runs..." && \
+        rm -f /barrier/*.ready && \
         echo "[init] Running keygen setup..." && \
         /usr/local/bin/keygen setup \
           --validators=4 \
           --secondary-peers=1 \
-          --threshold=3 \
           --chain-id=${CHAIN_ID:-1337} \
           --output-dir=/shared && \
         echo "[init] Running trusted dealer DKG..." && \
         /usr/local/bin/keygen dkg-deal \
           --validators=4 \
-          --threshold=3 \
           --output-dir=/shared && \
         echo "[init] Setting permissions..." && \
-        chown -R 1000:1000 /shared/node0 /shared/node1 /shared/node2 /shared/node3 /shared/secondary0 && \
+        chown -R 1000:1000 /shared/node0 /shared/node1 /shared/node2 /shared/node3 /shared/secondary0 /barrier && \
         echo "[init] Init complete"
     volumes:
       - shared_config:/shared
@@ -91,6 +131,7 @@ services:
       - data_node2:/shared/node2
       - data_node3:/shared/node3
       - data_secondary0:/shared/secondary0
+      - startup_barrier:/barrier
 
   # Interactive DKG nodes - run ceremony then exit
   dkg-node0:
@@ -182,86 +223,116 @@ services:
   validator-node0:
     <<: *validator-common
     hostname: node0
+    depends_on:
+      init-config:
+        condition: service_completed_successfully
     entrypoint: ["/scripts/entrypoint.sh", "validator"]
     volumes:
       - shared_config:/shared:ro
       - data_node0:/data
+      - runtime_node0:/runtime
+      - startup_barrier:/barrier
     environment:
       - RUST_LOG=${RUST_LOG:-info}
       - CHAIN_ID=${CHAIN_ID:-1337}
+      - KORA_RUNTIME_DIR=${KORA_RUNTIME_DIR:-/runtime}
+      - KORA_CHECKPOINT_INTERVAL=${KORA_CHECKPOINT_INTERVAL:-256}
+      - TX_GOSSIP=${TX_GOSSIP:-true}
       - VALIDATOR_INDEX=0
+      - VALIDATOR_COUNT=4
       - IS_BOOTSTRAP=true
+      - PEER_NODES=node0,node1,node2,node3
       - HEALTHCHECK_MODE=ready
     ports:
       - "30400:30303"
-      - "8545:8545"
-      - "9000:9002"
+      - "127.0.0.1:8545:8545"
+      - "127.0.0.1:9000:9002"
 
   validator-node1:
     <<: *validator-common
     hostname: node1
     depends_on:
-      validator-node0:
-        condition: service_healthy
+      init-config:
+        condition: service_completed_successfully
     entrypoint: ["/scripts/entrypoint.sh", "validator"]
     volumes:
       - shared_config:/shared:ro
       - data_node1:/data
+      - runtime_node1:/runtime
+      - startup_barrier:/barrier
     environment:
       - RUST_LOG=${RUST_LOG:-info}
       - CHAIN_ID=${CHAIN_ID:-1337}
+      - KORA_RUNTIME_DIR=${KORA_RUNTIME_DIR:-/runtime}
+      - KORA_CHECKPOINT_INTERVAL=${KORA_CHECKPOINT_INTERVAL:-256}
+      - TX_GOSSIP=${TX_GOSSIP:-true}
       - VALIDATOR_INDEX=1
-      - IS_BOOTSTRAP=false
-      - BOOTSTRAP_PEERS=node0:30303
+      - VALIDATOR_COUNT=4
+      - IS_BOOTSTRAP=true
+      - PEER_NODES=node0,node1,node2,node3
       - HEALTHCHECK_MODE=ready
     ports:
       - "30401:30303"
-      - "8546:8545"
-      - "9001:9002"
+      - "127.0.0.1:8546:8545"
+      - "127.0.0.1:9001:9002"
 
   validator-node2:
     <<: *validator-common
     hostname: node2
     depends_on:
-      validator-node0:
-        condition: service_healthy
+      init-config:
+        condition: service_completed_successfully
     entrypoint: ["/scripts/entrypoint.sh", "validator"]
     volumes:
       - shared_config:/shared:ro
       - data_node2:/data
+      - runtime_node2:/runtime
+      - startup_barrier:/barrier
     environment:
       - RUST_LOG=${RUST_LOG:-info}
       - CHAIN_ID=${CHAIN_ID:-1337}
+      - KORA_RUNTIME_DIR=${KORA_RUNTIME_DIR:-/runtime}
+      - KORA_CHECKPOINT_INTERVAL=${KORA_CHECKPOINT_INTERVAL:-256}
+      - TX_GOSSIP=${TX_GOSSIP:-true}
       - VALIDATOR_INDEX=2
+      - VALIDATOR_COUNT=4
       - IS_BOOTSTRAP=false
-      - BOOTSTRAP_PEERS=node0:30303
+      - BOOTSTRAP_PEERS=node0:30303,node1:30303
+      - PEER_NODES=node0,node1,node2,node3
       - HEALTHCHECK_MODE=ready
     ports:
       - "30402:30303"
-      - "8547:8545"
-      - "9002:9002"
+      - "127.0.0.1:8547:8545"
+      - "127.0.0.1:9002:9002"
 
   validator-node3:
     <<: *validator-common
     hostname: node3
     depends_on:
-      validator-node0:
-        condition: service_healthy
+      init-config:
+        condition: service_completed_successfully
     entrypoint: ["/scripts/entrypoint.sh", "validator"]
     volumes:
       - shared_config:/shared:ro
       - data_node3:/data
+      - runtime_node3:/runtime
+      - startup_barrier:/barrier
     environment:
       - RUST_LOG=${RUST_LOG:-info}
       - CHAIN_ID=${CHAIN_ID:-1337}
+      - KORA_RUNTIME_DIR=${KORA_RUNTIME_DIR:-/runtime}
+      - KORA_CHECKPOINT_INTERVAL=${KORA_CHECKPOINT_INTERVAL:-256}
+      - TX_GOSSIP=${TX_GOSSIP:-true}
       - VALIDATOR_INDEX=3
+      - VALIDATOR_COUNT=4
       - IS_BOOTSTRAP=false
-      - BOOTSTRAP_PEERS=node0:30303
+      - BOOTSTRAP_PEERS=node0:30303,node1:30303
+      - PEER_NODES=node0,node1,node2,node3
       - HEALTHCHECK_MODE=ready
     ports:
       - "30403:30303"
-      - "8548:8545"
-      - "9003:9002"
+      - "127.0.0.1:8548:8545"
+      - "127.0.0.1:9003:9002"
 
   secondary-node0:
     <<: *validator-common
@@ -273,45 +344,115 @@ services:
     volumes:
       - shared_config:/shared:ro
       - data_secondary0:/data
+      - runtime_secondary0:/runtime
     environment:
       - RUST_LOG=${RUST_LOG:-info}
       - CHAIN_ID=${CHAIN_ID:-1337}
+      - KORA_RUNTIME_DIR=${KORA_RUNTIME_DIR:-/runtime}
+      - KORA_CHECKPOINT_INTERVAL=${KORA_CHECKPOINT_INTERVAL:-256}
       - IS_BOOTSTRAP=false
-      - BOOTSTRAP_PEERS=node0:30303
-      - HEALTHCHECK_MODE=ready
+      - BOOTSTRAP_PEERS=node0:30303,node1:30303
+      - HEALTHCHECK_MODE=p2p
     ports:
       - "30500:30303"
+      - "127.0.0.1:8549:8545"
+      - "127.0.0.1:9004:9002"
 
   prometheus:
     image: prom/prometheus:latest
     profiles: ["observability"]
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=64m,mode=1777
     volumes:
       - prometheus_data:/prometheus
       - ../config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../config/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - ../config/recording-rules.yml:/etc/prometheus/recording-rules.yml:ro
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
       - '--web.enable-lifecycle'
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
+    networks:
+      - kora-net
+
+  loki:
+    image: grafana/loki:3.4.2
+    profiles: ["observability"]
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    volumes:
+      - loki_data:/loki
+      - ../config/loki.yml:/etc/loki/local-config.yaml:ro
+    command: -config.file=/etc/loki/local-config.yaml
+    ports:
+      - "127.0.0.1:3100:3100"
+    networks:
+      - kora-net
+
+  promtail:
+    image: grafana/promtail:3.4.2
+    profiles: ["observability"]
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    depends_on:
+      - loki
+    volumes:
+      - ../config/promtail.yml:/etc/promtail/config.yml:ro
+      # SECURITY: Docker socket is mounted read-only so Promtail can discover
+      # container labels for log collection. This grants the container visibility
+      # into all Docker API metadata. In production, consider using a socket
+      # proxy (e.g. tecnativa/docker-socket-proxy) to restrict API access.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: -config.file=/etc/promtail/config.yml
     networks:
       - kora-net
 
   grafana:
     image: grafana/grafana:latest
     profiles: ["observability"]
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=64m,mode=1777
     depends_on:
       - prometheus
+      - loki
     volumes:
       - grafana_data:/var/lib/grafana
       - ../grafana/provisioning:/etc/grafana/provisioning:ro
       - ../grafana/dashboards:/var/lib/grafana/dashboards:ro
     environment:
       - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GF_SECURITY_ADMIN_PASSWORD:-admin}
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      # read_only rootfs prevents writing to /var/log/grafana; use console only
+      - GF_LOG_MODE=console
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     networks:
       - kora-net

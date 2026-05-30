@@ -1,0 +1,8 @@
+---
+- name: Build kora:local image with buildx bake
+  ansible.builtin.command:
+    cmd: docker buildx bake --allow=fs.read=.. --load -f docker-bake.hcl kora-local
+    chdir: "{{ remote_project_dir }}/docker"
+  async: "{{ build_timeout }}"
+  poll: "{{ build_poll }}"
+  changed_when: true

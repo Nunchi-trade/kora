@@ -1,0 +1,214 @@
+groups:
+  # Pre-compute expensive histogram quantiles so dashboards load fast
+  - name: performance_recording
+    interval: 10s
+    rules:
+      # Block build percentiles
+      - record: kora:build_duration:p50
+        expr: histogram_quantile(0.50, sum(rate(marshaled_build_duration_bucket[5m])) by (le))
+      - record: kora:build_duration:p95
+        expr: histogram_quantile(0.95, sum(rate(marshaled_build_duration_bucket[5m])) by (le))
+      - record: kora:build_duration:p99
+        expr: histogram_quantile(0.99, sum(rate(marshaled_build_duration_bucket[5m])) by (le))
+
+      # Finalization latency percentiles
+      - record: kora:finalization_latency:p50
+        expr: histogram_quantile(0.50, sum(rate(engine_voter_finalization_latency_bucket[5m])) by (le))
+      - record: kora:finalization_latency:p95
+        expr: histogram_quantile(0.95, sum(rate(engine_voter_finalization_latency_bucket[5m])) by (le))
+      - record: kora:finalization_latency:p99
+        expr: histogram_quantile(0.99, sum(rate(engine_voter_finalization_latency_bucket[5m])) by (le))
+
+      # Notarization latency percentiles
+      - record: kora:notarization_latency:p50
+        expr: histogram_quantile(0.50, sum(rate(engine_voter_notarization_latency_bucket[5m])) by (le))
+      - record: kora:notarization_latency:p95
+        expr: histogram_quantile(0.95, sum(rate(engine_voter_notarization_latency_bucket[5m])) by (le))
+      - record: kora:notarization_latency:p99
+        expr: histogram_quantile(0.99, sum(rate(engine_voter_notarization_latency_bucket[5m])) by (le))
+
+      # Sig verify percentiles
+      - record: kora:verify_latency:p50
+        expr: histogram_quantile(0.50, sum(rate(engine_batcher_verify_latency_bucket[5m])) by (le))
+      - record: kora:verify_latency:p95
+        expr: histogram_quantile(0.95, sum(rate(engine_batcher_verify_latency_bucket[5m])) by (le))
+
+      # Resolver fetch percentiles
+      - record: kora:resolver_fetch:p50
+        expr: histogram_quantile(0.50, sum(rate(engine_resolver_resolver_fetch_duration_bucket[5m])) by (le))
+      - record: kora:resolver_fetch:p95
+        expr: histogram_quantile(0.95, sum(rate(engine_resolver_resolver_fetch_duration_bucket[5m])) by (le))
+      - record: kora:resolver_fetch:p99
+        expr: histogram_quantile(0.99, sum(rate(engine_resolver_resolver_fetch_duration_bucket[5m])) by (le))
+
+  - name: throughput_recording
+    interval: 10s
+    rules:
+      # Core throughput — use sum of per-instance rates to preserve visibility
+      # when individual nodes drop out, instead of avg() which masks failures
+      - record: kora:blocks_per_sec
+        expr: sum(rate(finalized_height{job="kora-validators"}[1m])) / clamp_min(count(up{job="kora-validators"} == 1), 1)
+      - record: kora:views_per_sec
+        expr: avg(rate(engine_voter_state_current_view{job="kora-validators"}[1m]))
+
+      # Effective block time
+      - record: kora:block_time
+        expr: 1 / clamp_min(avg(rate(finalized_height[1m])), 0.001)
+
+      # Consensus efficiency (finalized / total views)
+      - record: kora:consensus_efficiency
+        expr: avg(rate(finalized_height[5m])) / clamp_min(avg(rate(engine_voter_state_current_view[5m])), 0.001)
+
+      # Skip rate (wasted views)
+      - record: kora:skip_rate
+        expr: 1 - (avg(rate(finalized_height[5m])) / clamp_min(avg(rate(engine_voter_state_current_view[5m])), 0.001))
+
+      # Height drift
+      - record: kora:height_drift
+        expr: max(finalized_height) - min(finalized_height)
+
+      # Nullification rate
+      - record: kora:nullification_rate
+        expr: sum(rate(engine_voter_state_nullifications_total[5m]))
+
+      # Network cost per block (bytes)
+      - record: kora:network_bytes_per_block
+        expr: avg(rate(runtime_outbound_bandwidth_total[5m]) + rate(runtime_inbound_bandwidth_total[5m])) / clamp_min(avg(rate(finalized_height[5m])), 0.001)
+
+      # Storage write rate
+      - record: kora:storage_write_rate
+        expr: sum(rate(runtime_storage_write_bytes_total[1m]))
+      - record: kora:storage_iops
+        expr: sum(rate(runtime_storage_writes_total[1m]))
+
+  # Map Commonware's generic data_N channel labels to human-readable names.
+  # Channel assignments:
+  #   data_0 = simplex votes
+  #   data_1 = simplex certs
+  #   data_2 = simplex resolver
+  #   data_3 = broadcast blocks
+  #   data_4 = marshal backfill
+  #
+  # Each metric uses a single rule with `or` to combine all channels,
+  # producing one time series per channel label value. This avoids the
+  # duplicate-record-name bug where Prometheus only evaluates the last
+  # rule when multiple rules share the same record name.
+  - name: p2p_channel_recording
+    interval: 10s
+    rules:
+      # ---------- Messages sent per channel (aggregated across peers) ----------
+      - record: kora:p2p:channel_sent:rate1m
+        expr: >-
+          label_replace(
+            sum by (message) (rate(network_spawner_messages_sent_total{message="data_0"}[1m])),
+            "channel", "simplex_votes", "message", ".*"
+          )
+          or
+          label_replace(
+            sum by (message) (rate(network_spawner_messages_sent_total{message="data_1"}[1m])),
+            "channel", "simplex_certs", "message", ".*"
+          )
+          or
+          label_replace(
+            sum by (message) (rate(network_spawner_messages_sent_total{message="data_2"}[1m])),
+            "channel", "simplex_resolver", "message", ".*"
+          )
+          or
+          label_replace(
+            sum by (message) (rate(network_spawner_messages_sent_total{message="data_3"}[1m])),
+            "channel", "broadcast_blocks", "message", ".*"
+          )
+          or
+          label_replace(
+            sum by (message) (rate(network_spawner_messages_sent_total{message="data_4"}[1m])),
+            "channel", "marshal_backfill", "message", ".*"
+          )
+
+      # ---------- Messages received per channel ----------
+      - record: kora:p2p:channel_recv:rate1m
+        expr: >-
+          label_replace(
+            sum by (message) (rate(network_spawner_messages_received_total{message="data_0"}[1m])),
+            "channel", "simplex_votes", "message", ".*"
+          )
+          or
+          label_replace(
+            sum by (message) (rate(network_spawner_messages_received_total{message="data_1"}[1m])),
+            "channel", "simplex_certs", "message", ".*"
+          )
+          or
+          label_replace(
+            sum by (message) (rate(network_spawner_messages_received_total{message="data_2"}[1m])),
+            "channel", "simplex_resolver", "message", ".*"
+          )
+          or
+          label_replace(
+            sum by (message) (rate(network_spawner_messages_received_total{message="data_3"}[1m])),
+            "channel", "broadcast_blocks", "message", ".*"
+          )
+          or
+          label_replace(
+            sum by (message) (rate(network_spawner_messages_received_total{message="data_4"}[1m])),
+            "channel", "marshal_backfill", "message", ".*"
+          )
+
+      # ---------- Messages dropped per channel ----------
+      - record: kora:p2p:channel_dropped:rate1m
+        expr: >-
+          label_replace(
+            sum by (message) (rate(network_router_messages_dropped_total{message="data_0"}[1m])),
+            "channel", "simplex_votes", "message", ".*"
+          )
+          or
+          label_replace(
+            sum by (message) (rate(network_router_messages_dropped_total{message="data_1"}[1m])),
+            "channel", "simplex_certs", "message", ".*"
+          )
+          or
+          label_replace(
+            sum by (message) (rate(network_router_messages_dropped_total{message="data_2"}[1m])),
+            "channel", "simplex_resolver", "message", ".*"
+          )
+          or
+          label_replace(
+            sum by (message) (rate(network_router_messages_dropped_total{message="data_3"}[1m])),
+            "channel", "broadcast_blocks", "message", ".*"
+          )
+          or
+          label_replace(
+            sum by (message) (rate(network_router_messages_dropped_total{message="data_4"}[1m])),
+            "channel", "marshal_backfill", "message", ".*"
+          )
+
+      # ---------- Aggregate P2P health ----------
+      # Total messages dropped/s across all channels
+      - record: kora:p2p:total_dropped:rate1m
+        expr: sum(rate(network_router_messages_dropped_total[1m]))
+
+      # Total messages rate-limited/s
+      - record: kora:p2p:total_rate_limited:rate1m
+        expr: sum(rate(network_spawner_messages_rate_limited_total[1m]))
+
+      # Drop ratio: fraction of received messages that were dropped.
+      # Returns 0 when no messages are flowing (avoids divide-by-zero
+      # producing NaN, which was previously masked by clamp_min(…, 1)
+      # inflating the ratio when receive rate was below 1 msg/s).
+      - record: kora:p2p:drop_ratio
+        expr: >-
+          sum(rate(network_router_messages_dropped_total[5m]))
+          /
+          sum(rate(network_spawner_messages_received_total[5m]))
+          or vector(0)
+
+      # Peer count (tracked peers in the directory)
+      - record: kora:p2p:tracked_peers
+        expr: avg(network_tracker_directory_tracked)
+
+      # Message delivery ratio (fraction of sent messages that are not dropped)
+      - record: kora:p2p:delivery_ratio
+        expr: >-
+          1 - (
+            sum(rate(network_router_messages_dropped_total[5m]))
+            /
+            clamp_min(sum(rate(network_spawner_messages_sent_total[5m])), 1)
+          )

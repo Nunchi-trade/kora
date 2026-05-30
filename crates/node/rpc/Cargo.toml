@@ -12,9 +12,12 @@ workspace = true
 
 [dependencies]
 # HTTP server
-axum = "0.8"
-tower = { version = "0.5", features = ["limit"] }
+axum.workspace = true
+tower = { version = "0.5", features = ["limit", "util"] }
 tower-http = { version = "0.6", features = ["cors"] }
+# jsonrpsee 0.24 depends on tower 0.4; its `set_http_middleware` expects
+# tower 0.4's `ServiceBuilder`, so we keep a renamed 0.4 dependency.
+tower_04 = { package = "tower", version = "0.4" }
 
 # JSON-RPC
 jsonrpsee = { version = "0.24", features = ["server", "macros"] }
@@ -30,6 +33,7 @@ async-trait.workspace = true
 
 # Serialization
 serde.workspace = true
+serde_json.workspace = true
 
 # Error handling
 thiserror.workspace = true
@@ -37,16 +41,20 @@ thiserror.workspace = true
 # Tracing
 tracing.workspace = true
 
+# Metrics
+prometheus-client.workspace = true
+
 # Misc
 parking_lot = "0.12"
 
 # Kora crates
+kora-domain = { path = "../domain" }
 kora-executor = { path = "../executor" }
 kora-indexer = { path = "../../storage/indexer" }
 kora-traits = { path = "../../storage/traits" }
+kora-txpool = { path = "../txpool" }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "macros"] }
-serde_json.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "time"] }
 k256.workspace = true
 sha3.workspace = true

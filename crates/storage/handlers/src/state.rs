@@ -51,6 +51,10 @@ where
             )
     }
 
+    fn take_commit_failure(&self) -> bool {
+        self.take_commit_failure()
+    }
+
     async fn storage(&self, address: &Address, slot: &U256) -> Result<U256, StateDbError> {
         let store = self.read().await;
 

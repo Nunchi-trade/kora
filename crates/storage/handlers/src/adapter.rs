@@ -17,6 +17,7 @@ use revm::{
     primitives::AddressMap,
     state::Account,
 };
+use tracing::error;
 
 use crate::{error::HandleError, qmdb::QmdbHandle};
 
@@ -220,8 +221,12 @@ where
                 continue;
             }
 
-            let storage: BTreeMap<U256, U256> =
-                account.storage.iter().map(|(k, v)| (*k, v.present_value())).collect();
+            let storage: BTreeMap<U256, U256> = account
+                .storage
+                .iter()
+                .filter(|(_, v)| v.is_changed())
+                .map(|(k, v)| (*k, v.present_value()))
+                .collect();
 
             let code = account.info.code.as_ref().map(|c| c.bytes().to_vec());
 
@@ -239,8 +244,17 @@ where
             );
         }
 
-        // Ignore errors in DatabaseCommit (matches REVM's signature)
-        let _ = block_on(Self::commit(self, changeset));
+        // REVM's `DatabaseCommit::commit` returns `()`, so we cannot propagate
+        // errors through the return type.  Instead we log at error level and
+        // set an atomic flag that callers can check after execution.
+        if let Err(err) = block_on(Self::commit(self, changeset)) {
+            error!(
+                %err,
+                "CRITICAL: DatabaseCommit failed — QMDB write error swallowed by infallible \
+                 REVM trait. Subsequent transactions in this block may execute against stale state."
+            );
+            self.mark_commit_failed();
+        }
     }
 }
 

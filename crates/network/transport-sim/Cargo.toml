@@ -21,6 +21,5 @@ commonware-cryptography.workspace = true
 commonware-utils.workspace = true
 
 governor.workspace = true
-prometheus-client.workspace = true
 rand.workspace = true
 thiserror.workspace = true

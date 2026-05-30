@@ -1,0 +1,12 @@
+---
+# Repeatable deploy: sync code → build image → start devnet
+- name: Deploy devnet
+  hosts: devnet
+  become: true
+  roles:
+    - role: sync
+      tags: [sync]
+    - role: build
+      tags: [build]
+    - role: devnet
+      tags: [devnet]

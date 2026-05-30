@@ -38,7 +38,7 @@ RUN cargo chef cook --release --recipe-path recipe.json
 COPY . .
 
 # Build all binaries
-RUN cargo build --release -p kora -p keygen
+RUN cargo build --release -p kora -p keygen -p loadgen
 
 # ───────────────────────────────────────────────────────────────────────────
 # Stage 4: Runtime - Minimal production image
@@ -56,12 +56,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Create non-root user for security
 RUN useradd -m -u 1000 -s /bin/bash kora && \
-    mkdir -p /var/lib/kora /etc/kora /data /shared && \
-    chown -R kora:kora /var/lib/kora /etc/kora /data /shared
+    mkdir -p /var/lib/kora /etc/kora /data /shared /runtime && \
+    chown -R kora:kora /var/lib/kora /etc/kora /data /shared /runtime
 
 # Copy binaries from builder
 COPY --from=builder /app/target/release/kora /usr/local/bin/
 COPY --from=builder /app/target/release/keygen /usr/local/bin/
+COPY --from=builder /app/target/release/loadgen /usr/local/bin/
 
 # Copy entrypoint scripts
 COPY docker/scripts/ /scripts/
@@ -80,6 +81,13 @@ EXPOSE 30303 8545 8546 9002
 
 # Default volumes
 VOLUME ["/data", "/shared"]
+
+# Runtime health check shared with Compose. Override HEALTHCHECK_MODE to
+# switch the check: dkg (share.key + output.json exist), p2p (port 30303),
+# ready (eth_blockNumber + stall detection). Default mode is p2p.
+# The compose file overrides these timings; these are conservative defaults.
+HEALTHCHECK --interval=30s --timeout=10s --retries=6 --start-period=120s \
+    CMD /scripts/healthcheck.sh
 
 # Default entrypoint - can be overridden for different modes
 ENTRYPOINT ["/scripts/entrypoint.sh"]

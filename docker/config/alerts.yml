@@ -1,0 +1,317 @@
+groups:
+  - name: consensus_critical
+    rules:
+      # Node completely down
+      - alert: ValidatorDown
+        expr: up{job="kora-validators"} == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Validator {{ $labels.instance }} is down"
+          description: "Validator has been unreachable for 30 seconds. Check container health."
+
+      # Consensus has stalled — no blocks finalized
+      - alert: ConsensusStall
+        expr: rate(finalized_height{job="kora-validators"}[5m]) < 0.001 and up{job="kora-validators"} == 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Consensus stall on {{ $labels.instance }}"
+          description: "No blocks finalized in 5 minutes while node is up. Likely mempool poisoning or quorum loss."
+
+      # Voter panic detection — zero finalization rate with node up
+      - alert: VoterCrash
+        expr: |
+          (rate(finalized_height{job="kora-validators"}[1m]) < 0.001)
+          and (up{job="kora-validators"} == 1)
+          and (rate(engine_voter_state_current_view{job="kora-validators"}[1m]) < 0.001)
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Possible voter crash on {{ $labels.instance }}"
+          description: "Node is up but view is not advancing. Voter actor may have panicked."
+
+  - name: consensus_warnings
+    rules:
+      # Nodes diverging in height
+      - alert: HeightDrift
+        expr: max(finalized_height{job="kora-validators"}) - min(finalized_height{job="kora-validators"}) > 10
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Validator height drift exceeds 10 blocks"
+          description: "Max height={{ $value }}. A node may be struggling to keep up or is stuck in catch-up."
+
+      # High nullification rate — wasted consensus rounds.
+      # Healthy baseline is ~27% nullification rate (~44 nullifications/s at
+      # full throughput). Threshold set above steady-state to avoid false alarms.
+      - alert: HighNullificationRate
+        expr: sum(rate(engine_voter_state_nullifications_total{job="kora-validators"}[5m])) > 60
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Nullification rate is {{ $value }}/s"
+          description: "High nullification rate indicates block building failures. Check executor errors and mempool state."
+
+      # Skip rate elevated — approaching stall territory.
+      # Healthy 4-validator network has ~27-33% skip rate (round-robin
+      # leadership means some views naturally nullify). Threshold raised
+      # to 45% to avoid alerting on steady-state behavior.
+      - alert: HighSkipRate
+        expr: |
+          (1 - (avg(rate(finalized_height{job="kora-validators"}[5m])) / avg(rate(engine_voter_state_current_view{job="kora-validators"}[5m])))) > 0.45
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Skip rate is {{ $value | humanizePercentage }}"
+          description: "Over 45% of consensus views are wasted. Healthy baseline is ~33%; investigate if sustained."
+
+      # High timeout rate — correlated with nullifications in steady state.
+      # Raised threshold above healthy baseline to reduce false positives.
+      - alert: HighTimeoutRate
+        expr: sum(rate(engine_voter_state_timeouts_total{job="kora-validators"}[5m])) > 60
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Timeout rate is {{ $value }}/s"
+          description: "High timeout rate. Leaders may be failing to propose blocks in time."
+
+      # Node catching up poorly — finalization rate much lower than peers
+      - alert: NodeLagging
+        expr: |
+          rate(finalized_height[5m]) < 0.1 * avg(rate(finalized_height[5m]))
+          and rate(finalized_height[5m]) > 0
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Node {{ $labels.instance }} is lagging behind peers"
+          description: "Finalization rate is much lower than cluster average. Node may have resolver catch-up issues."
+
+  - name: resource_alerts
+    rules:
+      # Memory growing rapidly
+      - alert: HighMemoryUsage
+        expr: runtime_process_rss > 2e9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory on {{ $labels.instance }}: {{ $value | humanize1024 }}B"
+          description: "RSS memory exceeds 2GB. Possible memory leak or unbounded mempool growth."
+
+      # Broadcast failures spiking
+      - alert: BroadcastFailures
+        expr: rate(broadcast_get_total{status="Failure"}[5m]) > 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Broadcast failures on {{ $labels.instance }}"
+          description: "Block broadcast is failing. P2P connectivity may be degraded."
+
+      # View advancing but no finalization — quorum issue
+      - alert: ViewWithoutFinalization
+        expr: |
+          rate(engine_voter_state_current_view{job="kora-validators"}[5m]) > 0
+          and rate(finalized_height{job="kora-validators"}[5m]) < 0.001
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Views advancing without finalization on {{ $labels.instance }}"
+          description: "Consensus rounds are progressing but no blocks are being finalized. Possible quorum loss or executor failures."
+
+  - name: performance_alerts
+    rules:
+      # Block build time approaching leader timeout
+      - alert: SlowBlockBuild
+        expr: kora:build_duration:p95 > 0.5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Block build p95 is {{ $value | humanizeDuration }}"
+          description: "Block build time p95 exceeding 500ms (leader timeout is 1s). ECDSA recovery or mempool size may be the cause."
+
+      # Block build time critical — will cause nullifications
+      - alert: CriticalBlockBuild
+        expr: kora:build_duration:p99 > 0.8
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Block build p99 at {{ $value | humanizeDuration }} — imminent nullifications"
+          description: "Block build is approaching 1s leader timeout. Proposals will fail. Reduce BLOCK_CODEC_MAX_TXS or fix mempool."
+
+      # Finalization latency degrading
+      - alert: HighFinalizationLatency
+        expr: kora:finalization_latency:p95 > 2
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Finalization p95 is {{ $value | humanizeDuration }}"
+          description: "Taking over 2s to collect 2/3+ votes. Check network connectivity and signature verification."
+
+      # Throughput dropped significantly from recent baseline
+      - alert: ThroughputDrop
+        expr: |
+          kora:blocks_per_sec < 0.3 * avg_over_time(kora:blocks_per_sec[1h])
+          and kora:blocks_per_sec > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Throughput dropped to {{ $value }} blocks/sec (70%+ drop from 1h average)"
+          description: "Block production rate has dropped significantly. Check build time, nullification rate, and network."
+
+      # Consensus efficiency dropping — early warning before stall
+      - alert: LowConsensusEfficiency
+        expr: kora:consensus_efficiency < 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Consensus efficiency at {{ $value | humanizePercentage }}"
+          description: "Less than 50% of views produce blocks. This preceded the production stall (which was at 67%)."
+
+      # Resolver peers blocked — catch-up impaired
+      - alert: ResolverPeersBlocked
+        expr: engine_resolver_resolver_peers_blocked > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Node {{ $labels.instance }} has {{ $value }} blocked resolver peers"
+          description: "Blocked peers cannot provide blocks for catch-up. This caused permanent stall after node restarts."
+
+      # Memory growth rate (leak detection).
+      # Previous threshold of 10MB/s (10e6) was too sensitive — normal state
+      # accumulation and mempool churn can easily produce transient spikes.
+      # Raised to 50MB/s to catch genuine leaks without false positives.
+      - alert: MemoryLeakSuspected
+        expr: deriv(runtime_process_rss[15m]) > 50e6
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Memory growing at {{ $value | humanize }}B/s on {{ $labels.instance }}"
+          description: "Sustained memory growth >50MB/s for 10min. Possible unbounded mempool or state accumulation."
+
+      # Storage write stall (persistence blocked)
+      - alert: StorageWriteStall
+        expr: |
+          rate(finalized_height[5m]) > 0
+          and rate(runtime_storage_writes_total[5m]) < 0.001
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No storage writes on {{ $labels.instance }} despite finalization"
+          description: "Blocks are finalizing but nothing is being persisted. State will be lost on restart."
+
+  - name: transaction_alerts
+    rules:
+      # Chain stall: views advancing but no blocks finalized
+      - alert: MempoolPoisoning
+        expr: |
+          sum(rate(engine_voter_state_current_view[2m])) > 0
+          and sum(rate(finalized_height[2m])) < 0.001
+          and sum(rate(engine_voter_state_nullifications_total[2m])) > 5
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Chain stalled with active nullifications — likely mempool poisoning"
+          description: "Views are advancing but no blocks finalize. High nullification rate suggests every proposal fails (executor abort on bad tx). Requires chain reset."
+
+      # Every leader failing to propose
+      - alert: AllLeadersFailing
+        expr: |
+          sum(rate(engine_voter_state_nullifications_total[2m])) > 20
+          and sum(rate(finalized_height[2m])) < 0.001
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "All leaders failing to propose — {{ $value }} nullifications/s"
+          description: "No blocks finalized and nullification rate is very high. Check for invalid transactions in mempool."
+
+      # Sudden efficiency drop (pre-stall warning)
+      - alert: EfficiencyCliff
+        expr: |
+          kora:consensus_efficiency < 0.1
+          and kora:consensus_efficiency offset 5m > 0.5
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Consensus efficiency crashed from >50% to {{ $value | humanizePercentage }}"
+          description: "Efficiency dropped off a cliff. This pattern precedes permanent stalls caused by mempool poisoning."
+
+  - name: network_partition
+    rules:
+      # Individual peer disconnected — no messages received from a tracked peer
+      - alert: PeerDisconnected
+        expr: >
+          network_tracker_directory_tracked > 0
+          and sum by (instance) (rate(network_spawner_messages_received_total[2m])) == 0
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: "No P2P messages received on {{ $labels.instance }}"
+          description: "Node has tracked peers but received zero messages in 2 minutes. Likely disconnected from the network."
+
+      # Potential network partition — fewer than 3 tracked peers (quorum requires 3/4)
+      - alert: NetworkPartition
+        expr: network_tracker_directory_tracked < 3
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Network partition detected on {{ $labels.instance }}: only {{ $value }} tracked peers"
+          description: "Fewer than 3 peers tracked. BFT consensus requires 2f+1 (3 of 4) validators. This node cannot participate in quorum."
+
+      # High message drop rate — early warning for degraded connectivity
+      - alert: HighMessageDropRate
+        expr: >
+          sum(rate(network_router_messages_dropped_total[5m]))
+          / clamp_min(sum(rate(network_spawner_messages_sent_total[5m])), 1) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "P2P message drop rate is {{ $value | humanizePercentage }}"
+          description: "Over 10% of sent messages are being dropped. Network connectivity may be degraded. Observed 18.5% drop rate before production stall."
+
+      # Asymmetric connectivity — node can send but not receive (or vice versa)
+      - alert: AsymmetricConnectivity
+        expr: >
+          sum(rate(network_spawner_messages_sent_total[5m])) > 1
+          and sum(rate(network_spawner_messages_received_total[5m])) < 0.01
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Asymmetric connectivity on {{ $labels.instance }}: sending but not receiving"
+          description: "Node is sending P2P messages but receiving none. Likely a one-way network partition."
+
+      # All peers rate-limited — possible flooding or misconfiguration
+      - alert: HighRateLimitedMessages
+        expr: >
+          sum(rate(network_spawner_messages_rate_limited_total[5m])) > 10
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} messages/s rate-limited on {{ $labels.instance }}"
+          description: "High rate of P2P messages being rate-limited. May indicate flooding, replay storms, or overly aggressive rate limits."
