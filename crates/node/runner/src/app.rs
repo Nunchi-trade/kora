@@ -20,6 +20,7 @@ use futures::StreamExt;
 use kora_consensus::{BlockExecution, SnapshotStore, components::InMemorySnapshotStore};
 use kora_domain::{Block, ConsensusDigest};
 use kora_executor::{BaseFeeParams, BlockContext, BlockExecutor, calculate_base_fee};
+use kora_indexer::BlockIndex;
 use kora_ledger::LedgerService;
 use kora_metrics::AppMetrics;
 use kora_overlay::OverlayState;
@@ -34,11 +35,14 @@ use tracing::{debug, error, info, trace, warn};
 /// (via [`LedgerService::wait_for_snapshot`]) so the wake-up is immediate
 /// once the snapshot is inserted, with this timeout as the upper bound.
 ///
-/// Under CPU contention (e.g. 23 threads on 0.75 cores), the finalization
-/// reporter may need more time to produce the parent snapshot.  100 ms
-/// provides ample budget; in the common case the Notify fires within the
-/// first few milliseconds.
-const SNAPSHOT_WAIT_TIMEOUT: Duration = Duration::from_millis(100);
+/// 500 ms is well within the `leader_timeout` (1 s) and
+/// `certification_timeout` (2 s), so it does not risk stalling consensus.
+/// Under CPU contention (e.g. 10 validators on shared NVMe with 1.2 CPUs
+/// each), EVM execution of contract-heavy blocks can exceed the previous
+/// 100 ms budget, causing avoidable view nullifications.  The Notify
+/// mechanism fires as soon as the snapshot is inserted, so the typical
+/// wait is much shorter than this upper bound.
+const SNAPSHOT_WAIT_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Maximum number of seconds a block timestamp may be ahead of the
 /// validator's wall-clock time.  Blocks with timestamps further in the
@@ -117,6 +121,11 @@ pub struct RevmApplication<S, E> {
     /// gas usage.  Entries are small (32 + 16 bytes) and the map is bounded
     /// by the number of unfinalized blocks.
     block_fees: Arc<RwLock<HashMap<ConsensusDigest, (u64, u64)>>>,
+    /// Persistent block index used as a fallback when the in-memory
+    /// `block_fees` cache misses.  This ensures the proposal/verification
+    /// path computes the same base fee as the finalization replay path,
+    /// preventing state-root divergence after restarts.
+    block_index: Arc<BlockIndex>,
     _scheme: std::marker::PhantomData<S>,
 }
 
@@ -145,6 +154,7 @@ where
         max_txs: usize,
         gas_limit: u64,
         fee_recipient: Address,
+        block_index: Arc<BlockIndex>,
     ) -> Self {
         let mut block_fees = HashMap::new();
         block_fees.insert(ledger.genesis_block().commitment(), (0, kora_config::INITIAL_BASE_FEE));
@@ -160,6 +170,7 @@ where
             recovered_height: Arc::new(AtomicU64::new(0)),
             last_verified_height: Arc::new(AtomicU64::new(0)),
             block_fees: Arc::new(RwLock::new(block_fees)),
+            block_index,
             _scheme: std::marker::PhantomData,
         }
     }
@@ -210,19 +221,45 @@ where
     }
 
     /// Compute the base fee for a new block from the parent's gas usage
-    /// (EIP-1559).  Falls back to [`kora_config::INITIAL_BASE_FEE`] when the
-    /// parent's fee data is not cached (genesis or catch-up).
-    fn compute_base_fee(&self, parent_digest: ConsensusDigest) -> u64 {
+    /// (EIP-1559).
+    ///
+    /// First checks the in-memory `block_fees` cache (fast path for normal
+    /// operation).  On a cache miss, falls back to the persistent
+    /// [`BlockIndex`] so that the proposal/verification path computes the
+    /// same base fee as the finalization replay path.  Only returns
+    /// [`kora_config::INITIAL_BASE_FEE`] when neither source has the parent
+    /// (genesis or very early catch-up).
+    fn compute_base_fee(&self, parent_digest: ConsensusDigest, parent_height: u64) -> u64 {
+        // Fast path: in-memory cache.
         let fees = self.block_fees.read();
-        match fees.get(&parent_digest) {
-            Some(&(parent_gas_used, parent_base_fee)) => calculate_base_fee(
+        if let Some(&(parent_gas_used, parent_base_fee)) = fees.get(&parent_digest) {
+            return calculate_base_fee(
                 parent_base_fee,
                 parent_gas_used,
                 self.gas_limit,
                 &BaseFeeParams::DEFAULT,
-            ),
-            None => kora_config::INITIAL_BASE_FEE,
+            );
         }
+        drop(fees);
+
+        // Slow path: fall back to persistent block index.  This matches
+        // the logic in `RevmContextProvider::context()` used during
+        // finalization replay, preventing base-fee divergence after
+        // restarts.
+        if parent_height == 0 {
+            return kora_config::INITIAL_BASE_FEE;
+        }
+        self.block_index
+            .get_block_by_number(parent_height)
+            .map(|parent| {
+                calculate_base_fee(
+                    parent.base_fee_per_gas.unwrap_or(kora_config::INITIAL_BASE_FEE),
+                    parent.gas_used,
+                    parent.gas_limit,
+                    &BaseFeeParams::DEFAULT,
+                )
+            })
+            .unwrap_or(kora_config::INITIAL_BASE_FEE)
     }
 
     /// Record a block's gas usage and base fee so that the next block can
@@ -238,7 +275,8 @@ where
         prevrandao: B256,
         parent_digest: ConsensusDigest,
     ) -> BlockContext {
-        let base_fee = self.compute_base_fee(parent_digest);
+        let parent_height = height.saturating_sub(1);
+        let base_fee = self.compute_base_fee(parent_digest, parent_height);
         let header = Header {
             number: height,
             timestamp,

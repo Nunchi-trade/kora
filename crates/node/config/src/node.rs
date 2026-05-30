@@ -8,7 +8,11 @@ use serde::{Deserialize, Serialize};
 use crate::{ConfigError, ConsensusConfig, ExecutionConfig, NetworkConfig, RpcConfig};
 
 /// Default chain ID for local development.
-pub const DEFAULT_CHAIN_ID: u64 = 1;
+///
+/// Uses 1337 (standard devnet chain ID) instead of 1 (Ethereum mainnet)
+/// to prevent EIP-155 cross-chain transaction replay between Kora devnets
+/// and Ethereum mainnet when operators use the same account keys on both.
+pub const DEFAULT_CHAIN_ID: u64 = 1337;
 
 /// Default data directory.
 pub const DEFAULT_DATA_DIR: &str = "/var/lib/kora";
@@ -150,7 +154,15 @@ impl NodeConfig {
                 Ok(private_key_from_seed(seed))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // Generate new key
+                // Generate new key -- log a prominent warning so operators
+                // notice when this happens in production.
+                eprintln!(
+                    "WARNING: Validator key not found at '{}'. Generating a new \
+                     random key. This is only appropriate for development. In \
+                     production, provide an existing key file via \
+                     'consensus.validator_key' in your config.",
+                    key_path.display()
+                );
                 let mut seed = [0u8; 32];
                 rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
 

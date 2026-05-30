@@ -1116,6 +1116,9 @@ impl NodeRunner for ProductionRunner {
                             PoolConfig::default(),
                         )
                         .with_pool(gossip_pool.clone());
+                        // NOTE: TOCTOU between validate() and submit_tx()
+                        // is benign here -- worst case the tx is rejected as
+                        // a duplicate, which is expected for gossip.
                         if let Err(e) = validator.validate(tx.clone()).await {
                             trace!(?tx_id, ?peer, error = %e, "tx gossip: peer tx failed validation");
                             in_metrics.gossip_tx_invalid.inc();
@@ -1125,7 +1128,7 @@ impl NodeRunner for ProductionRunner {
                         if gossip_ledger.submit_tx(tx).await {
                             debug!(?tx_id, ?peer, "tx gossip: accepted transaction from peer");
                         } else {
-                            trace!(?tx_id, ?peer, "tx gossip: ledger rejected transaction (duplicate)");
+                            trace!(?tx_id, ?peer, "tx gossip: ledger rejected transaction (duplicate or concurrent insert)");
                         }
                     }
                 });
@@ -1212,6 +1215,11 @@ impl NodeRunner for ProductionRunner {
                     let validator =
                         TransactionValidator::new(chain_id, state, PoolConfig::default())
                             .with_pool(pool);
+                    // NOTE: There is an inherent TOCTOU between validate()
+                    // and submit_tx() -- another task can insert a
+                    // conflicting tx between the two calls.  This is benign:
+                    // no invalid tx enters the pool.  The only effect is a
+                    // slightly confusing error message which we address below.
                     validator.validate(tx.clone()).await.map_err(|err| {
                         warn!(?tx_id, error = %err, "rpc submit: validator rejected tx");
                         kora_rpc::RpcError::InvalidTransaction(err.to_string())
@@ -1228,12 +1236,15 @@ impl NodeRunner for ProductionRunner {
                         }
                         Ok(())
                     } else {
-                        warn!(
+                        // This typically means a concurrent insertion won the
+                        // race (TOCTOU).  The transaction may already be
+                        // pending in the pool.
+                        debug!(
                             ?tx_id,
-                            "rpc submit: ledger.submit_tx returned false (duplicate or pool error)"
+                            "rpc submit: ledger.submit_tx returned false (duplicate or concurrent insert)"
                         );
                         Err(kora_rpc::RpcError::InvalidTransaction(
-                            "transaction rejected by mempool".to_string(),
+                            "transaction already pending or rejected by mempool".to_string(),
                         ))
                     }
                 })
@@ -1388,6 +1399,7 @@ impl NodeRunner for ProductionRunner {
             block_cfg.max_txs,
             gas_limit,
             fee_recipient,
+            block_index.clone(),
         );
         app = app.with_metrics(app_metrics.clone());
         if let Some((height, _)) = recovered_head_height {
