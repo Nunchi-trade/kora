@@ -1,7 +1,7 @@
 //! In-memory Ethereum filter state.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -54,11 +54,9 @@ pub(crate) enum Filter {
     },
     /// Pending transaction filter cursor.
     PendingTransaction {
-        /// Pending transaction hashes already reported to this filter.
-        known_hashes: HashSet<B256>,
         /// Snapshot index into the shared insertion-order vec at the time
         /// of last poll (or filter creation). New hashes are those at
-        /// indices >= this value that are not in `known_hashes`.
+        /// indices >= this value.
         last_seen_index: usize,
     },
 }

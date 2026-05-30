@@ -195,6 +195,15 @@ impl NodeState {
         self.inner.last_verified_height.load(Ordering::Relaxed)
     }
 
+    /// Return the current consensus view number.
+    ///
+    /// In Simplex BFT the view number approximates the network tip block
+    /// height, so this can be used as a proxy for `highest_block` in
+    /// `eth_syncing` when no dedicated peer-reported value exists.
+    pub fn current_view(&self) -> u64 {
+        self.inner.current_view.load(Ordering::Relaxed)
+    }
+
     /// Returns `true` when the node is catching up after recovery.
     ///
     /// A node is catching up when it was recovered from an archive

@@ -679,13 +679,16 @@ impl<S: StateProvider + Clone + 'static> RpcServer<S> {
             if let Some(ref pool) = txpool {
                 eth_api = eth_api.with_txpool(pool.clone());
             }
-            let net_api = NetApiImpl::new(chain_id);
+            let net_api =
+                NetApiImpl::new(chain_id).with_node_state((*node_state_for_jsonrpc).clone());
             net_api.set_peer_count(peer_count);
             let web3_api = Web3ApiImpl::new();
             let kora_api = KoraApiImpl::new(node_state_for_jsonrpc);
             let subscription_api = match subscription_module(
                 pending_tx_broadcast.clone(),
                 mempool_broadcast.clone(),
+                None, // newHeads: not yet wired to runner
+                None, // logs: not yet wired to runner
             ) {
                 Ok(api) => api,
                 Err(e) => {
@@ -969,7 +972,7 @@ impl<S: StateProvider + Clone + 'static> JsonRpcServer<S> {
         net_api.set_peer_count(self.peer_count);
         let web3_api = Web3ApiImpl::new();
         let subscription_api =
-            subscription_module(self.pending_tx_broadcast, self.mempool_broadcast)?;
+            subscription_module(self.pending_tx_broadcast, self.mempool_broadcast, None, None)?;
 
         let mut module = jsonrpsee::RpcModule::new(());
         module.merge(eth_api.into_rpc())?;

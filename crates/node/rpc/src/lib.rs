@@ -31,8 +31,10 @@ pub use server::{JsonRpcServer, RpcServer, RpcServerHandle, ServerError};
 
 mod subscription;
 pub use subscription::{
-    MEMPOOL_EVENT_CHANNEL_CAPACITY, MempoolEventSender, PENDING_TX_CHANNEL_CAPACITY,
-    PendingTxEvent, PendingTxEventSender, PendingTxInfo, mempool_event_channel, pending_tx_channel,
+    LOG_CHANNEL_CAPACITY, LogEventSender, MEMPOOL_EVENT_CHANNEL_CAPACITY, MempoolEventSender,
+    NEW_HEAD_CHANNEL_CAPACITY, NewHeadEventSender, PENDING_TX_CHANNEL_CAPACITY, PendingTxEvent,
+    PendingTxEventSender, PendingTxInfo, log_channel, mempool_event_channel, new_head_channel,
+    pending_tx_channel,
 };
 
 mod state;
@@ -42,7 +44,7 @@ mod state_provider;
 pub use state_provider::{NoopStateProvider, StateProvider};
 
 mod indexed_provider;
-pub use indexed_provider::IndexedStateProvider;
+pub use indexed_provider::{IndexedStateProvider, MAX_LOG_BLOCK_RANGE};
 
 mod types;
 pub use types::{

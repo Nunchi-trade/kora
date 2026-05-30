@@ -91,6 +91,17 @@ pub trait StateProvider: Send + Sync {
     async fn get_logs(&self, _filter: RpcLogFilter) -> Result<Vec<RpcLog>, RpcError> {
         Err(RpcError::NotImplemented)
     }
+
+    /// Get all receipts for a block by its hash.
+    ///
+    /// This is more efficient than calling [`receipt_by_hash`] per
+    /// transaction because the indexer acquires the receipts lock only once.
+    async fn receipts_by_block_hash(
+        &self,
+        _block_hash: B256,
+    ) -> Result<Vec<RpcTransactionReceipt>, RpcError> {
+        Err(RpcError::NotImplemented)
+    }
 }
 
 /// A no-op state provider that returns empty/zero values.
@@ -163,5 +174,12 @@ impl StateProvider for NoopStateProvider {
 
     async fn block_number(&self) -> Result<u64, RpcError> {
         Err(RpcError::NotImplemented)
+    }
+
+    async fn receipts_by_block_hash(
+        &self,
+        _block_hash: B256,
+    ) -> Result<Vec<RpcTransactionReceipt>, RpcError> {
+        Ok(Vec::new())
     }
 }

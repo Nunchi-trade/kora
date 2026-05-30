@@ -120,6 +120,16 @@ pub enum BlockTransactions {
     Full(Vec<RpcTransaction>),
 }
 
+impl BlockTransactions {
+    /// Returns the number of transactions in this block.
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Hashes(h) => h.len(),
+            Self::Full(f) => f.len(),
+        }
+    }
+}
+
 impl Default for BlockTransactions {
     fn default() -> Self {
         Self::Hashes(Vec::new())
