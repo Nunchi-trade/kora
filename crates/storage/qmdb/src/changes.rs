@@ -286,7 +286,10 @@ mod tests {
         });
 
         // The selfdestruct supersedes: created should be cleared.
-        assert!(!update.created, "created flag must be cleared when both created and selfdestructed");
+        assert!(
+            !update.created,
+            "created flag must be cleared when both created and selfdestructed"
+        );
         assert!(update.selfdestructed);
         assert!(update.storage.is_empty());
     }
