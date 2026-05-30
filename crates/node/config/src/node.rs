@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use commonware_codec::ReadExt as _;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use crate::{ConfigError, ConsensusConfig, ExecutionConfig, NetworkConfig, RpcConfig};
 
@@ -145,14 +146,16 @@ impl NodeConfig {
                 if key_bytes.len() != 32 {
                     return Err(ConfigError::InvalidKeyLength(key_bytes.len()));
                 }
-                let mut seed = [0u8; 32];
+                let mut key_bytes = Zeroizing::new(key_bytes);
+                let mut seed = Zeroizing::new([0u8; 32]);
                 seed.copy_from_slice(&key_bytes);
-                Ok(private_key_from_seed(seed))
+                key_bytes.fill(0);
+                Ok(private_key_from_seed(*seed))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // Generate new key
-                let mut seed = [0u8; 32];
-                rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+                let mut seed = Zeroizing::new([0u8; 32]);
+                rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, seed.as_mut());
 
                 // Ensure parent directory exists
                 if let Some(parent) = key_path.parent() {
@@ -172,11 +175,11 @@ impl NodeConfig {
                         .mode(0o600)
                         .open(&key_path)
                         .map_err(|e| ConfigError::Write { path: key_path.clone(), source: e })?;
-                    std::io::Write::write_all(&mut f, &seed)
+                    std::io::Write::write_all(&mut f, seed.as_ref())
                         .map_err(|e| ConfigError::Write { path: key_path.clone(), source: e })?;
                 }
 
-                Ok(private_key_from_seed(seed))
+                Ok(private_key_from_seed(*seed))
             }
             Err(e) => Err(ConfigError::Read { path: key_path, source: e }),
         }

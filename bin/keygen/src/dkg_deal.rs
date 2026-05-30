@@ -14,6 +14,7 @@ use commonware_cryptography::bls12381::{
 use commonware_utils::{Faults, N3f1, TryCollect, ordered::Set};
 use eyre::{Result, WrapErr};
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroize;
 
 #[derive(Args, Debug)]
 pub(crate) struct DkgDealArgs {
@@ -41,6 +42,13 @@ struct ShareJson {
 
 pub(crate) fn run(args: DkgDealArgs) -> Result<()> {
     let quorum = N3f1::quorum(args.validators);
+
+    tracing::warn!(
+        "TRUSTED DEALER MODE: all threshold shares are generated in a single process. \
+         This is NOT secure for production. The output directory will contain the complete \
+         group secret key material until cleanup."
+    );
+
     tracing::info!(
         validators = args.validators,
         quorum = quorum,
@@ -125,14 +133,23 @@ pub(crate) fn run(args: DkgDealArgs) -> Result<()> {
             participant_keys: participant_keys.clone(),
         };
         let output_path = node_dir.join("output.json");
-        fs::write(&output_path, serde_json::to_string_pretty(&output_json)?)?;
+        write_secret_file(&output_path, serde_json::to_string_pretty(&output_json)?.as_bytes())?;
 
-        let share_json = ShareJson { index: share.index.get(), secret: hex::encode(&share_bytes) };
+        let share_hex = hex::encode(&share_bytes);
+        // Zeroize the raw share bytes now that we have the hex encoding.
+        share_bytes.zeroize();
+
+        let share_json = ShareJson { index: share.index.get(), secret: share_hex };
         let share_path = node_dir.join("share.key");
         write_secret_file(&share_path, serde_json::to_string_pretty(&share_json)?.as_bytes())?;
 
         tracing::info!(node = i, "Wrote DKG output and share");
     }
+
+    // Explicitly drop shares to release secret key material (the allocator will
+    // reuse the memory, but we cannot call Zeroize on the opaque library type).
+    drop(shares);
+    drop(public_output);
 
     tracing::info!("Trusted dealer DKG complete");
     tracing::info!("  Validators: {}", args.validators);

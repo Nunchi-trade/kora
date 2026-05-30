@@ -2,6 +2,7 @@ use std::{io::Write as _, path::Path};
 
 use commonware_utils::{Faults, N3f1};
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroize;
 
 use crate::DkgError;
 
@@ -46,6 +47,12 @@ struct ShareJson {
     secret: String,
 }
 
+impl Drop for DkgOutput {
+    fn drop(&mut self) {
+        self.share_secret.zeroize();
+    }
+}
+
 impl DkgOutput {
     /// Persists the DKG output to `output.json` and the secret share to `share.key` in `data_dir`.
     pub fn save(&self, data_dir: &Path) -> Result<(), DkgError> {
@@ -58,7 +65,7 @@ impl DkgOutput {
         };
 
         let output_path = data_dir.join("output.json");
-        std::fs::write(&output_path, serde_json::to_string_pretty(&output_json)?)?;
+        write_secret_file(&output_path, serde_json::to_string_pretty(&output_json)?.as_bytes())?;
 
         let share_json =
             ShareJson { index: self.share_index, secret: hex::encode(&self.share_secret) };
@@ -80,9 +87,10 @@ impl DkgOutput {
             .map_err(|e| DkgError::Serialization(e.to_string()))?;
 
         let share_path = data_dir.join("share.key");
-        let share_str = std::fs::read_to_string(&share_path)?;
+        let mut share_str = std::fs::read_to_string(&share_path)?;
         let share: ShareJson =
             serde_json::from_str(&share_str).map_err(|e| DkgError::Serialization(e.to_string()))?;
+        share_str.zeroize();
 
         let participant_keys = output
             .participant_keys

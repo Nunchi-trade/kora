@@ -1,6 +1,6 @@
 //! DKG state persistence for crash recovery.
 
-use std::{collections::BTreeMap, path::Path};
+use std::{collections::BTreeMap, io::Write as _, path::Path};
 
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -118,11 +118,11 @@ impl PersistedDkgState {
         self.session = session.into();
     }
 
-    /// Save state to disk.
+    /// Save state to disk with restrictive permissions (0600).
     pub fn save(&self, data_dir: &Path) -> Result<(), DkgError> {
         let path = data_dir.join(Self::STATE_FILE);
         let content = serde_json::to_string_pretty(self)?;
-        std::fs::write(&path, content)?;
+        write_secret_file(&path, content.as_bytes())?;
         Ok(())
     }
 
@@ -183,4 +183,17 @@ impl PersistedDkgState {
             })
             .collect()
     }
+}
+
+/// Write `data` to `path` with mode `0600` so DKG state is never world-readable.
+fn write_secret_file(path: &Path, data: &[u8]) -> Result<(), DkgError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    f.write_all(data)?;
+    Ok(())
 }

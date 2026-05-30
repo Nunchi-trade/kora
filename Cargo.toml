@@ -134,6 +134,7 @@ bytes = "1"
 hex = "0.4"
 k256 = "0.13"
 sha3 = "0.10"
+zeroize = { version = "1", features = ["zeroize_derive"] }
 
 # HTTP
 axum = "0.8"

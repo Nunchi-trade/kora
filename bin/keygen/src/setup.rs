@@ -11,6 +11,7 @@ use eyre::{Result, WrapErr};
 use k256::ecdsa::SigningKey;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 const GENESIS_BALANCE: &str = "1000000000000000000000000";
 const LOADGEN_ACCOUNT_COUNT: u8 = 50;
@@ -114,16 +115,17 @@ pub(crate) fn run(args: SetupArgs) -> Result<()> {
         let key_path = node_dir.join("validator.key");
         let key = if key_path.exists() {
             tracing::info!(node = i, "Loading existing identity key");
-            let bytes = fs::read(&key_path)?;
-            let mut seed = [0u8; 32];
+            let mut bytes = Zeroizing::new(fs::read(&key_path)?);
+            let mut seed = Zeroizing::new([0u8; 32]);
             seed.copy_from_slice(&bytes);
-            private_key_from_seed(seed)
+            bytes.fill(0);
+            private_key_from_seed(*seed)
         } else {
             tracing::info!(node = i, "Generating new identity key");
-            let mut seed = [0u8; 32];
-            rand::rngs::OsRng.fill_bytes(&mut seed);
-            write_secret_file(&key_path, &seed)?;
-            private_key_from_seed(seed)
+            let mut seed = Zeroizing::new([0u8; 32]);
+            rand::rngs::OsRng.fill_bytes(seed.as_mut());
+            write_secret_file(&key_path, seed.as_ref())?;
+            private_key_from_seed(*seed)
         };
 
         let public_key = key.public_key();
@@ -150,16 +152,17 @@ pub(crate) fn run(args: SetupArgs) -> Result<()> {
         let key_path = node_dir.join("validator.key");
         let key = if key_path.exists() {
             tracing::info!(node = i, "Loading existing secondary identity key");
-            let bytes = fs::read(&key_path)?;
-            let mut seed = [0u8; 32];
+            let mut bytes = Zeroizing::new(fs::read(&key_path)?);
+            let mut seed = Zeroizing::new([0u8; 32]);
             seed.copy_from_slice(&bytes);
-            private_key_from_seed(seed)
+            bytes.fill(0);
+            private_key_from_seed(*seed)
         } else {
             tracing::info!(node = i, "Generating new secondary identity key");
-            let mut seed = [0u8; 32];
-            rand::rngs::OsRng.fill_bytes(&mut seed);
-            write_secret_file(&key_path, &seed)?;
-            private_key_from_seed(seed)
+            let mut seed = Zeroizing::new([0u8; 32]);
+            rand::rngs::OsRng.fill_bytes(seed.as_mut());
+            write_secret_file(&key_path, seed.as_ref())?;
+            private_key_from_seed(*seed)
         };
 
         let public_key = key.public_key();
