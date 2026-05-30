@@ -231,6 +231,13 @@ where
         self.block_fees.write().insert(digest, (gas_used, base_fee));
     }
 
+    /// Update txpool ordering metadata to the base fee expected for the next block.
+    async fn update_txpool_next_base_fee(&self, base_fee: u64, gas_used: u64) {
+        let next_base_fee =
+            calculate_base_fee(base_fee, gas_used, self.gas_limit, &BaseFeeParams::DEFAULT);
+        self.ledger.txpool().await.set_base_fee(u128::from(next_base_fee));
+    }
+
     fn block_context(
         &self,
         height: u64,
@@ -239,6 +246,16 @@ where
         parent_digest: ConsensusDigest,
     ) -> BlockContext {
         let base_fee = self.compute_base_fee(parent_digest);
+        self.block_context_with_base_fee(height, timestamp, prevrandao, base_fee)
+    }
+
+    fn block_context_with_base_fee(
+        &self,
+        height: u64,
+        timestamp: u64,
+        prevrandao: B256,
+        base_fee: u64,
+    ) -> BlockContext {
         let header = Header {
             number: height,
             timestamp,
@@ -316,6 +333,8 @@ where
         };
         let mempool_len = mempool.len();
         let excluded_len = excluded.len();
+        let proposal_base_fee = self.compute_base_fee(parent_digest);
+        mempool.txpool().set_base_fee(u128::from(proposal_base_fee));
         let txs = mempool.build(self.max_txs, &excluded);
 
         // Diagnostic: when the producer builds an empty block while there are
@@ -341,8 +360,9 @@ where
 
         let prevrandao = self.get_prevrandao(parent_digest).await;
         let height = parent.height + 1;
-        let context = self.block_context(height, timestamp, prevrandao, parent_digest);
-        let base_fee = context.header.base_fee_per_gas.unwrap_or(kora_config::INITIAL_BASE_FEE);
+        let context =
+            self.block_context_with_base_fee(height, timestamp, prevrandao, proposal_base_fee);
+        let base_fee = proposal_base_fee;
         let txs_bytes: Vec<Bytes> = txs.iter().map(|tx| tx.bytes.clone()).collect();
 
         let exec_start = Instant::now();
@@ -408,6 +428,7 @@ where
 
         // Cache gas usage so that the next block can derive its base fee.
         self.record_block_fees(block_digest, outcome.gas_used, base_fee);
+        self.update_txpool_next_base_fee(base_fee, outcome.gas_used).await;
 
         let total_elapsed = start.elapsed();
 
@@ -674,6 +695,7 @@ where
 
         // Cache gas usage so the next block can derive its base fee.
         self.record_block_fees(digest, execution.outcome.gas_used, base_fee);
+        self.update_txpool_next_base_fee(base_fee, execution.outcome.gas_used).await;
 
         let merged_changes = parent_snapshot.state.merge_changes(execution.outcome.changes.clone());
         let next_state = OverlayState::new(parent_snapshot.state.base(), merged_changes);

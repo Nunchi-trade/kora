@@ -42,6 +42,32 @@ impl OrderedTransaction {
     pub const fn effective_tip(&self) -> u128 {
         self.effective_gas_price.saturating_sub(self.base_fee)
     }
+
+    /// Recomputes EIP-1559 ordering metadata against a new base fee.
+    pub fn set_base_fee(&mut self, base_fee: u128) {
+        self.effective_gas_price = effective_gas_price(&self.envelope, base_fee);
+        self.base_fee = base_fee;
+    }
+}
+
+/// Computes the effective gas price for a transaction at `base_fee`.
+pub(crate) fn effective_gas_price(envelope: &TxEnvelope, base_fee: u128) -> u128 {
+    match envelope {
+        TxEnvelope::Legacy(tx) => tx.tx().gas_price,
+        TxEnvelope::Eip2930(tx) => tx.tx().gas_price,
+        TxEnvelope::Eip1559(tx) => {
+            let tx = tx.tx();
+            tx.max_fee_per_gas.min(base_fee.saturating_add(tx.max_priority_fee_per_gas))
+        }
+        TxEnvelope::Eip4844(tx) => {
+            let tx = tx.tx().tx();
+            tx.max_fee_per_gas.min(base_fee.saturating_add(tx.max_priority_fee_per_gas))
+        }
+        TxEnvelope::Eip7702(tx) => {
+            let tx = tx.tx();
+            tx.max_fee_per_gas.min(base_fee.saturating_add(tx.max_priority_fee_per_gas))
+        }
+    }
 }
 
 impl PartialEq for OrderedTransaction {

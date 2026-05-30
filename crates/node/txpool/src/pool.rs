@@ -18,7 +18,7 @@ use tracing::{debug, trace, warn};
 use crate::{
     config::PoolConfig,
     error::TxPoolError,
-    ordering::{OrderedTransaction, SenderQueue},
+    ordering::{OrderedTransaction, SenderQueue, effective_gas_price},
     traits::Mempool,
     validator::recover_sender_from_envelope,
 };
@@ -165,10 +165,22 @@ impl TransactionPool {
 
     /// Updates the current base fee used for EIP-1559 ordering.
     ///
-    /// Should be called whenever a new block is produced or received so that
-    /// transaction ordering and eviction reflect the latest fee market state.
+    /// Call when the expected block base fee changes, especially before block
+    /// transaction selection, so ordering and eviction reflect live fee-market
+    /// state.
     pub fn set_base_fee(&self, base_fee: u128) {
-        *self.base_fee.write() = base_fee;
+        let mut current_base_fee = self.base_fee.write();
+        *current_base_fee = base_fee;
+
+        let mut inner = self.inner.write();
+        for tx in inner.by_hash.values_mut() {
+            tx.set_base_fee(base_fee);
+        }
+        for queue in inner.by_sender.values_mut() {
+            for tx in queue.pending.iter_mut().chain(queue.queued.iter_mut()) {
+                tx.set_base_fee(base_fee);
+            }
+        }
     }
 
     /// Returns the current base fee.
@@ -656,22 +668,7 @@ fn tx_to_ordered(tx: &Tx, base_fee: u128) -> Option<OrderedTransaction> {
     let sender = recover_sender_from_envelope(&envelope).ok()?;
     let hash = alloy_primitives::keccak256(&tx.bytes);
     let nonce = envelope.nonce();
-    let effective_gas_price = match &envelope {
-        TxEnvelope::Legacy(tx) => tx.tx().gas_price,
-        TxEnvelope::Eip2930(tx) => tx.tx().gas_price,
-        TxEnvelope::Eip1559(tx) => {
-            let tx = tx.tx();
-            std::cmp::min(tx.max_fee_per_gas, base_fee + tx.max_priority_fee_per_gas)
-        }
-        TxEnvelope::Eip4844(tx) => {
-            let tx = tx.tx().tx();
-            std::cmp::min(tx.max_fee_per_gas, base_fee + tx.max_priority_fee_per_gas)
-        }
-        TxEnvelope::Eip7702(tx) => {
-            let tx = tx.tx();
-            std::cmp::min(tx.max_fee_per_gas, base_fee + tx.max_priority_fee_per_gas)
-        }
-    };
+    let effective_gas_price = effective_gas_price(&envelope, base_fee);
 
     Some(OrderedTransaction::new(
         hash,
@@ -819,12 +816,22 @@ mod tests {
     }
 
     fn make_ordered_tx(sender: Address, nonce: u64, gas_price: u128) -> OrderedTransaction {
+        make_ordered_tx_with_base_fee(sender, nonce, gas_price, gas_price, 0)
+    }
+
+    fn make_ordered_tx_with_base_fee(
+        sender: Address,
+        nonce: u64,
+        max_fee_per_gas: u128,
+        max_priority_fee_per_gas: u128,
+        base_fee: u128,
+    ) -> OrderedTransaction {
         let inner = TxEip1559 {
             chain_id: 1,
             nonce,
             gas_limit: 21000,
-            max_fee_per_gas: gas_price,
-            max_priority_fee_per_gas: gas_price,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
             to: TxKind::Call(Address::ZERO),
             value: U256::ZERO,
             access_list: Default::default(),
@@ -833,8 +840,16 @@ mod tests {
         let sig = Signature::from_scalars_and_parity(B256::ZERO, B256::ZERO, false);
         let signed = inner.into_signed(sig);
         let envelope = TxEnvelope::from(signed);
-        // base_fee=0 so effective_gas_price = min(gas_price, 0 + gas_price) = gas_price
-        OrderedTransaction::new(random_b256(), sender, nonce, gas_price, 0, 0, envelope)
+        let effective_gas_price = effective_gas_price(&envelope, base_fee);
+        OrderedTransaction::new(
+            random_b256(),
+            sender,
+            nonce,
+            effective_gas_price,
+            base_fee,
+            0,
+            envelope,
+        )
     }
 
     fn tx_nonce(tx: &Tx) -> u64 {
@@ -1321,6 +1336,42 @@ mod tests {
         let order: Vec<_> = txs.iter().map(tx_nonce_and_gas_price).collect();
 
         assert_eq!(order, vec![(0, 500), (0, 10), (1, 1_000)]);
+    }
+
+    #[test]
+    fn pool_set_base_fee_reorders_existing_eip1559_transactions_by_live_tip() {
+        let pool = TransactionPool::new(PoolConfig::default());
+        let capped_sender = random_address();
+        let stable_sender = random_address();
+
+        let capped = make_ordered_tx_with_base_fee(capped_sender, 0, 50, 50, 0);
+        let stable = make_ordered_tx_with_base_fee(stable_sender, 0, 100, 10, 0);
+        let capped_hash = capped.hash;
+        let stable_hash = stable.hash;
+
+        pool.add(capped).unwrap();
+        pool.add(stable).unwrap();
+
+        let initial = pool.build(10, &BTreeSet::new());
+        assert_eq!(
+            initial.iter().map(tx_nonce_and_gas_price).collect::<Vec<_>>(),
+            vec![(0, 50), (0, 100)]
+        );
+
+        pool.set_base_fee(45);
+
+        let capped = pool.get(&capped_hash).unwrap();
+        let stable = pool.get(&stable_hash).unwrap();
+        assert_eq!(capped.base_fee, 45);
+        assert_eq!(capped.effective_tip(), 5);
+        assert_eq!(stable.base_fee, 45);
+        assert_eq!(stable.effective_tip(), 10);
+
+        let repriced = pool.build(10, &BTreeSet::new());
+        assert_eq!(
+            repriced.iter().map(tx_nonce_and_gas_price).collect::<Vec<_>>(),
+            vec![(0, 100), (0, 50)]
+        );
     }
 
     #[test]
