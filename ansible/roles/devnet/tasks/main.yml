@@ -89,16 +89,17 @@
       changed_when: true
       failed_when: false
 
-- name: Clear runtime state from data volumes
+- name: Clear runtime state from runtime volumes
   ansible.builtin.shell: |
     for volume in \
-      {{ compose_project_name }}_data_node0 \
-      {{ compose_project_name }}_data_node1 \
-      {{ compose_project_name }}_data_node2 \
-      {{ compose_project_name }}_data_node3 \
-      {{ compose_project_name }}_data_secondary0; do
+      {{ compose_project_name }}_runtime_node0 \
+      {{ compose_project_name }}_runtime_node1 \
+      {{ compose_project_name }}_runtime_node2 \
+      {{ compose_project_name }}_runtime_node3 \
+      {{ compose_project_name }}_runtime_secondary0; do
       docker volume inspect "$volume" >/dev/null 2>&1 || continue
-      docker run --rm -v "${volume}:/data" alpine rm -rf /data/runtime 2>/dev/null || true
+      docker run --rm -v "${volume}:/runtime" alpine \
+        sh -c 'rm -rf /runtime/* /runtime/.[!.]* /runtime/..?*' >/dev/null 2>&1 || true
     done
   changed_when: true
   when: devnet_keep_state | default(false) | bool == false

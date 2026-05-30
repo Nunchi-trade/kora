@@ -29,6 +29,12 @@
 # --- Service user for kora operations ---
 # All docker/compose commands run as this user instead of root.
 # Root is only used for system-level tasks (package install, firewall, systemd).
+- name: Ensure Docker group exists before assigning kora user
+  ansible.builtin.group:
+    name: docker
+    state: present
+    system: true
+
 - name: Create kora service group
   ansible.builtin.group:
     name: "{{ kora_user }}"
