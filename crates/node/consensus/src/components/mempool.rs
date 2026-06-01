@@ -31,7 +31,7 @@ impl Default for InMemoryMempool {
 }
 
 fn tx_order_key(tx: &Tx) -> (u8, Address, u64) {
-    let Ok(envelope) = TxEnvelope::decode_2718(&mut tx.bytes.as_ref()) else {
+    let Ok(envelope) = TxEnvelope::decode_2718_exact(tx.bytes.as_ref()) else {
         return (1, Address::ZERO, u64::MAX);
     };
     let Ok(sender) = envelope.recover_signer() else {

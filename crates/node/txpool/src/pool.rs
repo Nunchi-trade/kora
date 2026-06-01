@@ -7,7 +7,7 @@ use std::{
 };
 
 use alloy_consensus::{Transaction, TxEnvelope};
-use alloy_eips::eip2718::{Decodable2718, Encodable2718};
+use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{Address, B256, Bytes, U256};
 use kora_domain::{MempoolEvent, Tx, TxId};
 use kora_metrics::{AppMetrics, ReasonLabel};
@@ -20,7 +20,7 @@ use crate::{
     error::TxPoolError,
     ordering::{OrderedTransaction, SenderQueue},
     traits::Mempool,
-    validator::recover_sender_from_envelope,
+    validator::{decode_envelope_exact, recover_sender_from_envelope},
 };
 
 #[derive(Debug)]
@@ -630,13 +630,15 @@ fn rejection_reason(err: &TxPoolError) -> String {
         TxPoolError::NonceAlreadyInPool { .. } => "nonce_already_in_pool".to_string(),
         TxPoolError::StateError(_) => "state_error".to_string(),
         TxPoolError::ReplacementUnderpriced => "replacement_underpriced".to_string(),
+        TxPoolError::GasLimitTooHigh { .. } => "gas_limit_too_high".to_string(),
+        TxPoolError::InitcodeTooLarge { .. } => "initcode_too_large".to_string(),
     }
 }
 
 fn tx_to_ordered(tx: &Tx) -> Option<OrderedTransaction> {
-    let envelope = TxEnvelope::decode_2718(&mut tx.bytes.as_ref()).ok()?;
+    let envelope = decode_envelope_exact(tx.bytes.as_ref()).ok()?;
     let sender = recover_sender_from_envelope(&envelope).ok()?;
-    let hash = alloy_primitives::keccak256(&tx.bytes);
+    let hash = *envelope.tx_hash();
     let nonce = envelope.nonce();
     let effective_gas_price = match &envelope {
         TxEnvelope::Legacy(tx) => tx.tx().gas_price,
@@ -772,6 +774,7 @@ impl Mempool for TransactionPool {
 #[cfg(test)]
 mod tests {
     use alloy_consensus::{SignableTransaction as _, TxEip1559};
+    use alloy_eips::eip2718::Decodable2718 as _;
     use alloy_primitives::{Signature, TxKind, U256};
     use rand::Rng;
 
