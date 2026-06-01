@@ -35,6 +35,9 @@ alloy-consensus.workspace = true
 alloy-eips.workspace = true
 alloy-primitives.workspace = true
 
+# Synchronization
+parking_lot.workspace = true
+
 # Error handling
 thiserror.workspace = true
 

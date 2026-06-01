@@ -35,6 +35,10 @@ pub struct CommonwareBackend {
 }
 
 /// Root provider that computes state roots from commonware-storage partitions.
+///
+/// Opens fresh stores for each root read so it observes commits made through
+/// the live QMDB handle. Caching independently opened stores can report stale
+/// roots after the handle commits new state.
 pub struct CommonwareRootProvider {
     context: Context,
     config: QmdbBackendConfig,
@@ -339,4 +343,85 @@ fn state_root_from_roots(accounts: QmdbDigest, storage: QmdbDigest, code: QmdbDi
         B256::from_slice(storage.as_ref()),
         B256::from_slice(code.as_ref()),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::BTreeMap,
+        future::Future,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    use alloy_primitives::{Address, U256};
+    use commonware_runtime::{Runner as _, tokio};
+    use kora_handlers::RootProvider as _;
+    use kora_qmdb::AccountUpdate;
+
+    use super::*;
+
+    static PARTITION_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    fn run_backend_test<F, Fut>(f: F)
+    where
+        F: FnOnce(tokio::Context) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + 'static,
+    {
+        let executor = tokio::Runner::default();
+        executor.start(f);
+    }
+
+    fn next_config(prefix: &str) -> QmdbBackendConfig {
+        let id = PARTITION_COUNTER.fetch_add(1, Ordering::Relaxed);
+        QmdbBackendConfig::new(format!("{prefix}-{id}"))
+    }
+
+    fn account_change(address: Address, balance: u64) -> ChangeSet {
+        let mut changes = ChangeSet::new();
+        changes.insert(
+            address,
+            AccountUpdate {
+                created: true,
+                selfdestructed: false,
+                nonce: 0,
+                balance: U256::from(balance),
+                code_hash: B256::ZERO,
+                code: None,
+                storage: BTreeMap::new(),
+            },
+        );
+        changes
+    }
+
+    #[test]
+    fn root_provider_observes_commits_after_initial_root_read() {
+        run_backend_test(|context| async move {
+            let config = next_config("root-provider-observes-commits");
+            let backend = CommonwareBackend::open(context.child("backend"), config)
+                .await
+                .expect("open backend");
+            let mut root_provider = backend.root_provider();
+            let initial_root = root_provider.state_root().await.expect("initial root");
+
+            // This first read used to initialize cached store handles in the
+            // provider. Subsequent commits happen through the live QMDB store,
+            // so a cached provider would keep returning `initial_root`.
+            let (accounts, storage, code) = backend.into_stores();
+            let mut store = QmdbStore::new(accounts, storage, code);
+
+            store
+                .commit_changes(account_change(Address::repeat_byte(0x11), 100))
+                .await
+                .expect("first commit");
+            let root_after_first = root_provider.commit_and_get_root().await.expect("first root");
+            assert_ne!(root_after_first, initial_root);
+
+            store
+                .commit_changes(account_change(Address::repeat_byte(0x22), 200))
+                .await
+                .expect("second commit");
+            let root_after_second = root_provider.commit_and_get_root().await.expect("second root");
+            assert_ne!(root_after_second, root_after_first);
+        });
+    }
 }
