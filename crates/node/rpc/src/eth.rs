@@ -35,6 +35,7 @@ const DEFAULT_GAS_ORACLE_BLOCKS: usize = 20;
 const DEFAULT_GAS_ORACLE_PERCENTILE: u8 = 60;
 const GWEI: u64 = 1_000_000_000;
 const DEFAULT_MAX_GAS_PRICE: u64 = 500 * GWEI;
+const MAX_FEE_HISTORY_REWARD_PERCENTILES: usize = 100;
 
 /// Maximum number of pending transactions to track in memory.
 ///
@@ -1148,9 +1149,15 @@ fn block_gas_used_ratio(gas_used: u64, gas_limit: u64) -> f64 {
 /// Validates that `reward_percentiles` values are in `[0, 100]` and
 /// monotonically non-decreasing, per the Ethereum JSON-RPC specification.
 fn validate_reward_percentiles(percentiles: &[f64]) -> RpcResult<()> {
+    if percentiles.len() > MAX_FEE_HISTORY_REWARD_PERCENTILES {
+        return Err(RpcError::InvalidParams(format!(
+            "reward percentiles must contain at most {MAX_FEE_HISTORY_REWARD_PERCENTILES} values"
+        ))
+        .into());
+    }
     for p in percentiles {
         if !p.is_finite() || *p < 0.0 || *p > 100.0 {
-            return Err(RpcError::InvalidTransaction(
+            return Err(RpcError::InvalidParams(
                 "reward percentiles must be in [0, 100]".to_string(),
             )
             .into());
@@ -1158,7 +1165,7 @@ fn validate_reward_percentiles(percentiles: &[f64]) -> RpcResult<()> {
     }
     for w in percentiles.windows(2) {
         if w[0] > w[1] {
-            return Err(RpcError::InvalidTransaction(
+            return Err(RpcError::InvalidParams(
                 "reward percentiles must be monotonically non-decreasing".to_string(),
             )
             .into());
@@ -1526,6 +1533,20 @@ mod tests {
 
     fn gwei(value: u64) -> U256 {
         U256::from(value * GWEI)
+    }
+
+    fn assert_invalid_params<T>(result: RpcResult<T>, expected_message: &str) {
+        match result {
+            Ok(_) => panic!("expected invalid params error"),
+            Err(err) => {
+                assert_eq!(err.code(), crate::error::codes::INVALID_PARAMS);
+                assert!(
+                    err.message().contains(expected_message),
+                    "expected error message to contain {expected_message:?}, got {:?}",
+                    err.message()
+                );
+            }
+        }
     }
 
     /// EIP-1559 transaction parameters for test block construction.
@@ -2136,7 +2157,26 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_err());
+        assert_invalid_params(result, "reward percentiles must be in [0, 100]");
+    }
+
+    #[tokio::test]
+    async fn fee_history_rejects_too_many_reward_percentiles() {
+        let provider =
+            MockFeeStateProvider::new(vec![make_fee_block(0, gwei(1), 0, 30_000_000, vec![])]);
+        let api = EthApiImpl::new(1, provider);
+        let percentiles =
+            (0..=MAX_FEE_HISTORY_REWARD_PERCENTILES).map(|value| value as f64).collect();
+
+        let result = EthApiServer::fee_history(
+            &api,
+            U64::from(1),
+            BlockNumberOrTag::Latest,
+            Some(percentiles),
+        )
+        .await;
+
+        assert_invalid_params(result, "reward percentiles must contain at most 100 values");
     }
 
     #[tokio::test]
@@ -2153,7 +2193,7 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_err());
+        assert_invalid_params(result, "reward percentiles must be monotonically non-decreasing");
     }
 
     #[tokio::test]
