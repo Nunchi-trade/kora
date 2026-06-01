@@ -9,6 +9,7 @@
 - name: Collect validator logs
   hosts: devnet
   become: true
+  become_user: "{{ kora_user }}"
   vars:
     log_since: "{{ since | default('30m') }}"
     log_level: "{{ level | default('WARN') }}"

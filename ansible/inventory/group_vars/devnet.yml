@@ -3,10 +3,17 @@ remote_project_dir: /opt/kora
 compose_file: "{{ remote_project_dir }}/docker/compose/devnet.yaml"
 bake_file: "{{ remote_project_dir }}/docker/docker-bake.hcl"
 
+# Service user - all docker/compose tasks run as this user.
+# Root is only used for provisioning (packages, firewall, systemd).
+kora_user: kora
+
 # Docker
 docker_image: "kora:local"
 compose_project_name: kora-devnet
 docker_dns_servers: []  # Set to e.g. ["185.12.64.1", "185.12.64.2"] for Hetzner
+
+# Devnet state management
+devnet_keep_state: false  # Set to true to preserve runtime state across deploys
 
 # Devnet config
 num_validators: 4

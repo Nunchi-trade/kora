@@ -1,8 +1,28 @@
 ---
+- name: Get git SHA for image tagging
+  ansible.builtin.command:
+    cmd: git rev-parse HEAD
+    chdir: "{{ remote_project_dir }}"
+  register: git_sha_result
+  changed_when: false
+  failed_when: false
+
+- name: Get git short SHA for image tagging
+  ansible.builtin.command:
+    cmd: git rev-parse --short HEAD
+    chdir: "{{ remote_project_dir }}"
+  register: git_sha_short_result
+  changed_when: false
+  failed_when: false
+
 - name: Build kora:local image with buildx bake
   ansible.builtin.command:
     cmd: docker buildx bake --allow=fs.read=.. --load -f docker-bake.hcl kora-local
     chdir: "{{ remote_project_dir }}/docker"
+  environment:
+    GIT_SHA: "{{ git_sha_result.stdout | default('unknown') }}"
+    GIT_SHA_SHORT: "{{ git_sha_short_result.stdout | default('unknown') }}"
+    BUILD_TIMESTAMP: "{{ ansible_date_time.iso8601 }}"
   async: "{{ build_timeout }}"
   poll: "{{ build_poll }}"
   changed_when: true

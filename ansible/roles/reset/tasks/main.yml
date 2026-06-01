@@ -22,7 +22,7 @@
 
 - name: Remove project volumes
   ansible.builtin.shell: |
-    docker volume ls --quiet --filter "name={{ compose_project_name }}" | xargs -r docker volume rm
+    docker volume ls --quiet --filter "label=com.docker.compose.project={{ compose_project_name }}" | xargs -r docker volume rm
   changed_when: true
   failed_when: false
 

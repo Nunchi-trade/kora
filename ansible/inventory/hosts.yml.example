@@ -5,8 +5,12 @@
 #
 # Requirements:
 #   - Target must be Arch Linux (playbooks use pacman)
-#   - Root SSH access via key-based authentication
+#   - SSH access via key-based authentication
 #   - hosts.yml is gitignored to protect server IPs
+#
+# Note: The provision playbook creates a 'kora' service user for docker
+# operations. Root SSH is only needed for the initial provision run.
+# After provisioning, deploy/stop/reset playbooks use become_user: kora.
 all:
   children:
     devnet:

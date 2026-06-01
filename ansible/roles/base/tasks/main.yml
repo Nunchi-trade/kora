@@ -26,8 +26,57 @@
     enabled: true
     state: started
 
+# --- Service user for kora operations ---
+# All docker/compose commands run as this user instead of root.
+# Root is only used for system-level tasks (package install, firewall, systemd).
+- name: Ensure Docker group exists before assigning kora user
+  ansible.builtin.group:
+    name: docker
+    state: present
+    system: true
+
+- name: Create kora service group
+  ansible.builtin.group:
+    name: "{{ kora_user }}"
+    state: present
+
+- name: Create kora service user
+  ansible.builtin.user:
+    name: "{{ kora_user }}"
+    group: "{{ kora_user }}"
+    groups: docker
+    append: true
+    shell: /bin/bash
+    home: "/home/{{ kora_user }}"
+    create_home: true
+    system: false
+    state: present
+
+- name: Grant kora user limited sudo for docker and systemctl
+  ansible.builtin.copy:
+    dest: "/etc/sudoers.d/{{ kora_user }}"
+    content: |
+      # Managed by Ansible - do not edit manually
+      {{ kora_user }} ALL=(root) NOPASSWD: /usr/bin/docker, /usr/bin/docker-compose, /usr/bin/systemctl
+      Defaults:{{ kora_user }} log_output
+      Defaults:{{ kora_user }} logfile="/var/log/kora-sudo.log"
+    mode: "0440"
+    validate: "visudo -cf %s"
+
+- name: Ensure sudo log file exists with correct permissions
+  ansible.builtin.file:
+    path: /var/log/kora-sudo.log
+    state: touch
+    owner: root
+    group: root
+    mode: "0640"
+    modification_time: preserve
+    access_time: preserve
+
 - name: Create project directory
   ansible.builtin.file:
     path: "{{ remote_project_dir }}"
     state: directory
+    owner: "{{ kora_user }}"
+    group: "{{ kora_user }}"
     mode: "0755"

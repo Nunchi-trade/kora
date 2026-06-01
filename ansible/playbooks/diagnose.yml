@@ -10,6 +10,7 @@
 - name: Devnet diagnostic snapshot
   hosts: devnet
   become: true
+  become_user: "{{ kora_user }}"
   vars:
     prom: "http://localhost:{{ prometheus_port }}"
 

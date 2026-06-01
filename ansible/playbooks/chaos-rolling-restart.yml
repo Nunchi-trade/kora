@@ -12,6 +12,7 @@
 - name: "Chaos: Rolling Restart Test"
   hosts: devnet
   become: true
+  become_user: "{{ kora_user }}"
   vars:
     stop_duration: "{{ stop_duration | default(30) }}"
     recovery_wait: "{{ recovery_wait | default(60) }}"

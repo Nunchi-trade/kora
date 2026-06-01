@@ -28,6 +28,11 @@ shift || true
 log() { echo "[entrypoint] $*"; }
 error() { echo "[entrypoint] ERROR: $*" >&2; exit 1; }
 
+# Log build metadata for deployment tracking (populated at image build time)
+if [[ -n "${KORA_GIT_SHA_SHORT:-}" ]]; then
+    log "Image version: sha-${KORA_GIT_SHA_SHORT} (built ${KORA_BUILD_TIMESTAMP:-unknown})"
+fi
+
 # Wait for at least one bootstrap peer from a comma-separated list to become
 # reachable.  With multi-bootstrap support a node can join the network through
 # any available bootstrapper, removing the single-bootstrap-node SPOF.

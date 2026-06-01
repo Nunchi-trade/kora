@@ -45,6 +45,11 @@ RUN cargo build --release -p kora -p keygen -p loadgen
 # ───────────────────────────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
 
+# Build metadata args (populated by docker-bake.hcl)
+ARG GIT_SHA=""
+ARG GIT_SHA_SHORT=""
+ARG BUILD_TIMESTAMP=""
+
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -67,6 +72,16 @@ COPY --from=builder /app/target/release/loadgen /usr/local/bin/
 # Copy entrypoint scripts
 COPY docker/scripts/ /scripts/
 RUN chmod +x /scripts/*.sh
+
+# Embed build metadata so `docker inspect` and runtime logs can identify
+# the exact source revision of a running container.
+ENV KORA_GIT_SHA="${GIT_SHA}" \
+    KORA_GIT_SHA_SHORT="${GIT_SHA_SHORT}" \
+    KORA_BUILD_TIMESTAMP="${BUILD_TIMESTAMP}"
+
+LABEL org.opencontainers.image.source="https://github.com/refcell/kora" \
+      org.opencontainers.image.revision="${GIT_SHA}" \
+      org.opencontainers.image.created="${BUILD_TIMESTAMP}"
 
 # Switch to non-root user
 USER kora

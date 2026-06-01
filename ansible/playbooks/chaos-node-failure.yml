@@ -13,6 +13,7 @@
 - name: "Chaos: Single Node Failure Test"
   hosts: devnet
   become: true
+  become_user: "{{ kora_user }}"
   vars:
     target_node: "{{ target_node | default(2) }}"
     stop_duration: "{{ stop_duration | default(45) }}"

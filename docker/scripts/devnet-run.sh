@@ -3,10 +3,20 @@ set -eo pipefail
 
 # Parse arguments
 INTERACTIVE_DKG=false
+KEEP_STATE=false
+FORCE_CLEAN=false
 while [[ $# -gt 0 ]]; do
     case $1 in
         --interactive-dkg)
             INTERACTIVE_DKG=true
+            shift
+            ;;
+        --keep-state)
+            KEEP_STATE=true
+            shift
+            ;;
+        --force-clean)
+            FORCE_CLEAN=true
             shift
             ;;
         *)
@@ -83,7 +93,10 @@ print_header() {
     fi
     echo -e "${BOLD}${BLUE}╚════════════════════════════════════════════════════════════╝${NC}"
     echo ""
-    echo -e "  ${DIM}Chain ID:${NC} ${CHAIN_ID:-1337}  ${DIM}│${NC}  ${DIM}Validators:${NC} 4  ${DIM}│${NC}  ${DIM}Threshold:${NC} 3"
+    local state_label="clean"
+    [[ "$KEEP_STATE" == "true" ]] && state_label="keep-state"
+    [[ "$FORCE_CLEAN" == "true" ]] && state_label="force-clean"
+    echo -e "  ${DIM}Chain ID:${NC} ${CHAIN_ID:-1337}  ${DIM}│${NC}  ${DIM}Validators:${NC} 4  ${DIM}│${NC}  ${DIM}Threshold:${NC} 3  ${DIM}│${NC}  ${DIM}State:${NC} ${state_label}"
     echo ""
 }
 
@@ -185,8 +198,17 @@ print_header
 
 # Phase 0: Build
 print_phase "0/3" "Building Docker image"
-if run_with_spinner "Building kora:local image..." docker buildx bake --allow=fs.read=.. -f docker-bake.hcl kora-local; then
-    print_success "Image built successfully"
+
+# Export git metadata for image versioning (docker-bake.hcl reads these)
+export GIT_SHA
+GIT_SHA=$(git -C .. rev-parse HEAD 2>/dev/null || echo "unknown")
+export GIT_SHA_SHORT
+GIT_SHA_SHORT=$(git -C .. rev-parse --short HEAD 2>/dev/null || echo "unknown")
+export BUILD_TIMESTAMP
+BUILD_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+if run_with_spinner "Building kora:local image (${GIT_SHA_SHORT})..." docker buildx bake --allow=fs.read=.. -f docker-bake.hcl kora-local; then
+    print_success "Image built successfully (sha-${GIT_SHA_SHORT})"
 else
     print_error "Build failed"
     exit 1
@@ -297,11 +319,22 @@ else
         echo ""
         print_phase "1.5/3" "Trusted Dealer DKG"
 
-        if run_with_spinner "Generating threshold shares..." docker compose -f compose/devnet.yaml run --rm init-config; then
-            print_success "Threshold shares generated"
+        if [[ "$CONFIG_EXISTS" == "true" ]]; then
+            # Config exists but shares are missing -- run dkg-deal only to
+            # avoid redundantly re-running keygen setup (issue #193).
+            if run_with_spinner "Generating threshold shares (config cached)..." docker compose -f compose/devnet.yaml run --rm init-dkg-deal; then
+                print_success "Threshold shares generated (setup skipped)"
+            else
+                print_error "Trusted dealer DKG failed"
+                exit 1
+            fi
         else
-            print_error "Trusted dealer DKG failed"
-            exit 1
+            if run_with_spinner "Generating threshold shares..." docker compose -f compose/devnet.yaml run --rm init-config; then
+                print_success "Threshold shares generated"
+            else
+                print_error "Trusted dealer DKG failed"
+                exit 1
+            fi
         fi
     else
         print_skip "Threshold shares exist"
@@ -315,8 +348,18 @@ print_phase "2/3" "Starting validators and secondary peers"
 
 docker compose -f compose/devnet.yaml stop \
     validator-node0 validator-node1 validator-node2 validator-node3 secondary-node0 >/dev/null 2>&1 || true
-clear_runtime_state
-clear_startup_barrier
+
+if [[ "$FORCE_CLEAN" == "true" ]]; then
+    clear_runtime_state
+    clear_startup_barrier
+    print_success "Runtime state cleared (--force-clean)"
+elif [[ "$KEEP_STATE" == "true" ]]; then
+    clear_startup_barrier
+    print_skip "Runtime state preserved (--keep-state)"
+else
+    clear_runtime_state
+    clear_startup_barrier
+fi
 
 if [[ "${COMPOSE_PROFILES:-}" == *observability* ]]; then
     run_with_spinner "Launching validator, secondary, and observability containers..." docker compose -f compose/devnet.yaml --profile observability up -d \

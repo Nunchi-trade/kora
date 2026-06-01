@@ -3,5 +3,6 @@
 - name: Reset devnet
   hosts: devnet
   become: true
+  become_user: "{{ kora_user }}"
   roles:
     - reset

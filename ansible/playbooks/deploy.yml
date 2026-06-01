@@ -1,8 +1,13 @@
 ---
 # Repeatable deploy: sync code → build image → start devnet
+#
+# Runs docker/compose operations as the kora service user (created by
+# the base role during provisioning). Root is only used for become
+# escalation to the kora user, never for direct docker commands.
 - name: Deploy devnet
   hosts: devnet
   become: true
+  become_user: "{{ kora_user }}"
   roles:
     - role: sync
       tags: [sync]
