@@ -1081,6 +1081,7 @@ impl NodeRunner for ProductionRunner {
                 let seen = seen.clone();
                 let gossip_ledger = ledger.clone();
                 let gossip_chain_id = self.chain_id;
+                let gossip_gas_limit = gas_limit;
                 let gossip_pool = txpool.clone();
                 let mut receiver = tx_gossip_receiver;
                 let in_metrics = app_metrics.clone();
@@ -1113,7 +1114,7 @@ impl NodeRunner for ProductionRunner {
                         let validator = TransactionValidator::new(
                             gossip_chain_id,
                             current_state,
-                            PoolConfig::default(),
+                            PoolConfig::default().with_block_gas_limit(gossip_gas_limit),
                         )
                         .with_pool(gossip_pool.clone());
                         if let Err(e) = validator.validate(tx.clone()).await {
@@ -1197,6 +1198,7 @@ impl NodeRunner for ProductionRunner {
             );
             let tx_ledger = ledger.clone();
             let chain_id = self.chain_id;
+            let rpc_gas_limit = gas_limit;
             let tx_pool = txpool.clone();
             let gossip_tx = gossip_outbound_tx.clone();
             let gossip_seen_rpc = gossip_seen.clone();
@@ -1209,9 +1211,12 @@ impl NodeRunner for ProductionRunner {
                     let tx = Tx::new(data.clone());
                     let tx_id = tx.id();
                     let state = ledger.latest_state().await;
-                    let validator =
-                        TransactionValidator::new(chain_id, state, PoolConfig::default())
-                            .with_pool(pool);
+                    let validator = TransactionValidator::new(
+                        chain_id,
+                        state,
+                        PoolConfig::default().with_block_gas_limit(rpc_gas_limit),
+                    )
+                    .with_pool(pool);
                     validator.validate(tx.clone()).await.map_err(|err| {
                         warn!(?tx_id, error = %err, "rpc submit: validator rejected tx");
                         kora_rpc::RpcError::InvalidTransaction(err.to_string())

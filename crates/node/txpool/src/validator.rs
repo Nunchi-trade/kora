@@ -1,7 +1,7 @@
 //! Transaction validation.
 
 use alloy_consensus::{Transaction, TxEnvelope};
-use alloy_eips::eip2718::Decodable2718;
+use alloy_eips::{eip2718::Decodable2718, eip4844::VERSIONED_HASH_VERSION_KZG};
 use alloy_primitives::{Address, B256, U256, keccak256};
 use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
 use kora_domain::Tx;
@@ -18,6 +18,14 @@ const TX_DATA_NON_ZERO_GAS: u64 = 16;
 const TX_CREATE_GAS: u64 = 32000;
 const TX_ACCESS_LIST_ADDRESS_GAS: u64 = 2400;
 const TX_ACCESS_LIST_STORAGE_KEY_GAS: u64 = 1900;
+/// EIP-7702: gas cost per authorization list entry.
+const TX_AUTH_LIST_ENTRY_GAS: u64 = 25_000;
+/// EIP-3860: gas cost per 32-byte word of initcode.
+const INITCODE_WORD_COST: u64 = 2;
+/// EIP-3860: maximum initcode size in bytes.
+const MAX_INITCODE_SIZE: usize = 49_152;
+/// EIP-4844: gas consumed per blob.
+const GAS_PER_BLOB: u64 = 131_072;
 
 /// A validated transaction ready for pool insertion.
 #[derive(Debug, Clone)]
@@ -80,7 +88,17 @@ impl<S: StateDbRead> TransactionValidator<S> {
             return Err(TxPoolError::InvalidChainId { got: tx_chain_id, expected: self.chain_id });
         }
 
+        validate_typed_transaction_fields(&envelope)?;
+
         let (sender, hash) = recover_sender_and_hash(&envelope)?;
+
+        // EIP-3860: reject contract creation with oversized initcode.
+        if envelope.to().is_none() && envelope.input().len() > MAX_INITCODE_SIZE {
+            return Err(TxPoolError::InitcodeTooLarge {
+                size: envelope.input().len(),
+                max: MAX_INITCODE_SIZE,
+            });
+        }
 
         let effective_gas_price = effective_gas_price(&envelope);
         if effective_gas_price < self.config.min_gas_price {
@@ -96,6 +114,14 @@ impl<S: StateDbRead> TransactionValidator<S> {
             return Err(TxPoolError::IntrinsicGasTooLow {
                 limit: gas_limit,
                 intrinsic: intrinsic_gas,
+            });
+        }
+
+        // Reject transactions whose gas limit exceeds the block gas limit.
+        if gas_limit > self.config.block_gas_limit {
+            return Err(TxPoolError::GasLimitTooHigh {
+                limit: gas_limit,
+                max: self.config.block_gas_limit,
             });
         }
 
@@ -201,6 +227,36 @@ const fn effective_gas_price(envelope: &TxEnvelope) -> u128 {
     }
 }
 
+fn validate_typed_transaction_fields(envelope: &TxEnvelope) -> Result<(), TxPoolError> {
+    match envelope {
+        TxEnvelope::Eip4844(tx) => {
+            let blob_versioned_hashes = &tx.tx().tx().blob_versioned_hashes;
+            if blob_versioned_hashes.is_empty() {
+                return Err(TxPoolError::InvalidTransactionTypeFields {
+                    reason: "EIP-4844 transaction requires blob versioned hashes",
+                });
+            }
+
+            if blob_versioned_hashes
+                .iter()
+                .any(|hash| hash.as_slice()[0] != VERSIONED_HASH_VERSION_KZG)
+            {
+                return Err(TxPoolError::InvalidTransactionTypeFields {
+                    reason: "EIP-4844 blob versioned hashes must use KZG version",
+                });
+            }
+        }
+        TxEnvelope::Eip7702(tx) if tx.tx().authorization_list.is_empty() => {
+            return Err(TxPoolError::InvalidTransactionTypeFields {
+                reason: "EIP-7702 transaction requires authorizations",
+            });
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
 fn intrinsic_gas(envelope: &TxEnvelope) -> u64 {
     let mut gas = TX_BASE_GAS;
 
@@ -215,6 +271,9 @@ fn intrinsic_gas(envelope: &TxEnvelope) -> u64 {
 
     if envelope.to().is_none() {
         gas += TX_CREATE_GAS;
+        // EIP-3860: initcode word cost.
+        let initcode_len = envelope.input().len() as u64;
+        gas += INITCODE_WORD_COST * initcode_len.div_ceil(32);
     }
 
     let access_list_gas = match envelope {
@@ -222,7 +281,12 @@ fn intrinsic_gas(envelope: &TxEnvelope) -> u64 {
         TxEnvelope::Eip2930(tx) => access_list_gas_cost(&tx.tx().access_list),
         TxEnvelope::Eip1559(tx) => access_list_gas_cost(&tx.tx().access_list),
         TxEnvelope::Eip4844(tx) => access_list_gas_cost(&tx.tx().tx().access_list),
-        TxEnvelope::Eip7702(tx) => access_list_gas_cost(&tx.tx().access_list),
+        TxEnvelope::Eip7702(tx) => {
+            let al_gas = access_list_gas_cost(&tx.tx().access_list);
+            // EIP-7702: authorization list cost.
+            let auth_gas = tx.tx().authorization_list.len() as u64 * TX_AUTH_LIST_ENTRY_GAS;
+            al_gas + auth_gas
+        }
     };
     gas += access_list_gas;
 
@@ -242,15 +306,24 @@ fn max_tx_cost(envelope: &TxEnvelope) -> U256 {
     let gas_limit = U256::from(envelope.gas_limit());
     let max_fee = U256::from(effective_gas_price(envelope));
     let value = envelope.value();
+    let mut cost = gas_limit * max_fee + value;
 
-    gas_limit * max_fee + value
+    // EIP-4844: add blob gas cost.
+    if let TxEnvelope::Eip4844(tx) = envelope {
+        let blob_tx = tx.tx().tx();
+        let total_blob_gas = U256::from(blob_tx.blob_versioned_hashes.len() as u64 * GAS_PER_BLOB);
+        let max_blob_fee = U256::from(blob_tx.max_fee_per_blob_gas);
+        cost += total_blob_gas * max_blob_fee;
+    }
+
+    cost
 }
 
 #[cfg(test)]
 mod tests {
     use std::{collections::HashMap, sync::Arc};
 
-    use alloy_consensus::{SignableTransaction as _, TxEip1559, TxLegacy};
+    use alloy_consensus::{SignableTransaction as _, TxEip1559, TxEip4844, TxEip7702, TxLegacy};
     use alloy_eips::{
         eip2718::Encodable2718,
         eip2930::{AccessList, AccessListItem},
@@ -388,6 +461,96 @@ mod tests {
         (sender, envelope, Tx::new(raw_bytes.into()))
     }
 
+    fn sign_eip4844_tx(
+        chain_id: u64,
+        nonce: u64,
+        gas_limit: u64,
+        max_fee_per_gas: u128,
+        blob_versioned_hashes: Vec<B256>,
+    ) -> (Address, TxEnvelope, Tx) {
+        let signing_key = SigningKey::random(&mut OsRng);
+        let verifying_key = signing_key.verifying_key();
+        let pubkey = verifying_key.to_encoded_point(false);
+        let pubkey_bytes = pubkey.as_bytes();
+        let pubkey_hash = sha3::Keccak256::digest(&pubkey_bytes[1..]);
+        let sender = Address::from_slice(&pubkey_hash[12..]);
+
+        let tx = TxEip4844 {
+            chain_id,
+            nonce,
+            gas_limit,
+            max_fee_per_gas,
+            max_priority_fee_per_gas: max_fee_per_gas,
+            to: Address::ZERO,
+            value: U256::ZERO,
+            access_list: Default::default(),
+            blob_versioned_hashes,
+            max_fee_per_blob_gas: max_fee_per_gas,
+            input: Bytes::new(),
+        };
+
+        let sig_hash = tx.signature_hash();
+        let (sig, recovery_id) = signing_key.sign_prehash_recoverable(sig_hash.as_slice()).unwrap();
+        let r = U256::from_be_slice(&sig.r().to_bytes());
+        let s = U256::from_be_slice(&sig.s().to_bytes());
+        let v = recovery_id.is_y_odd();
+        let signature = Signature::new(r, s, v);
+
+        let signed = tx.into_signed(signature);
+        let envelope = TxEnvelope::from(signed);
+        let mut raw_bytes = Vec::new();
+        envelope.encode_2718(&mut raw_bytes);
+
+        (sender, envelope, Tx::new(raw_bytes.into()))
+    }
+
+    fn sign_eip7702_empty_auth_tx(
+        chain_id: u64,
+        nonce: u64,
+        gas_limit: u64,
+        max_fee_per_gas: u128,
+    ) -> (Address, TxEnvelope, Tx) {
+        let signing_key = SigningKey::random(&mut OsRng);
+        let verifying_key = signing_key.verifying_key();
+        let pubkey = verifying_key.to_encoded_point(false);
+        let pubkey_bytes = pubkey.as_bytes();
+        let pubkey_hash = sha3::Keccak256::digest(&pubkey_bytes[1..]);
+        let sender = Address::from_slice(&pubkey_hash[12..]);
+
+        let tx = TxEip7702 {
+            chain_id,
+            nonce,
+            gas_limit,
+            max_fee_per_gas,
+            max_priority_fee_per_gas: max_fee_per_gas,
+            to: Address::ZERO,
+            value: U256::ZERO,
+            access_list: Default::default(),
+            authorization_list: Vec::new(),
+            input: Bytes::new(),
+        };
+
+        let sig_hash = tx.signature_hash();
+        let (sig, recovery_id) = signing_key.sign_prehash_recoverable(sig_hash.as_slice()).unwrap();
+        let r = U256::from_be_slice(&sig.r().to_bytes());
+        let s = U256::from_be_slice(&sig.s().to_bytes());
+        let v = recovery_id.is_y_odd();
+        let signature = Signature::new(r, s, v);
+
+        let signed = tx.into_signed(signature);
+        let envelope = TxEnvelope::from(signed);
+        let mut raw_bytes = Vec::new();
+        envelope.encode_2718(&mut raw_bytes);
+
+        (sender, envelope, Tx::new(raw_bytes.into()))
+    }
+
+    fn blob_hash_with_version(version: u8) -> B256 {
+        let mut bytes = [0u8; 32];
+        bytes[0] = version;
+        B256::from(bytes)
+    }
+
     #[tokio::test]
     async fn validate_valid_eip1559_transaction() {
         let chain_id = 1u64;
@@ -433,6 +596,81 @@ mod tests {
 
         let result = validator.validate(raw_tx).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn validate_valid_eip4844_transaction_with_kzg_hash() {
+        let chain_id = 1u64;
+        let (sender, _, raw_tx) = sign_eip4844_tx(
+            chain_id,
+            0,
+            21000,
+            1_000_000_000,
+            vec![blob_hash_with_version(VERSIONED_HASH_VERSION_KZG)],
+        );
+
+        let state =
+            MockState::new().with_account(sender, 0, U256::from(1_000_000_000_000_000_000u64));
+        let config = PoolConfig::default();
+        let validator = TransactionValidator::new(chain_id, state, config);
+
+        let result = validator.validate(raw_tx).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn reject_eip4844_empty_blob_versioned_hashes() {
+        let chain_id = 1u64;
+        let (_, _, raw_tx) = sign_eip4844_tx(chain_id, 0, 21000, 1_000_000_000, Vec::new());
+
+        let state = MockState::new();
+        let config = PoolConfig::default();
+        let validator = TransactionValidator::new(chain_id, state, config);
+
+        let result = validator.validate(raw_tx).await;
+        assert!(matches!(
+            result,
+            Err(TxPoolError::InvalidTransactionTypeFields {
+                reason: "EIP-4844 transaction requires blob versioned hashes"
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn reject_eip4844_invalid_blob_versioned_hash_version() {
+        let chain_id = 1u64;
+        let (_, _, raw_tx) =
+            sign_eip4844_tx(chain_id, 0, 21000, 1_000_000_000, vec![blob_hash_with_version(0x02)]);
+
+        let state = MockState::new();
+        let config = PoolConfig::default();
+        let validator = TransactionValidator::new(chain_id, state, config);
+
+        let result = validator.validate(raw_tx).await;
+        assert!(matches!(
+            result,
+            Err(TxPoolError::InvalidTransactionTypeFields {
+                reason: "EIP-4844 blob versioned hashes must use KZG version"
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn reject_eip7702_empty_authorization_list() {
+        let chain_id = 1u64;
+        let (_, _, raw_tx) = sign_eip7702_empty_auth_tx(chain_id, 0, 21000, 1_000_000_000);
+
+        let state = MockState::new();
+        let config = PoolConfig::default();
+        let validator = TransactionValidator::new(chain_id, state, config);
+
+        let result = validator.validate(raw_tx).await;
+        assert!(matches!(
+            result,
+            Err(TxPoolError::InvalidTransactionTypeFields {
+                reason: "EIP-7702 transaction requires authorizations"
+            })
+        ));
     }
 
     #[tokio::test]
