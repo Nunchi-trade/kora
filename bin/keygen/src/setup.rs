@@ -1,6 +1,6 @@
 //! Generates initial configuration for a Kora devnet.
 
-use std::{collections::BTreeMap, fs, io::Write as _, path::PathBuf};
+use std::{collections::BTreeMap, fs, path::PathBuf};
 
 use alloy_primitives::{Address, keccak256};
 use clap::Args;
@@ -11,6 +11,9 @@ use eyre::{Result, WrapErr};
 use k256::ecdsa::SigningKey;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
+
+use crate::secret_file::write_secret_file;
 
 const GENESIS_BALANCE: &str = "1000000000000000000000000";
 const LOADGEN_ACCOUNT_COUNT: u8 = 50;
@@ -114,16 +117,17 @@ pub(crate) fn run(args: SetupArgs) -> Result<()> {
         let key_path = node_dir.join("validator.key");
         let key = if key_path.exists() {
             tracing::info!(node = i, "Loading existing identity key");
-            let bytes = fs::read(&key_path)?;
-            let mut seed = [0u8; 32];
+            let mut bytes = Zeroizing::new(fs::read(&key_path)?);
+            let mut seed = Zeroizing::new([0u8; 32]);
             seed.copy_from_slice(&bytes);
-            private_key_from_seed(seed)
+            bytes.fill(0);
+            private_key_from_seed(*seed)
         } else {
             tracing::info!(node = i, "Generating new identity key");
-            let mut seed = [0u8; 32];
-            rand::rngs::OsRng.fill_bytes(&mut seed);
-            write_secret_file(&key_path, &seed)?;
-            private_key_from_seed(seed)
+            let mut seed = Zeroizing::new([0u8; 32]);
+            rand::rngs::OsRng.fill_bytes(seed.as_mut());
+            write_secret_file(&key_path, seed.as_ref())?;
+            private_key_from_seed(*seed)
         };
 
         let public_key = key.public_key();
@@ -150,16 +154,17 @@ pub(crate) fn run(args: SetupArgs) -> Result<()> {
         let key_path = node_dir.join("validator.key");
         let key = if key_path.exists() {
             tracing::info!(node = i, "Loading existing secondary identity key");
-            let bytes = fs::read(&key_path)?;
-            let mut seed = [0u8; 32];
+            let mut bytes = Zeroizing::new(fs::read(&key_path)?);
+            let mut seed = Zeroizing::new([0u8; 32]);
             seed.copy_from_slice(&bytes);
-            private_key_from_seed(seed)
+            bytes.fill(0);
+            private_key_from_seed(*seed)
         } else {
             tracing::info!(node = i, "Generating new secondary identity key");
-            let mut seed = [0u8; 32];
-            rand::rngs::OsRng.fill_bytes(&mut seed);
-            write_secret_file(&key_path, &seed)?;
-            private_key_from_seed(seed)
+            let mut seed = Zeroizing::new([0u8; 32]);
+            rand::rngs::OsRng.fill_bytes(seed.as_mut());
+            write_secret_file(&key_path, seed.as_ref())?;
+            private_key_from_seed(*seed)
         };
 
         let public_key = key.public_key();
@@ -212,19 +217,6 @@ pub(crate) fn run(args: SetupArgs) -> Result<()> {
     tracing::info!("  Chain ID:      {}", args.chain_id);
 
     Ok(())
-}
-
-/// Write `data` to `path` with mode `0600` so key material is never world-readable.
-fn write_secret_file(path: &std::path::Path, data: &[u8]) -> Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut f = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)
-        .wrap_err_with(|| format!("Failed to create secret file {}", path.display()))?;
-    f.write_all(data).wrap_err_with(|| format!("Failed to write secret file {}", path.display()))
 }
 
 #[cfg(test)]

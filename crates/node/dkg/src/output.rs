@@ -1,12 +1,12 @@
-use std::{io::Write as _, path::Path};
+use std::{fmt, path::Path};
 
 use commonware_utils::{Faults, N3f1};
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroize;
 
-use crate::DkgError;
+use crate::{DkgError, secret_file::write_secret_file};
 
 /// Output of a successful DKG ceremony containing the group key, shares, and participant info.
-#[derive(Debug, Clone)]
 pub struct DkgOutput {
     /// The aggregated group public key derived from all participants' contributions.
     pub group_public_key: Vec<u8>,
@@ -46,6 +46,32 @@ struct ShareJson {
     secret: String,
 }
 
+impl fmt::Debug for DkgOutput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DkgOutput")
+            .field("group_public_key", &self.group_public_key)
+            .field("public_polynomial", &self.public_polynomial)
+            .field("threshold", &self.threshold)
+            .field("participants", &self.participants)
+            .field("share_index", &self.share_index)
+            .field("share_secret", &"<redacted>")
+            .field("participant_keys", &self.participant_keys)
+            .finish()
+    }
+}
+
+impl Drop for DkgOutput {
+    fn drop(&mut self) {
+        self.share_secret.zeroize();
+    }
+}
+
+impl Drop for ShareJson {
+    fn drop(&mut self) {
+        self.secret.zeroize();
+    }
+}
+
 impl DkgOutput {
     /// Persists the DKG output to `output.json` and the secret share to `share.key` in `data_dir`.
     pub fn save(&self, data_dir: &Path) -> Result<(), DkgError> {
@@ -58,13 +84,15 @@ impl DkgOutput {
         };
 
         let output_path = data_dir.join("output.json");
-        std::fs::write(&output_path, serde_json::to_string_pretty(&output_json)?)?;
+        write_secret_file(&output_path, serde_json::to_string_pretty(&output_json)?.as_bytes())?;
 
         let share_json =
             ShareJson { index: self.share_index, secret: hex::encode(&self.share_secret) };
 
         let share_path = data_dir.join("share.key");
-        write_secret_file(&share_path, serde_json::to_string_pretty(&share_json)?.as_bytes())?;
+        let mut share_content = serde_json::to_string_pretty(&share_json)?;
+        write_secret_file(&share_path, share_content.as_bytes())?;
+        share_content.zeroize();
 
         Ok(())
     }
@@ -80,15 +108,20 @@ impl DkgOutput {
             .map_err(|e| DkgError::Serialization(e.to_string()))?;
 
         let share_path = data_dir.join("share.key");
-        let share_str = std::fs::read_to_string(&share_path)?;
+        let mut share_str = std::fs::read_to_string(&share_path)?;
         let share: ShareJson =
             serde_json::from_str(&share_str).map_err(|e| DkgError::Serialization(e.to_string()))?;
+        share_str.zeroize();
 
         let participant_keys = output
             .participant_keys
             .iter()
             .map(|k| hex::decode(k).map_err(|e| DkgError::Serialization(e.to_string())))
             .collect::<Result<Vec<_>, _>>()?;
+        let share_index = share.index;
+        let share_secret =
+            hex::decode(&share.secret).map_err(|e| DkgError::Serialization(e.to_string()))?;
+        drop(share);
 
         // Always compute the correct quorum from N3f1 rather than trusting
         // the persisted threshold value, which may be wrong in old output files.
@@ -101,9 +134,8 @@ impl DkgOutput {
                 .map_err(|e| DkgError::Serialization(e.to_string()))?,
             threshold: correct_threshold,
             participants: output.participants,
-            share_index: share.index,
-            share_secret: hex::decode(&share.secret)
-                .map_err(|e| DkgError::Serialization(e.to_string()))?,
+            share_index,
+            share_secret,
             participant_keys,
         })
     }
@@ -114,21 +146,79 @@ impl DkgOutput {
     }
 }
 
-/// Write `data` to `path` with mode `0600` so key material is never world-readable.
-fn write_secret_file(path: &Path, data: &[u8]) -> Result<(), DkgError> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
-    f.write_all(data)?;
-    Ok(())
-}
-
 impl From<serde_json::Error> for DkgError {
     fn from(e: serde_json::Error) -> Self {
         Self::Serialization(e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_redacts_share_secret() {
+        let output = DkgOutput {
+            group_public_key: vec![1, 2, 3],
+            public_polynomial: vec![4, 5, 6],
+            threshold: 2,
+            participants: 3,
+            share_index: 1,
+            share_secret: vec![222, 173, 190, 239],
+            participant_keys: vec![vec![7, 8, 9]],
+        };
+
+        let debug = format!("{output:?}");
+
+        assert!(debug.contains("share_secret: \"<redacted>\""));
+        assert!(!debug.contains("222"));
+        assert!(!debug.contains("173"));
+        assert!(!debug.contains("190"));
+        assert!(!debug.contains("239"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_restricts_existing_secret_file_permissions() {
+        use std::{
+            fs,
+            os::unix::fs::PermissionsExt as _,
+            time::{SystemTime, UNIX_EPOCH},
+        };
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after epoch")
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("kora-dkg-output-{}-{nonce}", std::process::id()));
+        fs::create_dir(&dir).expect("create temp dir");
+
+        for file in ["output.json", "share.key"] {
+            let path = dir.join(file);
+            fs::write(&path, b"old").expect("write permissive file");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644))
+                .expect("set permissive mode");
+        }
+
+        let output = DkgOutput {
+            group_public_key: vec![1, 2, 3],
+            public_polynomial: vec![4, 5, 6],
+            threshold: 2,
+            participants: 3,
+            share_index: 1,
+            share_secret: vec![10, 11, 12],
+            participant_keys: vec![vec![7, 8, 9]],
+        };
+
+        output.save(&dir).expect("save dkg output");
+
+        for file in ["output.json", "share.key"] {
+            let mode = fs::metadata(dir.join(file)).expect("stat secret file").permissions().mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "{file} should be mode 0600");
+        }
+
+        fs::remove_dir_all(dir).expect("remove temp dir");
     }
 }

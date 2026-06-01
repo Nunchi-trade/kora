@@ -24,6 +24,7 @@ rand.workspace = true
 rand_core.workspace = true
 bytes.workspace = true
 hex.workspace = true
+zeroize.workspace = true
 
 [lints]
 workspace = true

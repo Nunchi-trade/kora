@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, path::Path};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use crate::{CeremonySession, DkgError};
+use crate::{CeremonySession, DkgError, secret_file::write_secret_file};
 
 /// Current phase of the DKG protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,11 +118,11 @@ impl PersistedDkgState {
         self.session = session.into();
     }
 
-    /// Save state to disk.
+    /// Save state to disk with restrictive permissions (0600).
     pub fn save(&self, data_dir: &Path) -> Result<(), DkgError> {
         let path = data_dir.join(Self::STATE_FILE);
         let content = serde_json::to_string_pretty(self)?;
-        std::fs::write(&path, content)?;
+        write_secret_file(&path, content.as_bytes())?;
         Ok(())
     }
 
