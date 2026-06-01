@@ -15,6 +15,8 @@ pub mod commit_marker;
 mod error;
 pub use error::RunnerError;
 
+mod fees;
+
 mod no_sync_storage;
 
 mod runner;

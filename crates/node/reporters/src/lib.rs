@@ -43,7 +43,7 @@ use kora_overlay::OverlayState;
 use kora_qmdb_ledger::QmdbState;
 use kora_rpc::{MempoolEventSender, NodeState};
 use thiserror::Error;
-use tracing::{error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 #[cfg(test)]
 fn run_reporter_test<F, Fut>(f: F)
@@ -598,6 +598,13 @@ where
         trace!(?digest, "using cached snapshot for finalized block");
     }
     if persist_checkpoint {
+        // NOTE: This awaits the persistence task synchronously, blocking
+        // the finalization pipeline during disk I/O.  At each checkpoint
+        // interval (every N blocks) this stall can last tens to hundreds of
+        // milliseconds, increasing nullification risk.  A future
+        // improvement should pipeline persistence in the background (see
+        // issue #020).
+        let persist_start = std::time::Instant::now();
         let persist_state = state.clone();
         let persist_handle = context
             .child("persist")
@@ -606,6 +613,20 @@ where
         let persist_result = persist_handle
             .await
             .map_err(|err| FinalizationError::PersistTaskFailed(format!("{err}")))?;
+        let persist_elapsed = persist_start.elapsed();
+        if persist_elapsed.as_millis() > 50 {
+            warn!(
+                ?digest,
+                elapsed_ms = persist_elapsed.as_millis(),
+                "finalize_block: persistence stalled finalization pipeline"
+            );
+        } else {
+            debug!(
+                ?digest,
+                elapsed_ms = persist_elapsed.as_millis(),
+                "finalize_block: persistence completed"
+            );
+        }
         if let Err(err) = persist_result {
             return Err(FinalizationError::PersistFailed(err));
         }

@@ -1,9 +1,10 @@
 use std::{path::PathBuf, sync::Arc};
 
 use clap::{Parser, Subcommand};
+use commonware_codec::{FixedSize as _, Write as _};
 use commonware_runtime::Supervisor as _;
 use commonware_utils::{Faults, N3f1};
-use kora_config::NodeConfig;
+use kora_config::{DEFAULT_CHAIN_ID, NodeConfig};
 use kora_domain::BootstrapConfig;
 use kora_rpc::NodeState;
 use kora_runner::{ProductionRunner, load_threshold_scheme, runtime_storage_directory};
@@ -158,8 +159,6 @@ impl Cli {
             config.network.tx_gossip = true;
         }
 
-        tracing::info!(chain_id = config.chain_id, "Starting validator");
-
         if !kora_dkg::DkgOutput::exists(&config.data_dir) {
             return Err(eyre::eyre!(
                 "DKG output not found. Run 'kora dkg' first to generate threshold shares."
@@ -168,10 +167,6 @@ impl Cli {
 
         let dkg_output = kora_dkg::DkgOutput::load(&config.data_dir)?;
         tracing::info!(share_index = dkg_output.share_index, "Loaded DKG output");
-
-        let scheme = load_threshold_scheme(&config.data_dir)
-            .map_err(|e| eyre::eyre!("Failed to load threshold scheme: {}", e))?;
-        tracing::info!("Loaded threshold signing scheme");
 
         let mut secondary_participants = Vec::new();
         if let Some(ref peers_path) = args.peers {
@@ -182,21 +177,26 @@ impl Cli {
                 "Loaded bootstrap peers from peers.json"
             );
 
+            validate_dkg_participants(&dkg_output, &peers)?;
+
             secondary_participants = peers.secondary_participants;
         }
+
+        let scheme = load_threshold_scheme(&config.data_dir)
+            .map_err(|e| eyre::eyre!("Failed to load threshold scheme: {}", e))?;
+        tracing::info!("Loaded threshold signing scheme");
 
         let genesis_path = config.data_dir.join("genesis.json");
         let bootstrap = BootstrapConfig::load(&genesis_path)
             .map_err(|e| eyre::eyre!("Failed to load genesis: {}", e))?;
         tracing::info!(allocations = bootstrap.genesis_alloc.len(), "Loaded genesis configuration");
 
-        if bootstrap.chain_id != config.chain_id {
-            return Err(eyre::eyre!(
-                "genesis.json chain_id ({}) does not match node chain_id ({})",
-                bootstrap.chain_id,
-                config.chain_id
-            ));
-        }
+        reconcile_genesis_chain_id(
+            &mut config,
+            bootstrap.chain_id,
+            self.chain_id.is_some() || config_file_declares_chain_id(self.config.as_ref())?,
+        )?;
+        tracing::info!(chain_id = config.chain_id, "Starting validator");
 
         let rpc_addr: std::net::SocketAddr = config.rpc.http_addr.parse().map_err(|err| {
             eyre::eyre!("invalid rpc.http_addr '{}': {}", config.rpc.http_addr, err)
@@ -447,4 +447,228 @@ fn parse_public_keys(
     }
 
     Ok(public_keys)
+}
+
+fn config_file_declares_chain_id(path: Option<&PathBuf>) -> eyre::Result<bool> {
+    let Some(path) = path else {
+        return Ok(false);
+    };
+    let contents = std::fs::read_to_string(path)?;
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("toml");
+    match ext {
+        "json" => {
+            let value: serde_json::Value = serde_json::from_str(&contents)?;
+            Ok(value.as_object().is_some_and(|object| object.contains_key("chain_id")))
+        }
+        _ => {
+            let value: toml::Value = toml::from_str(&contents)?;
+            Ok(value.as_table().is_some_and(|table| table.contains_key("chain_id")))
+        }
+    }
+}
+
+fn reconcile_genesis_chain_id(
+    config: &mut NodeConfig,
+    genesis_chain_id: u64,
+    chain_id_explicit: bool,
+) -> eyre::Result<()> {
+    if genesis_chain_id == config.chain_id {
+        return Ok(());
+    }
+
+    if !chain_id_explicit && config.chain_id == DEFAULT_CHAIN_ID {
+        tracing::warn!(
+            genesis_chain_id,
+            default_chain_id = DEFAULT_CHAIN_ID,
+            "node chain_id was implicit; using genesis.json chain_id for existing data directory"
+        );
+        config.chain_id = genesis_chain_id;
+        return Ok(());
+    }
+
+    Err(eyre::eyre!(
+        "genesis.json chain_id ({}) does not match node chain_id ({})",
+        genesis_chain_id,
+        config.chain_id
+    ))
+}
+
+fn validate_dkg_participants(
+    dkg_output: &kora_dkg::DkgOutput,
+    peers: &PeersInfo,
+) -> eyre::Result<()> {
+    if dkg_output.participants != peers.participants.len() {
+        return Err(eyre::eyre!(
+            "DKG output has {} participants but peers.json has {} participants. \
+             Ensure both files are from the same DKG ceremony.",
+            dkg_output.participants,
+            peers.participants.len()
+        ));
+    }
+
+    if dkg_output.participant_keys.len() != peers.participants.len() {
+        return Err(eyre::eyre!(
+            "DKG output has {} participant keys but peers.json has {} participants. \
+             Regenerate DKG output with participant keys and use the matching peers.json.",
+            dkg_output.participant_keys.len(),
+            peers.participants.len()
+        ));
+    }
+
+    let dkg_keys = dkg_participant_key_set(&dkg_output.participant_keys)?;
+    let peer_keys = peer_participant_key_set(&peers.participants)?;
+    if dkg_keys != peer_keys {
+        return Err(eyre::eyre!(
+            "DKG output participant keys do not match peers.json participants. \
+             Ensure both files are from the same DKG ceremony."
+        ));
+    }
+
+    Ok(())
+}
+
+fn dkg_participant_key_set(keys: &[Vec<u8>]) -> eyre::Result<std::collections::BTreeSet<Vec<u8>>> {
+    let mut set = std::collections::BTreeSet::new();
+    for key in keys {
+        if key.len() != commonware_cryptography::ed25519::PublicKey::SIZE {
+            return Err(eyre::eyre!(
+                "DKG output participant key has invalid length: expected {} bytes, got {}",
+                commonware_cryptography::ed25519::PublicKey::SIZE,
+                key.len()
+            ));
+        }
+        if !set.insert(key.clone()) {
+            return Err(eyre::eyre!("DKG output contains duplicate participant keys"));
+        }
+    }
+    Ok(set)
+}
+
+fn peer_participant_key_set(
+    keys: &[commonware_cryptography::ed25519::PublicKey],
+) -> eyre::Result<std::collections::BTreeSet<Vec<u8>>> {
+    let mut set = std::collections::BTreeSet::new();
+    for key in keys {
+        let mut bytes = Vec::new();
+        key.write(&mut bytes);
+        if !set.insert(bytes) {
+            return Err(eyre::eyre!("peers.json contains duplicate participants"));
+        }
+    }
+    Ok(set)
+}
+
+#[cfg(test)]
+mod tests {
+    use commonware_cryptography::{Signer as _, ed25519};
+
+    use super::*;
+
+    fn public_key_bytes(pk: &ed25519::PublicKey) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        pk.write(&mut bytes);
+        bytes
+    }
+
+    fn peers(keys: Vec<ed25519::PublicKey>) -> PeersInfo {
+        PeersInfo {
+            participants: keys,
+            secondary_participants: Vec::new(),
+            bootstrappers: Vec::new(),
+        }
+    }
+
+    fn dkg_output(keys: &[ed25519::PublicKey]) -> kora_dkg::DkgOutput {
+        kora_dkg::DkgOutput {
+            group_public_key: Vec::new(),
+            public_polynomial: Vec::new(),
+            threshold: N3f1::quorum(keys.len()),
+            participants: keys.len(),
+            share_index: 0,
+            share_secret: Vec::new(),
+            participant_keys: keys.iter().map(public_key_bytes).collect(),
+        }
+    }
+
+    #[test]
+    fn reconcile_genesis_chain_id_adopts_genesis_for_implicit_default() {
+        let mut config = NodeConfig { chain_id: DEFAULT_CHAIN_ID, ..Default::default() };
+
+        reconcile_genesis_chain_id(&mut config, 1, false).expect("implicit default reconciles");
+
+        assert_eq!(config.chain_id, 1);
+    }
+
+    #[test]
+    fn reconcile_genesis_chain_id_rejects_explicit_mismatch() {
+        let mut config = NodeConfig { chain_id: DEFAULT_CHAIN_ID, ..Default::default() };
+
+        let err = reconcile_genesis_chain_id(&mut config, 1, true).unwrap_err();
+
+        assert!(err.to_string().contains("does not match"));
+        assert_eq!(config.chain_id, DEFAULT_CHAIN_ID);
+    }
+
+    #[test]
+    fn config_file_declares_chain_id_detects_toml_and_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml_path = dir.path().join("config.toml");
+        let json_path = dir.path().join("config.json");
+        let missing_path = dir.path().join("missing.toml");
+        std::fs::write(&toml_path, "chain_id = 42\n").unwrap();
+        std::fs::write(&json_path, r#"{"chain_id": 42}"#).unwrap();
+        std::fs::write(&missing_path, "[network]\ntx_gossip = true\n").unwrap();
+
+        assert!(config_file_declares_chain_id(Some(&toml_path)).unwrap());
+        assert!(config_file_declares_chain_id(Some(&json_path)).unwrap());
+        assert!(!config_file_declares_chain_id(Some(&missing_path)).unwrap());
+        assert!(!config_file_declares_chain_id(None).unwrap());
+    }
+
+    #[test]
+    fn validate_dkg_participants_accepts_same_set_in_different_order() {
+        let keys = vec![
+            ed25519::PrivateKey::from_seed(1).public_key(),
+            ed25519::PrivateKey::from_seed(2).public_key(),
+            ed25519::PrivateKey::from_seed(3).public_key(),
+            ed25519::PrivateKey::from_seed(4).public_key(),
+        ];
+        let dkg = dkg_output(&keys);
+        let mut peer_keys = keys;
+        peer_keys.reverse();
+
+        validate_dkg_participants(&dkg, &peers(peer_keys)).expect("same set validates");
+    }
+
+    #[test]
+    fn validate_dkg_participants_rejects_same_count_different_keys() {
+        let dkg_keys = vec![
+            ed25519::PrivateKey::from_seed(1).public_key(),
+            ed25519::PrivateKey::from_seed(2).public_key(),
+            ed25519::PrivateKey::from_seed(3).public_key(),
+            ed25519::PrivateKey::from_seed(4).public_key(),
+        ];
+        let peer_keys = vec![
+            ed25519::PrivateKey::from_seed(1).public_key(),
+            ed25519::PrivateKey::from_seed(2).public_key(),
+            ed25519::PrivateKey::from_seed(3).public_key(),
+            ed25519::PrivateKey::from_seed(9).public_key(),
+        ];
+        let dkg = dkg_output(&dkg_keys);
+
+        let err = validate_dkg_participants(&dkg, &peers(peer_keys)).unwrap_err();
+
+        assert!(err.to_string().contains("do not match"));
+    }
+
+    #[test]
+    fn validate_dkg_participants_rejects_duplicate_peer_keys() {
+        let key = ed25519::PrivateKey::from_seed(1).public_key();
+        let peer_keys = vec![key.clone(), key];
+        let dkg = dkg_output(&peer_keys);
+
+        let err = validate_dkg_participants(&dkg, &peers(peer_keys)).unwrap_err();
+
+        assert!(err.to_string().contains("duplicate"));
+    }
 }

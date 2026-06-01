@@ -3227,7 +3227,9 @@ dependencies = [
  "kora-service",
  "kora-transport",
  "serde_json",
+ "tempfile",
  "tokio",
+ "toml 0.8.23",
  "tracing",
  "tracing-subscriber 0.3.23",
 ]
