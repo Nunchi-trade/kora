@@ -502,15 +502,14 @@ impl<S: StateProvider + 'static> EthApiServer for EthApiImpl<S> {
     }
 
     async fn send_raw_transaction(&self, data: Bytes) -> RpcResult<B256> {
+        let submit = self.tx_submit.as_ref().ok_or_else(|| {
+            RpcError::Internal("transaction submission is not available on this node".to_string())
+        })?;
+
         let tx_hash = alloy_primitives::keccak256(&data);
         let pending_tx = raw_tx_to_pending_rpc(&data)?;
 
-        let accepted = if let Some(ref submit) = self.tx_submit {
-            submit(data).await?;
-            true
-        } else {
-            false
-        };
+        submit(data).await?;
 
         {
             let mut txs = self.pending_txs.write().await;
@@ -553,9 +552,7 @@ impl<S: StateProvider + 'static> EthApiServer for EthApiImpl<S> {
             }
         }
 
-        if accepted {
-            self.broadcast_pending_tx(tx_hash, pending_tx);
-        }
+        self.broadcast_pending_tx(tx_hash, pending_tx);
         Ok(tx_hash)
     }
 
@@ -2420,26 +2417,14 @@ mod tests {
     /// `beb637a`): every tx submitted via JSON-RPC was accepted, hash returned,
     /// but never included in any block.
     ///
-    /// The fix lives in the runner: always wire `tx_submit` to a real mempool.
-    /// The downstream observability fix (warn-log when build_block produces an
-    /// empty block while the mempool is non-empty) lives in `app.rs`.
+    /// When the tx_submit callback is not configured the RPC must reject the
+    /// transaction with an error instead of silently accepting and dropping it.
     #[tokio::test]
-    async fn send_raw_transaction_with_no_callback_silently_accepts_but_drops() {
+    async fn send_raw_transaction_with_no_callback_returns_error() {
         let api = EthApiImpl::new(1, NoopStateProvider); // no tx_submit
         let tx_data = signed_test_tx(1, 0);
         let result = EthApiServer::send_raw_transaction(&api, tx_data.clone()).await;
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), alloy_primitives::keccak256(&tx_data));
-        // The tx is in pending_txs (so getTransactionByHash returns something) —
-        // that's exactly what makes the bug invisible to operators.
-        let cached =
-            EthApiServer::get_transaction_by_hash(&api, alloy_primitives::keccak256(&tx_data))
-                .await
-                .unwrap();
-        assert!(
-            cached.is_some(),
-            "RPC caches the tx for visibility even though it has nowhere to send it"
-        );
+        assert!(result.is_err(), "must reject when tx_submit is None");
     }
 
     /// Regression: the existing `eth_send_raw_transaction` test only verifies

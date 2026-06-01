@@ -40,7 +40,7 @@ use crate::{
         Web3ApiServer,
     },
     kora::{KoraApiImpl, KoraApiServer},
-    state::NodeState,
+    state::{NodeState, PartitionStatus},
     state_provider::{NoopStateProvider, StateProvider},
     subscription::{MempoolEventSender, PendingTxEventSender, subscription_module},
     txpool::{TxpoolApiImpl, TxpoolApiServer},
@@ -763,7 +763,14 @@ async fn status_handler(State(state): State<Arc<NodeState>>) -> impl IntoRespons
     (StatusCode::OK, axum::Json(status))
 }
 
-async fn health_handler() -> impl IntoResponse {
+async fn health_handler(State(state): State<Arc<NodeState>>) -> impl IntoResponse {
+    let status = state.status();
+    if status.partition_status == PartitionStatus::Partitioned {
+        return (StatusCode::SERVICE_UNAVAILABLE, "partitioned");
+    }
+    if state.is_catching_up() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "syncing");
+    }
     (StatusCode::OK, "ok")
 }
 
@@ -1292,8 +1299,11 @@ mod tests {
     async fn http_status_rate_limiter_returns_too_many_requests() {
         let rate_limiter =
             SharedRateLimiter::new(RateLimitConfig { requests_per_second: 1, burst_size: 1 });
+        let node_state = NodeState::new(1, 0);
+        // Set peer count so the health endpoint returns 200 instead of 503 (partitioned).
+        node_state.set_peer_count(3);
         let app = build_http_router(
-            Arc::new(NodeState::new(1, 0)),
+            Arc::new(node_state),
             build_cors_layer(&CorsConfig::none()),
             10,
             rate_limiter,
@@ -1311,5 +1321,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn health_returns_service_unavailable_when_partitioned() {
+        let node_state = NodeState::new(1, 0);
+        let app = build_http_router(
+            Arc::new(node_state),
+            build_cors_layer(&CorsConfig::none()),
+            10,
+            SharedRateLimiter::new(RateLimitConfig::disabled()),
+        );
+
+        let response = app
+            .oneshot(HttpRequest::builder().uri("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn health_returns_service_unavailable_when_syncing() {
+        let node_state = NodeState::new(1, 0);
+        node_state.set_peer_count(3);
+        node_state.set_recovered_height(100);
+        let app = build_http_router(
+            Arc::new(node_state),
+            build_cors_layer(&CorsConfig::none()),
+            10,
+            SharedRateLimiter::new(RateLimitConfig::disabled()),
+        );
+
+        let response = app
+            .oneshot(HttpRequest::builder().uri("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

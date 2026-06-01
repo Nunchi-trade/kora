@@ -248,9 +248,14 @@ impl<S: StateDbRead + Send + Sync + 'static> StateProvider for IndexedStateProvi
             }
         }
 
-        let logs = self
-            .index
-            .get_logs(&log_filter)
+        let (raw_logs, truncated) = self.index.get_logs(&log_filter);
+        if truncated {
+            return Err(RpcError::InvalidParams(format!(
+                "query returned more than {} results",
+                BlockIndex::MAX_LOG_RESULTS,
+            )));
+        }
+        let logs = raw_logs
             .into_iter()
             .map(|log| RpcLog {
                 address: log.address,
