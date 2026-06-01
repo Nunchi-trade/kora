@@ -4,6 +4,7 @@
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
+mod equivocation_log;
 mod gc_log;
 
 use std::{
@@ -32,6 +33,7 @@ use commonware_consensus::{
 use commonware_cryptography::{Committable as _, bls12381::primitives::variant::Variant};
 use commonware_runtime::{Spawner as _, Supervisor as _, tokio};
 use commonware_utils::acknowledgement::{Acknowledgement as _, Exact};
+pub use equivocation_log::EquivocationLog;
 pub use gc_log::SelfdestructGcLog;
 use kora_consensus::BlockExecution;
 use kora_domain::{Block, ConsensusDigest, MempoolEvent, PublicKey, StateRoot};
@@ -232,6 +234,13 @@ where
     }
 }
 
+/// Outcome of `handle_finalized_update` with info needed for post-lock
+/// notifications.  `None` for `Update::Tip` which has no block to process.
+struct FinalizeOutcome {
+    block: Block,
+    mempool_broadcast: Option<MempoolEventSender>,
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_finalized_update<E, P>(
     state: LedgerService,
@@ -246,12 +255,13 @@ async fn handle_finalized_update<E, P>(
     pending_acks: Arc<Mutex<Vec<Exact>>>,
     node_state: Option<NodeState>,
     update: Update<Block>,
-) where
+) -> Option<FinalizeOutcome>
+where
     E: BlockExecutor<OverlayState<QmdbState>, Tx = Bytes>,
     P: BlockContextProvider,
 {
     match update {
-        Update::Tip(..) => {}
+        Update::Tip(..) => None,
         Update::Block(block, ack) => {
             if let Some(ref ns) = node_state {
                 ns.set_finalized_height(block.height);
@@ -330,17 +340,11 @@ async fn handle_finalized_update<E, P>(
                 }
             }
 
+            state.prune_mempool(&block.txs).await;
+            state.prune_stale_nonces().await;
             acknowledge_checkpoint(pending_acks, block.height, checkpoint_interval, ack).await;
 
-            // Prune the mempool -- the block is consensus-finalized, so its
-            // transactions must never be re-proposed.
-            state.prune_mempool(&block.txs).await;
-
-            // Evict any remaining transactions whose nonces are now stale
-            // relative to finalized state.
-            state.prune_stale_nonces().await;
-
-            publish_mempool_inclusions(mempool_broadcast.as_ref(), &block);
+            Some(FinalizeOutcome { block, mempool_broadcast })
         }
     }
 }
@@ -862,7 +866,7 @@ mod finalize_success_tests {
 
             let (ack, waiter) = Exact::handle();
 
-            handle_finalized_update(
+            let outcome = handle_finalized_update(
                 service.clone(),
                 context,
                 EmptySuccessExecutor,
@@ -878,7 +882,9 @@ mod finalize_success_tests {
             )
             .await;
 
-            // -- assert: mempool was pruned --
+            assert!(outcome.is_some(), "finalized block should produce an outcome");
+
+            // -- assert: mempool was pruned before acknowledgement is observed --
             assert_eq!(pool.len(), 0, "mempool must be pruned after successful finalization");
 
             // -- assert: acknowledgement was delivered --
@@ -1292,6 +1298,12 @@ fn receipt_effective_gas_price(metadata: &TxMetadata, base_fee_per_gas: Option<u
     max_fee_per_gas.min(u128::from(base_fee_per_gas).saturating_add(priority_fee))
 }
 
+/// Maximum number of in-flight finalization tasks before a warning is emitted.
+/// This value is intentionally generous -- the finalize_lock serializes the
+/// actual work, so the tasks queue up behind it, but if the queue grows too
+/// deep it indicates the persistence pipeline is unable to keep pace.
+const MAX_OUTSTANDING_FINALIZATIONS: u64 = 8;
+
 /// Persists finalized blocks.
 pub struct FinalizedReporter<E, P> {
     /// Ledger service used to verify blocks and persist snapshots.
@@ -1318,6 +1330,8 @@ pub struct FinalizedReporter<E, P> {
     finalize_lock: Arc<::tokio::sync::Mutex<()>>,
     /// Optional node state for tracking the latest finalized height.
     node_state: Option<NodeState>,
+    /// Number of finalization tasks currently in-flight (spawned but not completed).
+    outstanding_tasks: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl<E, P> Clone for FinalizedReporter<E, P>
@@ -1339,6 +1353,7 @@ where
             pending_acks: self.pending_acks.clone(),
             finalize_lock: self.finalize_lock.clone(),
             node_state: self.node_state.clone(),
+            outstanding_tasks: self.outstanding_tasks.clone(),
         }
     }
 }
@@ -1369,6 +1384,7 @@ where
             pending_acks: Arc::new(Mutex::new(Vec::new())),
             finalize_lock: Arc::new(::tokio::sync::Mutex::new(())),
             node_state: None,
+            outstanding_tasks: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -1427,6 +1443,14 @@ where
     type Activity = Update<Block>;
 
     fn report(&mut self, update: Self::Activity) -> Feedback {
+        let outstanding = self.outstanding_tasks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if outstanding >= MAX_OUTSTANDING_FINALIZATIONS {
+            warn!(
+                outstanding = outstanding + 1,
+                max = MAX_OUTSTANDING_FINALIZATIONS,
+                "finalization pipeline backlog: persistence is falling behind block production"
+            );
+        }
         let state = self.state.clone();
         let context = self.context.child("report");
         let executor = self.executor.clone();
@@ -1439,23 +1463,32 @@ where
         let pending_acks = self.pending_acks.clone();
         let finalize_lock = self.finalize_lock.clone();
         let node_state = self.node_state.clone();
+        let task_counter = self.outstanding_tasks.clone();
         self.context.child("report_task").spawn(move |_| async move {
-            let _guard = finalize_lock.lock().await;
-            handle_finalized_update(
-                state,
-                context,
-                executor,
-                provider,
-                block_index,
-                mempool_broadcast,
-                gc_log,
-                metrics,
-                checkpoint_interval,
-                pending_acks,
-                node_state,
-                update,
-            )
-            .await;
+            // Hold `finalize_lock` for the ordering-sensitive part:
+            // finalization, persistence, mempool pruning, and acknowledgment.
+            let outcome = {
+                let _guard = finalize_lock.lock().await;
+                handle_finalized_update(
+                    state.clone(),
+                    context,
+                    executor,
+                    provider,
+                    block_index,
+                    mempool_broadcast,
+                    gc_log,
+                    metrics,
+                    checkpoint_interval,
+                    pending_acks,
+                    node_state,
+                    update,
+                )
+                .await
+            };
+            if let Some(outcome) = outcome {
+                publish_mempool_inclusions(outcome.mempool_broadcast.as_ref(), &outcome.block);
+            }
+            task_counter.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         });
         Feedback::Ok
     }
@@ -1577,6 +1610,8 @@ pub struct NodeStateReporter<S> {
     state: NodeState,
     /// Optional application-level metrics for Prometheus counters.
     metrics: Option<AppMetrics>,
+    /// Append-only log for persisting equivocation proofs to disk.
+    equivocation_log: Option<Arc<EquivocationLog>>,
     /// Marker for the signing scheme.
     _scheme: PhantomData<S>,
 }
@@ -1590,7 +1625,14 @@ impl<S> fmt::Debug for NodeStateReporter<S> {
 impl<S> NodeStateReporter<S> {
     /// Create a new node state reporter.
     pub const fn new(state: NodeState) -> Self {
-        Self { state, metrics: None, _scheme: PhantomData }
+        Self { state, metrics: None, equivocation_log: None, _scheme: PhantomData }
+    }
+
+    /// Attach an equivocation log for persisting proof data to disk.
+    #[must_use]
+    pub fn with_equivocation_log(mut self, log: Arc<EquivocationLog>) -> Self {
+        self.equivocation_log = Some(log);
+        self
     }
 
     /// Attach application-level metrics for tracking equivocation events.
@@ -1620,12 +1662,13 @@ where
                 self.state.inc_nullified();
             }
             Activity::ConflictingNotarize(proof) => {
-                warn!(
-                    signer = ?proof.signer(),
-                    view = ?proof.view(),
-                    "EQUIVOCATION: conflicting notarize detected"
-                );
+                let signer = proof.signer();
+                let view = proof.view();
+                warn!(?signer, ?view, "EQUIVOCATION: conflicting notarize detected");
                 self.state.inc_equivocations();
+                if let Some(ref log) = self.equivocation_log {
+                    log.record("conflicting_notarize", &format!("{signer:?}"), view.get());
+                }
                 if let Some(ref m) = self.metrics {
                     m.equivocations
                         .get_or_create(&EquivocationTypeLabel {
@@ -1635,12 +1678,13 @@ where
                 }
             }
             Activity::ConflictingFinalize(proof) => {
-                warn!(
-                    signer = ?proof.signer(),
-                    view = ?proof.view(),
-                    "EQUIVOCATION: conflicting finalize detected"
-                );
+                let signer = proof.signer();
+                let view = proof.view();
+                warn!(?signer, ?view, "EQUIVOCATION: conflicting finalize detected");
                 self.state.inc_equivocations();
+                if let Some(ref log) = self.equivocation_log {
+                    log.record("conflicting_finalize", &format!("{signer:?}"), view.get());
+                }
                 if let Some(ref m) = self.metrics {
                     m.equivocations
                         .get_or_create(&EquivocationTypeLabel {
@@ -1650,12 +1694,13 @@ where
                 }
             }
             Activity::NullifyFinalize(proof) => {
-                warn!(
-                    signer = ?proof.signer(),
-                    view = ?proof.view(),
-                    "EQUIVOCATION: nullify-finalize conflict detected"
-                );
+                let signer = proof.signer();
+                let view = proof.view();
+                warn!(?signer, ?view, "EQUIVOCATION: nullify-finalize conflict detected");
                 self.state.inc_equivocations();
+                if let Some(ref log) = self.equivocation_log {
+                    log.record("nullify_finalize", &format!("{signer:?}"), view.get());
+                }
                 if let Some(ref m) = self.metrics {
                     m.equivocations
                         .get_or_create(&EquivocationTypeLabel { r#type: "nullify_finalize".into() })
