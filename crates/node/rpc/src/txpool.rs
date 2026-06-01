@@ -228,7 +228,8 @@ mod tests {
         hash[20..28].copy_from_slice(&nonce.to_be_bytes());
         hash[28..].copy_from_slice(&(gas_price as u32).to_be_bytes());
         let hash = B256::from(hash);
-        OrderedTransaction::new(hash, sender, nonce, gas_price, 0, envelope)
+        // base_fee=0 for test helper; effective_gas_price = gas_price
+        OrderedTransaction::new(hash, sender, nonce, gas_price, 0, 0, envelope)
     }
 
     #[tokio::test]
