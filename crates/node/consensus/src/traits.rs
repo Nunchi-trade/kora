@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 
 use alloy_primitives::B256;
 use kora_domain::{ConsensusDigest, StateRoot, Tx, TxId as DomainTxId};
+use kora_executor::ExecutionOutcome;
 use kora_qmdb::ChangeSet;
 use kora_traits::StateDb;
 
@@ -28,6 +29,9 @@ pub struct Snapshot<S> {
     pub changes: ChangeSet,
     /// Transaction IDs included in this snapshot's block.
     pub tx_ids: BTreeSet<TxId>,
+    /// Cached execution outcome from verification, used by the finalization
+    /// reporter to avoid redundant re-execution of the block.
+    pub execution_outcome: Option<ExecutionOutcome>,
 }
 
 impl<S> Snapshot<S> {
@@ -39,7 +43,14 @@ impl<S> Snapshot<S> {
         changes: ChangeSet,
         tx_ids: BTreeSet<TxId>,
     ) -> Self {
-        Self { parent, state, state_root, changes, tx_ids }
+        Self { parent, state, state_root, changes, tx_ids, execution_outcome: None }
+    }
+
+    /// Attach a cached execution outcome to this snapshot.
+    #[must_use]
+    pub fn with_execution_outcome(mut self, outcome: Option<ExecutionOutcome>) -> Self {
+        self.execution_outcome = outcome;
+        self
     }
 }
 

@@ -492,108 +492,118 @@ where
     let mut execution_context = None;
 
     if !snapshot_exists || block_index.is_some() {
-        if snapshot_exists {
-            trace!(?digest, "re-executing finalized block for RPC indexing");
+        // Try to reuse a cached execution outcome from verify_block to avoid
+        // redundant re-execution (the third EVM pass per block).
+        if let Some(cached) = state.take_execution_outcome(digest).await {
+            trace!(?digest, "reusing cached execution outcome from verification");
+            let block_context = provider.context(block);
+            execution_outcome = Some(cached);
+            execution_context = Some(block_context);
         } else {
-            trace!(?digest, "missing snapshot for finalized block; re-executing");
-        }
-        let parent_digest = block.parent();
+            if snapshot_exists {
+                trace!(?digest, "re-executing finalized block for RPC indexing");
+            } else {
+                trace!(?digest, "missing snapshot for finalized block; re-executing");
+            }
+            let parent_digest = block.parent();
 
-        // Retry parent snapshot lookup with exponential backoff. A concurrent
-        // persist_snapshot() call may be evicting or replacing snapshots; a
-        // brief retry window avoids spurious "missing parent" failures that
-        // would otherwise nullify the view.
-        const MAX_PARENT_RETRIES: u32 = 3;
-        const PARENT_RETRY_BASE_MS: u64 = 10;
+            // Retry parent snapshot lookup with exponential backoff. A concurrent
+            // persist_snapshot() call may be evicting or replacing snapshots; a
+            // brief retry window avoids spurious "missing parent" failures that
+            // would otherwise nullify the view.
+            const MAX_PARENT_RETRIES: u32 = 3;
+            const PARENT_RETRY_BASE_MS: u64 = 10;
 
-        let mut parent_snapshot = state.parent_snapshot(parent_digest).await;
-        if parent_snapshot.is_none() && !snapshot_exists {
-            for attempt in 1..=MAX_PARENT_RETRIES {
-                let delay = Duration::from_millis(PARENT_RETRY_BASE_MS << (attempt - 1));
+            let mut parent_snapshot = state.parent_snapshot(parent_digest).await;
+            if parent_snapshot.is_none() && !snapshot_exists {
+                for attempt in 1..=MAX_PARENT_RETRIES {
+                    let delay = Duration::from_millis(PARENT_RETRY_BASE_MS << (attempt - 1));
+                    warn!(
+                        ?digest,
+                        ?parent_digest,
+                        attempt,
+                        ?delay,
+                        "parent snapshot not found, retrying"
+                    );
+                    ::tokio::time::sleep(delay).await;
+                    parent_snapshot = state.parent_snapshot(parent_digest).await;
+                    if parent_snapshot.is_some() {
+                        break;
+                    }
+                }
+            }
+
+            if let Some(parent_snapshot) = parent_snapshot {
+                let block_context = provider.context(block);
+                let execution =
+                    BlockExecution::execute(&parent_snapshot, executor, &block_context, &block.txs)
+                        .await
+                        .map_err(|err| FinalizationError::ExecutionFailed(Box::new(err)))?;
+
+                let state_root = state
+                    .compute_root_from_store(parent_digest, &execution.outcome.changes)
+                    .await
+                    .map_err(FinalizationError::RootComputationFailed)?;
+
+                if state_root != block.state_root {
+                    return Err(FinalizationError::StateRootMismatch {
+                        expected: block.state_root,
+                        computed: state_root,
+                    });
+                }
+
+                if !snapshot_exists {
+                    let merged_changes =
+                        parent_snapshot.state.merge_changes(execution.outcome.changes.clone());
+                    let next_state =
+                        OverlayState::new(parent_snapshot.state.base(), merged_changes);
+                    state
+                        .insert_snapshot(
+                            digest,
+                            parent_digest,
+                            next_state,
+                            state_root,
+                            execution.outcome.changes.clone(),
+                            &block.txs,
+                        )
+                        .await;
+                }
+
+                execution_outcome = Some(execution.outcome);
+                execution_context = Some(block_context);
+            } else if snapshot_exists {
                 warn!(
                     ?digest,
                     ?parent_digest,
-                    attempt,
-                    ?delay,
-                    "parent snapshot not found, retrying"
+                    "missing parent snapshot for cached finalized block; skipping RPC indexing replay"
                 );
-                ::tokio::time::sleep(delay).await;
-                parent_snapshot = state.parent_snapshot(parent_digest).await;
-                if parent_snapshot.is_some() {
-                    break;
-                }
-            }
-        }
-
-        if let Some(parent_snapshot) = parent_snapshot {
-            let block_context = provider.context(block);
-            let execution =
-                BlockExecution::execute(&parent_snapshot, executor, &block_context, &block.txs)
-                    .await
-                    .map_err(|err| FinalizationError::ExecutionFailed(Box::new(err)))?;
-
-            let state_root = state
-                .compute_root_from_store(parent_digest, &execution.outcome.changes)
-                .await
-                .map_err(FinalizationError::RootComputationFailed)?;
-
-            if state_root != block.state_root {
-                return Err(FinalizationError::StateRootMismatch {
-                    expected: block.state_root,
-                    computed: state_root,
-                });
-            }
-
-            if !snapshot_exists {
-                let merged_changes =
-                    parent_snapshot.state.merge_changes(execution.outcome.changes.clone());
-                let next_state = OverlayState::new(parent_snapshot.state.base(), merged_changes);
-                state
-                    .insert_snapshot(
-                        digest,
-                        parent_digest,
-                        next_state,
-                        state_root,
-                        execution.outcome.changes.clone(),
-                        &block.txs,
-                    )
-                    .await;
-            }
-
-            execution_outcome = Some(execution.outcome);
-            execution_context = Some(block_context);
-        } else if snapshot_exists {
-            warn!(
-                ?digest,
-                ?parent_digest,
-                "missing parent snapshot for cached finalized block; skipping RPC indexing replay"
-            );
-        } else {
-            // Parent snapshot is missing and the block's own snapshot is also
-            // missing.  This can happen during catch-up when blocks arrive
-            // faster than they can be verified, or after a restart when
-            // eviction races with finalization.
-            //
-            // Rather than permanently failing (which stalls the finalization
-            // pipeline), restore the block as a persisted snapshot over the
-            // current QMDB state.  The snapshot won't have correct overlay
-            // changes, but the block is consensus-finalized so the state
-            // root is authoritative.  The QMDB commit path uses the
-            // declared state root, not the overlay, so persistence is safe.
-            let is_evicted = state.is_snapshot_persisted(&parent_digest).await;
-            warn!(
-                ?digest,
-                ?parent_digest,
-                parent_evicted = is_evicted,
-                height = block.height,
-                "finalize_block: parent snapshot unavailable; restoring block as \
+            } else {
+                // Parent snapshot is missing and the block's own snapshot is also
+                // missing.  This can happen during catch-up when blocks arrive
+                // faster than they can be verified, or after a restart when
+                // eviction races with finalization.
+                //
+                // Rather than permanently failing (which stalls the finalization
+                // pipeline), restore the block as a persisted snapshot over the
+                // current QMDB state.  The snapshot won't have correct overlay
+                // changes, but the block is consensus-finalized so the state
+                // root is authoritative.  The QMDB commit path uses the
+                // declared state root, not the overlay, so persistence is safe.
+                let is_evicted = state.is_snapshot_persisted(&parent_digest).await;
+                warn!(
+                    ?digest,
+                    ?parent_digest,
+                    parent_evicted = is_evicted,
+                    height = block.height,
+                    "finalize_block: parent snapshot unavailable; restoring block as \
                  trusted persisted snapshot to unblock finalization pipeline"
-            );
-            state.restore_persisted_snapshot(block).await;
-            // After restoring, the snapshot exists so persistence can
-            // proceed.  We do not have execution results for RPC indexing,
-            // but that is acceptable: the alternative was permanent failure.
-        }
+                );
+                state.restore_persisted_snapshot(block).await;
+                // After restoring, the snapshot exists so persistence can
+                // proceed.  We do not have execution results for RPC indexing,
+                // but that is acceptable: the alternative was permanent failure.
+            }
+        } // end fallback re-execution
     } else {
         trace!(?digest, "using cached snapshot for finalized block");
     }

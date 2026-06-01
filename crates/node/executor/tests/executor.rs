@@ -9,7 +9,7 @@ use alloy_consensus::{Header, SignableTransaction as _, TxEip1559, TxEnvelope};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{Address, B256, Bytes, Signature, TxKind, U256, keccak256};
 use k256::ecdsa::SigningKey;
-use kora_executor::{BlockContext, BlockExecutor, RevmExecutor};
+use kora_executor::{BlockContext, BlockExecutor, CallParams, ExecutionError, RevmExecutor};
 use kora_qmdb::{AccountUpdate, ChangeSet};
 use kora_traits::{StateDb, StateDbError, StateDbRead, StateDbWrite};
 use rstest::rstest;
@@ -152,6 +152,49 @@ impl StateDb for MockStateDb {
     }
 }
 
+fn block_context_with_gas_limit(gas_limit: u64) -> BlockContext {
+    let header = Header { number: 1, timestamp: 1, gas_limit, ..Header::default() };
+    BlockContext::new(header, B256::ZERO, B256::ZERO)
+}
+
+fn install_gasleft_guard_contract(state: &MockStateDb, threshold: u16) -> (Address, Address) {
+    let caller = Address::from([0xCA; 20]);
+    let contract = Address::from([0xC0; 20]);
+    let [threshold_hi, threshold_lo] = threshold.to_be_bytes();
+
+    // Succeeds only when gasleft() is above `threshold`; otherwise reverts.
+    let code = Bytes::from(vec![
+        0x5a, // GAS
+        0x61,
+        threshold_hi,
+        threshold_lo, // PUSH2 threshold
+        0x10,         // LT
+        0x60,
+        0x0d, // PUSH1 success
+        0x57, // JUMPI
+        0x60,
+        0x00, // PUSH1 0
+        0x60,
+        0x00, // PUSH1 0
+        0xfd, // REVERT
+        0x5b, // JUMPDEST
+        0x00, // STOP
+    ]);
+    let code_hash = keccak256(&code);
+
+    state.insert_account(
+        caller,
+        MockAccount { balance: U256::from(1_000_000_000u64), ..MockAccount::default() },
+    );
+    state.insert_account(
+        contract,
+        MockAccount { code_hash, balance: U256::ZERO, ..MockAccount::default() },
+    );
+    state.insert_code(code_hash, code);
+
+    (caller, contract)
+}
+
 // ----------------------------------------------------------------------------
 // Tests for RevmExecutor creation with different chain IDs
 // ----------------------------------------------------------------------------
@@ -172,6 +215,68 @@ fn test_revm_executor_chain_ids(#[case] chain_id: u64, #[case] _name: &str) {
 fn test_revm_executor_default_chain_id() {
     let executor = RevmExecutor::default();
     assert_eq!(executor.chain_id(), 1);
+}
+
+// ----------------------------------------------------------------------------
+// Tests for estimate_gas
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_estimate_gas_continues_after_midpoint_revert() {
+    let executor = RevmExecutor::new(1);
+    let state = MockStateDb::new();
+    let (caller, contract) = install_gasleft_guard_contract(&state, 50_000);
+    let context = block_context_with_gas_limit(100_000);
+    let params = CallParams {
+        from: caller,
+        to: Some(contract),
+        gas_limit: Some(100_000),
+        ..CallParams::default()
+    };
+
+    executor.simulate_call(&state, params.clone(), &context).expect("upper bound should succeed");
+
+    let mut midpoint_params = params.clone();
+    midpoint_params.gas_limit = Some(60_500);
+    assert!(matches!(
+        executor.simulate_call(&state, midpoint_params, &context),
+        Err(ExecutionError::Revert(_))
+    ));
+
+    let estimate = executor
+        .estimate_gas(&state, params.clone(), &context)
+        .expect("midpoint revert should not abort estimate");
+    assert!(estimate > 60_500);
+    assert!(estimate < 100_000);
+
+    let mut estimated_params = params.clone();
+    estimated_params.gas_limit = Some(estimate);
+    executor
+        .simulate_call(&state, estimated_params, &context)
+        .expect("estimated gas should execute");
+
+    let mut below_estimate_params = params;
+    below_estimate_params.gas_limit = Some(estimate - 1);
+    assert!(executor.simulate_call(&state, below_estimate_params, &context).is_err());
+}
+
+#[test]
+fn test_estimate_gas_propagates_revert_at_upper_bound() {
+    let executor = RevmExecutor::new(1);
+    let state = MockStateDb::new();
+    let (caller, contract) = install_gasleft_guard_contract(&state, 50_000);
+    let context = block_context_with_gas_limit(100_000);
+    let params = CallParams {
+        from: caller,
+        to: Some(contract),
+        gas_limit: Some(60_000),
+        ..CallParams::default()
+    };
+
+    assert!(matches!(
+        executor.estimate_gas(&state, params, &context),
+        Err(ExecutionError::Revert(_))
+    ));
 }
 
 // ----------------------------------------------------------------------------
