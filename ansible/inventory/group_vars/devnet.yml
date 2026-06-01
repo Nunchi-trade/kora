@@ -29,11 +29,14 @@ secondary_p2p_port: 30500
 rpc_ports: "8545:8548"
 metrics_ports: "9000:9003"
 prometheus_port: 9090
+alertmanager_port: 9093
 loki_port: 3100
 grafana_port: 3000
-grafana_admin_password: admin  # CHANGEME: override in host_vars or vault for production
+# grafana_admin_password: Set in host_vars, vault, or --extra-vars. Deployment
+# will fail if this is left unset or set to "admin" (see observe role guard).
 
 # Trusted IPs allowed to access RPC, metrics, Prometheus, and Grafana.
-# CHANGEME: restrict to your operator/monitoring IPs for production.
+# Override in host_vars or vault for your environment.
+# Example: ["10.0.0.0/8", "192.168.1.100/32"]
 trusted_ips:
-  - "0.0.0.0/0"  # WARNING: allows all traffic. Replace with specific IPs.
+  - "127.0.0.1/32"  # localhost only by default -- add operator IPs before deploying
