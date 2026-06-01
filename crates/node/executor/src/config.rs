@@ -9,8 +9,11 @@ pub struct GasLimitBounds {
     pub min: u64,
     /// Maximum gas limit.
     pub max: u64,
-    /// Maximum change from parent (denominator for delta calculation).
-    /// Gas limit can change by at most parent_gas_limit / max_delta_divisor.
+    /// Denominator for the gas limit delta bound.
+    ///
+    /// Gas limit change must be **strictly less than**
+    /// `parent_gas_limit / max_delta_divisor` (per Ethereum Yellow Paper
+    /// Section 4.3.4).
     pub max_delta_divisor: u64,
 }
 

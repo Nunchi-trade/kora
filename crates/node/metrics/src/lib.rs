@@ -30,6 +30,13 @@ const EVM_EXEC_BUCKETS: [f64; 9] = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 
 /// CPU-contention-related stalls.
 const SNAPSHOT_POLL_BUCKETS: [f64; 8] = [0.001, 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.15];
 
+/// Default histogram buckets for transactions-per-block distribution.
+///
+/// Captures the number of transactions included per built block.  Using a
+/// Histogram instead of a Gauge ensures we observe every block rather than
+/// only the last value at Prometheus scrape time.
+const BLOCK_TXS_BUCKETS: [f64; 10] = [0.0, 1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0];
+
 /// Application-level metrics for a Kora node.
 ///
 /// Create with [`AppMetrics::new`] and register with
@@ -50,8 +57,11 @@ pub struct AppMetrics {
     // -- Block Building --
     /// Histogram of block build durations in seconds.
     pub block_build_time: Histogram,
-    /// Number of transactions included in the most recently built block.
-    pub block_txs_included: Gauge,
+    /// Histogram of transactions included per built block.
+    ///
+    /// Using a Histogram (not a Gauge) captures the distribution across
+    /// all blocks rather than only the last value at scrape time.
+    pub block_txs_included: Histogram,
 
     // -- Proposal health --
     /// Total proposals skipped because the parent snapshot was not ready
@@ -95,6 +105,10 @@ pub struct AppMetrics {
     /// (both persisted and unpersisted).
     pub snapshot_store_total: Gauge,
 
+    // -- Seed Reporter --
+    /// Total seed reporter activities dropped before persistence, labelled by reason.
+    pub seed_reporter_dropped: Family<ReasonLabel, Counter>,
+
     // -- Transaction Gossip --
     /// Total transactions broadcast to peers via gossip.
     pub gossip_tx_broadcast: Counter,
@@ -109,6 +123,16 @@ pub struct AppMetrics {
     /// Total equivocation events detected, labelled by type
     /// (`conflicting_notarize`, `conflicting_finalize`, `nullify_finalize`).
     pub equivocations: Family<EquivocationTypeLabel, Counter>,
+
+    // -- Consensus Health --
+    /// Current finalized block height.
+    pub finalized_height: Gauge,
+    /// Current consensus view number.
+    pub current_view: Gauge,
+    /// Total nullification events.
+    pub nullifications_total: Counter,
+    /// Gas used in the most recently finalized block.
+    pub block_gas_used: Gauge,
 }
 
 /// Label set for metrics that carry a `reason` dimension.
@@ -136,7 +160,7 @@ impl AppMetrics {
             txpool_queued: Gauge::default(),
             txpool_rejected: Family::default(),
             block_build_time: Histogram::new(BLOCK_BUILD_BUCKETS),
-            block_txs_included: Gauge::default(),
+            block_txs_included: Histogram::new(BLOCK_TXS_BUCKETS),
             proposal_snapshot_misses: Counter::default(),
             proposal_lag_skips: Counter::default(),
             snapshot_poll_wait: Histogram::new(SNAPSHOT_POLL_BUCKETS),
@@ -146,11 +170,16 @@ impl AppMetrics {
             rpc_requests_total: Counter::default(),
             unpersisted_snapshot_depth: Gauge::default(),
             snapshot_store_total: Gauge::default(),
+            seed_reporter_dropped: Family::default(),
             gossip_tx_broadcast: Counter::default(),
             gossip_tx_received: Counter::default(),
             gossip_tx_broadcast_failed: Counter::default(),
             gossip_tx_invalid: Counter::default(),
             equivocations: Family::default(),
+            finalized_height: Gauge::default(),
+            current_view: Gauge::default(),
+            nullifications_total: Counter::default(),
+            block_gas_used: Gauge::default(),
         }
     }
 
@@ -189,7 +218,7 @@ impl AppMetrics {
         );
         registry.register(
             "kora_block_txs_included",
-            "Transactions in the most recently built block",
+            "Transactions included per built block",
             self.block_txs_included.clone(),
         );
         registry.register(
@@ -238,6 +267,11 @@ impl AppMetrics {
             self.snapshot_store_total.clone(),
         );
         registry.register(
+            "kora_seed_reporter_dropped",
+            "Total seed reporter activities dropped before persistence by reason",
+            self.seed_reporter_dropped.clone(),
+        );
+        registry.register(
             "kora_gossip_tx_broadcast",
             "Total transactions broadcast to peers via gossip",
             self.gossip_tx_broadcast.clone(),
@@ -261,6 +295,26 @@ impl AppMetrics {
             "kora_equivocations",
             "Total equivocation events detected by type",
             self.equivocations.clone(),
+        );
+        registry.register(
+            "kora_finalized_height",
+            "Current finalized block height",
+            self.finalized_height.clone(),
+        );
+        registry.register(
+            "kora_current_view",
+            "Current consensus view number",
+            self.current_view.clone(),
+        );
+        registry.register(
+            "kora_nullifications",
+            "Total nullification events",
+            self.nullifications_total.clone(),
+        );
+        registry.register(
+            "kora_block_gas_used",
+            "Gas used in the most recently finalized block",
+            self.block_gas_used.clone(),
         );
     }
 }

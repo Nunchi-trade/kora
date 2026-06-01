@@ -1,7 +1,7 @@
 //! REVM-based consensus application implementation.
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -62,6 +62,12 @@ const MAX_FUTURE_TIMESTAMP_DRIFT: u64 = 15;
 /// blocks.
 const MAX_PROPOSAL_LAG: u64 = 64;
 
+/// Maximum number of entries retained in the `block_fees` cache.
+///
+/// Bounds memory to roughly `MAX_BLOCK_FEE_ENTRIES * 80 bytes` and
+/// prevents unbounded growth from the lack of finalization-based pruning.
+const MAX_BLOCK_FEE_ENTRIES: usize = 1024;
+
 fn unix_timestamp_secs<Env: Clock>(env: &Env) -> u64 {
     env.current().duration_since(UNIX_EPOCH).map(|duration| duration.as_secs()).unwrap_or(0)
 }
@@ -112,12 +118,47 @@ pub struct RevmApplication<S, E> {
     /// Used to determine when the catch-up window should close.
     last_verified_height: Arc<AtomicU64>,
     /// Per-block `(gas_used, base_fee_per_gas)` cache, keyed by consensus
-    /// digest.  Populated when a block is built or verified so that the
+    /// digest. Populated when a block is built or verified so that the
     /// *next* block can compute its EIP-1559 base fee from the parent's
-    /// gas usage.  Entries are small (32 + 16 bytes) and the map is bounded
-    /// by the number of unfinalized blocks.
-    block_fees: Arc<RwLock<HashMap<ConsensusDigest, (u64, u64)>>>,
+    /// gas usage. Bounded to [`MAX_BLOCK_FEE_ENTRIES`] entries; older
+    /// entries are evicted by insertion order.
+    ///
+    /// **Note:** A second base-fee computation path exists in
+    /// [`RevmContextProvider::context()`](crate::runner::RevmContextProvider)
+    /// which reads from the persistent [`BlockIndex`] instead.  Both paths
+    /// must agree; see issue #019.
+    block_fees: Arc<RwLock<BlockFeeCache>>,
     _scheme: std::marker::PhantomData<S>,
+}
+
+#[derive(Debug, Default)]
+struct BlockFeeCache {
+    entries: BTreeMap<ConsensusDigest, (u64, u64)>,
+    insertion_order: VecDeque<ConsensusDigest>,
+}
+
+impl BlockFeeCache {
+    fn insert(&mut self, digest: ConsensusDigest, gas_used: u64, base_fee: u64) {
+        if !self.entries.contains_key(&digest) {
+            self.insertion_order.push_back(digest);
+        }
+        self.entries.insert(digest, (gas_used, base_fee));
+
+        while self.entries.len() > MAX_BLOCK_FEE_ENTRIES {
+            let Some(oldest) = self.insertion_order.pop_front() else {
+                break;
+            };
+            self.entries.remove(&oldest);
+        }
+    }
+
+    fn get(&self, digest: &ConsensusDigest) -> Option<(u64, u64)> {
+        self.entries.get(digest).copied()
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
 }
 
 impl<S, E> std::fmt::Debug for RevmApplication<S, E> {
@@ -146,8 +187,8 @@ where
         gas_limit: u64,
         fee_recipient: Address,
     ) -> Self {
-        let mut block_fees = HashMap::new();
-        block_fees.insert(ledger.genesis_block().commitment(), (0, kora_config::INITIAL_BASE_FEE));
+        let mut block_fees = BlockFeeCache::default();
+        block_fees.insert(ledger.genesis_block().commitment(), 0, kora_config::INITIAL_BASE_FEE);
 
         Self {
             ledger,
@@ -205,7 +246,7 @@ where
     pub fn seed_block_fees(&self, entries: &[(ConsensusDigest, u64, u64)]) {
         let mut fees = self.block_fees.write();
         for &(digest, gas_used, base_fee) in entries {
-            fees.insert(digest, (gas_used, base_fee));
+            fees.insert(digest, gas_used, base_fee);
         }
     }
 
@@ -215,7 +256,7 @@ where
     fn compute_base_fee(&self, parent_digest: ConsensusDigest) -> u64 {
         let fees = self.block_fees.read();
         match fees.get(&parent_digest) {
-            Some(&(parent_gas_used, parent_base_fee)) => calculate_base_fee(
+            Some((parent_gas_used, parent_base_fee)) => calculate_base_fee(
                 parent_base_fee,
                 parent_gas_used,
                 self.gas_limit,
@@ -227,8 +268,11 @@ where
 
     /// Record a block's gas usage and base fee so that the next block can
     /// derive its own base fee via [`Self::compute_base_fee`].
+    ///
+    /// Evicts the oldest inserted entry when the cache exceeds
+    /// [`MAX_BLOCK_FEE_ENTRIES`] to bound memory growth.
     fn record_block_fees(&self, digest: ConsensusDigest, gas_used: u64, base_fee: u64) {
-        self.block_fees.write().insert(digest, (gas_used, base_fee));
+        self.block_fees.write().insert(digest, gas_used, base_fee);
     }
 
     fn block_context(
@@ -414,7 +458,7 @@ where
         if let Some(ref m) = self.metrics {
             m.block_build_time.observe(total_elapsed.as_secs_f64());
             m.evm_execution_seconds.observe(exec_elapsed.as_secs_f64());
-            m.block_txs_included.set(block.txs.len() as i64);
+            m.block_txs_included.observe(block.txs.len() as f64);
         }
 
         debug!(
@@ -911,5 +955,43 @@ where
 
             true
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn digest_from_u16(value: u16) -> ConsensusDigest {
+        let mut bytes = [0u8; 32];
+        bytes[30..].copy_from_slice(&value.to_be_bytes());
+        ConsensusDigest::from(bytes)
+    }
+
+    #[test]
+    fn block_fee_cache_evicts_by_insertion_order_not_digest_order() {
+        let mut cache = BlockFeeCache::default();
+        let first_inserted = ConsensusDigest::from([0xFFu8; 32]);
+
+        cache.insert(first_inserted, 1, 10);
+        for i in 0..MAX_BLOCK_FEE_ENTRIES {
+            cache.insert(digest_from_u16(i as u16), i as u64, 20 + i as u64);
+        }
+
+        assert_eq!(cache.len(), MAX_BLOCK_FEE_ENTRIES);
+        assert_eq!(cache.get(&first_inserted), None);
+        assert_eq!(cache.get(&digest_from_u16(0)), Some((0, 20)));
+    }
+
+    #[test]
+    fn block_fee_cache_updates_existing_entry_without_consuming_capacity() {
+        let mut cache = BlockFeeCache::default();
+        let digest = digest_from_u16(1);
+
+        cache.insert(digest, 1, 10);
+        cache.insert(digest, 2, 11);
+
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.get(&digest), Some((2, 11)));
     }
 }

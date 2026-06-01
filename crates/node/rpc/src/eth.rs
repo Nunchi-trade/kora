@@ -185,6 +185,19 @@ pub trait EthApi {
     /// Removes a filter.
     #[method(name = "uninstallFilter")]
     async fn uninstall_filter(&self, filter_id: U256) -> RpcResult<bool>;
+
+    /// Returns the account and storage values with Merkle proof.
+    ///
+    /// Kora uses a non-MPT state commitment scheme (keccak hash chain over
+    /// changesets), so Merkle proofs cannot be generated.  This method
+    /// always returns an explicit error.
+    #[method(name = "getProof")]
+    async fn get_proof(
+        &self,
+        address: Address,
+        storage_keys: Vec<U256>,
+        block: Option<BlockNumberOrTag>,
+    ) -> RpcResult<serde_json::Value>;
 }
 
 /// Net namespace API.
@@ -944,6 +957,20 @@ impl<S: StateProvider + 'static> EthApiServer for EthApiImpl<S> {
             return Ok(false);
         };
         Ok(self.filter_store.remove(id))
+    }
+
+    async fn get_proof(
+        &self,
+        _address: Address,
+        _storage_keys: Vec<U256>,
+        _block: Option<BlockNumberOrTag>,
+    ) -> RpcResult<serde_json::Value> {
+        Err(RpcError::Unsupported(
+            "eth_getProof is not supported: Kora uses a non-MPT state commitment scheme \
+             (keccak hash chain) and cannot generate Merkle proofs"
+                .to_string(),
+        )
+        .into())
     }
 }
 

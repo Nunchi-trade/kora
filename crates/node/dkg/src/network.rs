@@ -24,6 +24,15 @@ pub(crate) struct Envelope {
 }
 
 /// Network handle for sending and receiving DKG messages.
+///
+/// # Security Warning
+///
+/// This transport sends DKG shares over **plaintext TCP** with no encryption
+/// or sender authentication.  It must only be used in physically isolated
+/// networks (e.g. local devnets).  For production ceremonies, use
+/// [`DkgTransport`](crate::transport::DkgTransport) which provides
+/// authenticated, encrypted channels via commonware-p2p.
+#[deprecated(note = "Plaintext TCP -- use DkgTransport for authenticated, encrypted DKG channels")]
 #[derive(Debug)]
 pub struct DkgNetwork {
     config: DkgConfig,
@@ -31,6 +40,7 @@ pub struct DkgNetwork {
     peer_addrs: HashMap<ed25519::PublicKey, String>,
 }
 
+#[allow(deprecated)]
 impl DkgNetwork {
     /// Create a new DKG network.
     pub fn new(config: DkgConfig) -> Result<Self, DkgError> {
