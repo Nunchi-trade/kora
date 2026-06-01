@@ -22,6 +22,7 @@ use tracing::warn;
 use crate::{
     error::RpcError,
     filters::{Filter, FilterChanges, FilterStore},
+    indexed_provider::MAX_LOG_BLOCK_RANGE,
     state::NodeState,
     state_provider::StateProvider,
     subscription::{MempoolEventSender, PendingTxEvent, PendingTxEventSender, PendingTxInfo},
@@ -185,6 +186,56 @@ pub trait EthApi {
     /// Removes a filter.
     #[method(name = "uninstallFilter")]
     async fn uninstall_filter(&self, filter_id: U256) -> RpcResult<bool>;
+
+    /// Returns the number of transactions in a block by hash.
+    #[method(name = "getBlockTransactionCountByHash")]
+    async fn get_block_transaction_count_by_hash(&self, hash: B256) -> RpcResult<Option<U64>>;
+
+    /// Returns the number of transactions in a block by number.
+    #[method(name = "getBlockTransactionCountByNumber")]
+    async fn get_block_transaction_count_by_number(
+        &self,
+        block: BlockNumberOrTag,
+    ) -> RpcResult<Option<U64>>;
+
+    /// Returns a transaction by block hash and index.
+    #[method(name = "getTransactionByBlockHashAndIndex")]
+    async fn get_transaction_by_block_hash_and_index(
+        &self,
+        hash: B256,
+        index: U64,
+    ) -> RpcResult<Option<RpcTransaction>>;
+
+    /// Returns a transaction by block number and index.
+    #[method(name = "getTransactionByBlockNumberAndIndex")]
+    async fn get_transaction_by_block_number_and_index(
+        &self,
+        block: BlockNumberOrTag,
+        index: U64,
+    ) -> RpcResult<Option<RpcTransaction>>;
+
+    /// Returns the coinbase address (not applicable post-merge).
+    #[method(name = "coinbase")]
+    async fn coinbase(&self) -> RpcResult<Address>;
+
+    /// Returns whether the node is mining (always false post-merge).
+    #[method(name = "mining")]
+    async fn mining(&self) -> RpcResult<bool>;
+
+    /// Returns the hash rate (always zero post-merge).
+    #[method(name = "hashrate")]
+    async fn hashrate(&self) -> RpcResult<U256>;
+
+    /// Returns the number of uncles in a block by hash (always zero post-merge).
+    #[method(name = "getUncleCountByBlockHash")]
+    async fn get_uncle_count_by_block_hash(&self, hash: B256) -> RpcResult<Option<U64>>;
+
+    /// Returns the number of uncles in a block by number (always zero post-merge).
+    #[method(name = "getUncleCountByBlockNumber")]
+    async fn get_uncle_count_by_block_number(
+        &self,
+        block: BlockNumberOrTag,
+    ) -> RpcResult<Option<U64>>;
 }
 
 /// Net namespace API.
@@ -512,11 +563,13 @@ impl<S: StateProvider + 'static> EthApiServer for EthApiImpl<S> {
             false
         };
 
-        {
+        let is_new_pending = {
             let mut txs = self.pending_txs.write().await;
             let mut order = self.pending_tx_order.write().await;
-            txs.insert(tx_hash, pending_tx.clone());
-            order.push_back(tx_hash);
+            let is_new = txs.insert(tx_hash, pending_tx.clone()).is_none();
+            if is_new {
+                order.push_back(tx_hash);
+            }
 
             // Evict oldest entries when either the pending map or the
             // order deque exceeds the cap. The deque can accumulate stale
@@ -551,9 +604,10 @@ impl<S: StateProvider + 'static> EthApiServer for EthApiImpl<S> {
                 // cursors (which store absolute indices) remain correct.
                 self.pending_tx_evicted.fetch_add(drained, std::sync::atomic::Ordering::Relaxed);
             }
-        }
+            is_new
+        };
 
-        if accepted {
+        if accepted && is_new_pending {
             self.broadcast_pending_tx(tx_hash, pending_tx);
         }
         Ok(tx_hash)
@@ -704,6 +758,9 @@ impl<S: StateProvider + 'static> EthApiServer for EthApiImpl<S> {
             Ok(SyncStatus::Syncing(SyncInfo {
                 starting_block: U64::from(state.recovered_height()),
                 current_block: U64::from(current_block),
+                // Kora does not currently track a peer-advertised block tip.
+                // Consensus view can advance via nullifications without new
+                // blocks, so do not expose it as an Ethereum block height.
                 highest_block: U64::from(current_block),
             }))
         } else {
@@ -753,7 +810,6 @@ impl<S: StateProvider + 'static> EthApiServer for EthApiImpl<S> {
     }
 
     async fn new_pending_transaction_filter(&self) -> RpcResult<U256> {
-        let known_hashes = self.pending_txs.read().await.keys().copied().collect();
         // Read `evicted` and `order.len()` under the same lock to avoid a
         // race where an eviction between the two reads would shift the
         // cursor. This is consistent with `send_raw_transaction`'s lock
@@ -763,8 +819,7 @@ impl<S: StateProvider + 'static> EthApiServer for EthApiImpl<S> {
             let evicted = self.pending_tx_evicted.load(std::sync::atomic::Ordering::Relaxed);
             evicted + order.len()
         };
-        let id =
-            self.filter_store.create(Filter::PendingTransaction { known_hashes, last_seen_index });
+        let id = self.filter_store.create(Filter::PendingTransaction { last_seen_index });
         Ok(U256::from(id))
     }
 
@@ -776,7 +831,7 @@ impl<S: StateProvider + 'static> EthApiServer for EthApiImpl<S> {
         enum FilterSnapshot {
             Log { criteria: RpcLogFilter, last_poll_block: Option<u64> },
             Block { last_poll_block: u64 },
-            PendingTx { known_hashes: HashSet<B256>, last_seen_index: usize },
+            PendingTx { last_seen_index: usize },
         }
 
         let snapshot = {
@@ -789,11 +844,8 @@ impl<S: StateProvider + 'static> EthApiServer for EthApiImpl<S> {
                 Filter::Block { last_poll_block } => {
                     FilterSnapshot::Block { last_poll_block: *last_poll_block }
                 }
-                Filter::PendingTransaction { known_hashes, last_seen_index } => {
-                    FilterSnapshot::PendingTx {
-                        known_hashes: known_hashes.clone(),
-                        last_seen_index: *last_seen_index,
-                    }
+                Filter::PendingTransaction { last_seen_index } => {
+                    FilterSnapshot::PendingTx { last_seen_index: *last_seen_index }
                 }
             }
         };
@@ -812,7 +864,7 @@ impl<S: StateProvider + 'static> EthApiServer for EthApiImpl<S> {
                 // Preserve the original `to_block` / `block_hash`.
                 // Only override `from_block` to advance the cursor, and
                 // only cap `to_block` at head when no fixed bound was set.
-                let changes_filter = if criteria.block_hash.is_some() {
+                let (changes_filter, cursor_to) = if criteria.block_hash.is_some() {
                     // block_hash filters are single-block and already returned
                     // their results on the first poll (when last_poll_block was
                     // None). Subsequent polls always return empty.
@@ -820,32 +872,40 @@ impl<S: StateProvider + 'static> EthApiServer for EthApiImpl<S> {
                         entry.touch();
                         return Ok(FilterChanges::Logs(Vec::new()));
                     }
-                    criteria.clone()
+                    (criteria.clone(), head)
                 } else {
                     let from = last_poll_block.map(|lpb| lpb.saturating_add(1)).unwrap_or(0);
-                    let to = match &criteria.to_block {
+                    let uncapped_to = match &criteria.to_block {
                         // Honour the original fixed upper bound.
                         Some(BlockNumberOrTag::Number(n)) => n.to::<u64>().min(head),
                         // Open-ended or "latest": cap at current head.
                         _ => head,
                     };
-                    RpcLogFilter {
-                        from_block: Some(BlockNumberOrTag::Number(U64::from(from))),
-                        to_block: Some(BlockNumberOrTag::Number(U64::from(to))),
-                        // Preserve everything else from the original criteria.
-                        address: criteria.address.clone(),
-                        topics: criteria.topics.clone(),
-                        block_hash: None,
-                    }
+                    // Cap the range to MAX_LOG_BLOCK_RANGE so we never hit
+                    // the downstream limit.  The client catches up over
+                    // multiple polls.
+                    let to = uncapped_to.min(from.saturating_add(MAX_LOG_BLOCK_RANGE));
+                    (
+                        RpcLogFilter {
+                            from_block: Some(BlockNumberOrTag::Number(U64::from(from))),
+                            to_block: Some(BlockNumberOrTag::Number(U64::from(to))),
+                            // Preserve everything else from the original criteria.
+                            address: criteria.address.clone(),
+                            topics: criteria.topics.clone(),
+                            block_hash: None,
+                        },
+                        to,
+                    )
                 };
 
                 let provider = self.state_provider.read().await;
                 let logs = provider.get_logs(changes_filter).await?;
 
-                // Update the cursor under the lock.
+                // Advance cursor only to the capped `to`, not `head`, so
+                // remaining blocks are returned on subsequent polls.
                 let mut filter = entry.lock().await;
                 if let Filter::Log { last_poll_block: lpb, .. } = &mut *filter {
-                    *lpb = Some(head);
+                    *lpb = Some(cursor_to);
                 }
                 entry.touch();
                 Ok(FilterChanges::Logs(logs))
@@ -879,13 +939,10 @@ impl<S: StateProvider + 'static> EthApiServer for EthApiImpl<S> {
                 entry.touch();
                 Ok(FilterChanges::Hashes(hashes))
             }
-            FilterSnapshot::PendingTx { known_hashes, last_seen_index } => {
-                // Return new pending tx hashes in insertion order.
-                //
-                // IMPORTANT: We must drop the `pending_tx_order` lock before
-                // acquiring `pending_txs` to maintain consistent lock ordering
-                // with `send_raw_transaction` (which takes `pending_txs` then
-                // `pending_tx_order`).
+            FilterSnapshot::PendingTx { last_seen_index } => {
+                // Return new pending tx hashes in insertion order. Keep a
+                // per-poll set as a final guard against duplicated hashes in
+                // the global order deque from older cache entries or races.
                 let (new_hashes, new_index) = {
                     let tx_order = self.pending_tx_order.read().await;
                     let evicted =
@@ -894,24 +951,19 @@ impl<S: StateProvider + 'static> EthApiServer for EthApiImpl<S> {
                     // If entries were evicted past the cursor, start from the
                     // front of the deque (relative offset 0).
                     let relative_skip = last_seen_index.saturating_sub(evicted);
+                    let mut seen = HashSet::new();
                     let hashes: Vec<B256> = tx_order
                         .iter()
                         .skip(relative_skip)
-                        .filter(|h| !known_hashes.contains(*h))
                         .copied()
+                        .filter(|hash| seen.insert(*hash))
                         .collect();
                     let idx = evicted + tx_order.len();
                     (hashes, idx)
-                    // tx_order lock is dropped here
                 };
-                let current_hashes: HashSet<B256> =
-                    self.pending_txs.read().await.keys().copied().collect();
 
                 let mut filter = entry.lock().await;
-                if let Filter::PendingTransaction { known_hashes: kh, last_seen_index: idx } =
-                    &mut *filter
-                {
-                    *kh = current_hashes;
+                if let Filter::PendingTransaction { last_seen_index: idx } = &mut *filter {
                     *idx = new_index;
                 }
                 entry.touch();
@@ -945,6 +997,80 @@ impl<S: StateProvider + 'static> EthApiServer for EthApiImpl<S> {
         };
         Ok(self.filter_store.remove(id))
     }
+
+    async fn get_block_transaction_count_by_hash(&self, hash: B256) -> RpcResult<Option<U64>> {
+        let provider = self.state_provider.read().await;
+        let block = provider.block_by_hash(hash, false).await?;
+        Ok(block.map(|b| U64::from(b.transactions.len())))
+    }
+
+    async fn get_block_transaction_count_by_number(
+        &self,
+        block: BlockNumberOrTag,
+    ) -> RpcResult<Option<U64>> {
+        let provider = self.state_provider.read().await;
+        let block = provider.block_by_number(block, false).await?;
+        Ok(block.map(|b| U64::from(b.transactions.len())))
+    }
+
+    async fn get_transaction_by_block_hash_and_index(
+        &self,
+        hash: B256,
+        index: U64,
+    ) -> RpcResult<Option<RpcTransaction>> {
+        let provider = self.state_provider.read().await;
+        let block = provider.block_by_hash(hash, true).await?;
+        let Some(block) = block else {
+            return Ok(None);
+        };
+        let idx = index.to::<usize>();
+        let BlockTransactions::Full(txs) = block.transactions else {
+            return Ok(None);
+        };
+        Ok(txs.into_iter().nth(idx))
+    }
+
+    async fn get_transaction_by_block_number_and_index(
+        &self,
+        block: BlockNumberOrTag,
+        index: U64,
+    ) -> RpcResult<Option<RpcTransaction>> {
+        let provider = self.state_provider.read().await;
+        let block = provider.block_by_number(block, true).await?;
+        let Some(block) = block else {
+            return Ok(None);
+        };
+        let idx = index.to::<usize>();
+        let BlockTransactions::Full(txs) = block.transactions else {
+            return Ok(None);
+        };
+        Ok(txs.into_iter().nth(idx))
+    }
+
+    async fn coinbase(&self) -> RpcResult<Address> {
+        Ok(Address::ZERO)
+    }
+
+    async fn mining(&self) -> RpcResult<bool> {
+        Ok(false)
+    }
+
+    async fn hashrate(&self) -> RpcResult<U256> {
+        Ok(U256::ZERO)
+    }
+
+    async fn get_uncle_count_by_block_hash(&self, hash: B256) -> RpcResult<Option<U64>> {
+        let provider = self.state_provider.read().await;
+        Ok(provider.block_by_hash(hash, false).await?.map(|_| U64::ZERO))
+    }
+
+    async fn get_uncle_count_by_block_number(
+        &self,
+        block: BlockNumberOrTag,
+    ) -> RpcResult<Option<U64>> {
+        let provider = self.state_provider.read().await;
+        Ok(provider.block_by_number(block, false).await?.map(|_| U64::ZERO))
+    }
 }
 
 impl<S: StateProvider> EthApiImpl<S> {
@@ -973,6 +1099,9 @@ impl<S: StateProvider> EthApiImpl<S> {
 pub struct NetApiImpl {
     chain_id: u64,
     peer_count: Arc<std::sync::atomic::AtomicU64>,
+    /// When set, `net_peerCount` reads the live value from `NodeState`
+    /// instead of the static snapshot.
+    node_state: Option<NodeState>,
 }
 
 impl std::fmt::Debug for NetApiImpl {
@@ -987,7 +1116,19 @@ impl std::fmt::Debug for NetApiImpl {
 impl NetApiImpl {
     /// Create a new Net API implementation.
     pub fn new(chain_id: u64) -> Self {
-        Self { chain_id, peer_count: Arc::new(std::sync::atomic::AtomicU64::new(0)) }
+        Self {
+            chain_id,
+            peer_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            node_state: None,
+        }
+    }
+
+    /// Attach shared node state so `net_peerCount` returns the live value
+    /// maintained by the consensus engine.
+    #[must_use]
+    pub fn with_node_state(mut self, node_state: NodeState) -> Self {
+        self.node_state = Some(node_state);
+        self
     }
 
     /// Get a handle to update the peer count.
@@ -1011,7 +1152,11 @@ impl NetApiServer for NetApiImpl {
     }
 
     fn peer_count(&self) -> RpcResult<U64> {
-        let count = self.peer_count.load(std::sync::atomic::Ordering::Relaxed);
+        // Prefer the live value from NodeState when wired.
+        let count = self.node_state.as_ref().map_or_else(
+            || self.peer_count.load(std::sync::atomic::Ordering::Relaxed),
+            |state| state.status().peer_count,
+        );
         Ok(U64::from(count))
     }
 }
@@ -1169,20 +1314,27 @@ fn validate_reward_percentiles(percentiles: &[f64]) -> RpcResult<()> {
 
 /// Fetches per-transaction `gas_used` from receipts for all transactions in
 /// the block. Returns a `Vec` parallel to the block's full transaction list.
-/// When a receipt cannot be found, falls back to the transaction's gas limit.
+///
+/// Uses the batch `receipts_by_block_hash` method to avoid N+1 serial
+/// receipt lookups (see issue 131).
 async fn fetch_tx_gas_used<S: StateProvider>(provider: &S, block: &RpcBlock) -> Vec<u64> {
     let BlockTransactions::Full(txs) = &block.transactions else {
         return Vec::new();
     };
-    let mut gas_used = Vec::with_capacity(txs.len());
-    for tx in txs {
-        let used = match provider.receipt_by_hash(tx.hash).await {
-            Ok(Some(receipt)) => receipt.gas_used.to::<u64>(),
-            _ => tx.gas.to::<u64>(),
-        };
-        gas_used.push(used);
+    if txs.is_empty() {
+        return Vec::new();
     }
-    gas_used
+
+    // Batch-fetch all receipts for this block in a single lock acquisition.
+    let receipts = provider.receipts_by_block_hash(block.hash).await.unwrap_or_default();
+
+    // Build a lookup map from tx hash -> gas_used for O(1) matching.
+    let receipt_gas: HashMap<B256, u64> =
+        receipts.iter().map(|r| (r.transaction_hash, r.gas_used.to::<u64>())).collect();
+
+    txs.iter()
+        .map(|tx| receipt_gas.get(&tx.hash).copied().unwrap_or_else(|| tx.gas.to::<u64>()))
+        .collect()
 }
 
 fn compute_reward_percentiles(
@@ -1521,6 +1673,21 @@ mod tests {
 
         async fn block_number(&self) -> Result<u64, RpcError> {
             Ok(self.head)
+        }
+
+        async fn receipts_by_block_hash(
+            &self,
+            block_hash: B256,
+        ) -> Result<Vec<RpcTransactionReceipt>, RpcError> {
+            let Some(block) = self.blocks.values().find(|b| b.hash == block_hash) else {
+                return Ok(Vec::new());
+            };
+            let BlockTransactions::Full(txs) = &block.transactions else {
+                return Ok(Vec::new());
+            };
+            let receipts: Vec<RpcTransactionReceipt> =
+                txs.iter().filter_map(|tx| self.receipts.get(&tx.hash).cloned()).collect();
+            Ok(receipts)
         }
     }
 
@@ -2775,5 +2942,77 @@ mod tests {
         };
         assert!(hashes.contains(&h3), "new tx after filter creation should appear");
         assert!(hashes.contains(&h4), "new tx after filter creation should appear");
+    }
+
+    #[tokio::test]
+    async fn resubmitting_same_pending_tx_does_not_emit_duplicate_filter_change() {
+        let callback: TxSubmitCallback = Arc::new(move |_| Box::pin(async { Ok(()) }));
+        let api = EthApiImpl::with_tx_submit(1, NoopStateProvider, callback);
+
+        let raw = signed_test_tx(1, 0);
+        let filter_id = EthApiServer::new_pending_transaction_filter(&api).await.unwrap();
+        let hash = EthApiServer::send_raw_transaction(&api, raw.clone()).await.unwrap();
+        let duplicate = EthApiServer::send_raw_transaction(&api, raw).await.unwrap();
+        assert_eq!(duplicate, hash);
+
+        let changes = EthApiServer::get_filter_changes(&api, filter_id).await.unwrap();
+        let FilterChanges::Hashes(hashes) = changes else {
+            panic!("pending transaction filter should return hashes");
+        };
+        assert_eq!(hashes, vec![hash]);
+    }
+
+    #[tokio::test]
+    async fn syncing_highest_block_does_not_use_consensus_view() {
+        let provider =
+            MockFeeStateProvider::new(vec![make_fee_block(7, gwei(1), 21_000, 30_000_000, vec![])]);
+        let node_state = NodeState::new(1, 0);
+        node_state.set_recovered_height(100);
+        node_state.set_view(1_000);
+        let api = EthApiImpl::new(1, provider).with_node_state(node_state);
+
+        let status = EthApiServer::syncing(&api).await.unwrap();
+        let SyncStatus::Syncing(info) = status else {
+            panic!("expected syncing status");
+        };
+        assert_eq!(info.current_block, U64::from(7));
+        assert_eq!(info.highest_block, U64::from(7));
+    }
+
+    #[tokio::test]
+    async fn uncle_count_returns_none_for_missing_blocks() {
+        let block = make_fee_block(7, gwei(1), 21_000, 30_000_000, vec![]);
+        let block_hash = block.hash;
+        let provider = MockFeeStateProvider::new(vec![block]);
+        let api = EthApiImpl::new(1, provider);
+
+        assert_eq!(
+            EthApiServer::get_uncle_count_by_block_hash(&api, block_hash).await.unwrap(),
+            Some(U64::ZERO),
+        );
+        assert_eq!(
+            EthApiServer::get_uncle_count_by_block_hash(&api, B256::repeat_byte(0xff))
+                .await
+                .unwrap(),
+            None,
+        );
+        assert_eq!(
+            EthApiServer::get_uncle_count_by_block_number(
+                &api,
+                BlockNumberOrTag::Number(U64::from(7)),
+            )
+            .await
+            .unwrap(),
+            Some(U64::ZERO),
+        );
+        assert_eq!(
+            EthApiServer::get_uncle_count_by_block_number(
+                &api,
+                BlockNumberOrTag::Number(U64::from(99)),
+            )
+            .await
+            .unwrap(),
+            None,
+        );
     }
 }

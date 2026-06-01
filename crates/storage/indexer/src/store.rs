@@ -10,6 +10,7 @@ use parking_lot::RwLock;
 use tracing::debug;
 
 use crate::{
+    error::IndexerError,
     filter::LogFilter,
     types::{IndexStats, IndexedBlock, IndexedLog, IndexedReceipt, IndexedTransaction},
 };
@@ -208,17 +209,50 @@ impl BlockIndex {
         self.receipts.read().get(hash).cloned()
     }
 
+    /// Returns all indexed receipts for transactions in the given block,
+    /// ordered by transaction index.
+    ///
+    /// This is more efficient than calling [`get_receipt`] per transaction
+    /// because it acquires the receipts read-lock only once.
+    pub fn get_receipts_by_block_hash(&self, block_hash: &B256) -> Vec<IndexedReceipt> {
+        let block = match self.blocks_by_hash.read().get(block_hash).cloned() {
+            Some(b) => b,
+            None => return Vec::new(),
+        };
+        let receipts = self.receipts.read();
+        let mut result: Vec<IndexedReceipt> = block
+            .transaction_hashes
+            .iter()
+            .filter_map(|tx_hash| receipts.get(tx_hash).cloned())
+            .collect();
+        result.sort_by_key(|r| r.transaction_index);
+        result
+    }
+
     /// Returns the current head block number.
     #[must_use]
     pub fn head_block_number(&self) -> u64 {
         self.head_block.load(Ordering::Acquire)
     }
 
+    /// Maximum number of log results returned by a single [`get_logs`] call.
+    ///
+    /// Prevents OOM from queries matching heavily-used contracts over large
+    /// block ranges.
+    pub const MAX_LOG_RESULTS: usize = 10_000;
+
     /// Gets logs matching the given filter.
-    pub fn get_logs(&self, filter: &LogFilter) -> Vec<IndexedLog> {
+    ///
+    /// Returns an error if `from_block > to_block` or if more than
+    /// [`Self::MAX_LOG_RESULTS`] logs match the filter.
+    pub fn get_logs(&self, filter: &LogFilter) -> Result<Vec<IndexedLog>, IndexerError> {
         let head = self.head_block_number();
         let from_block = filter.from_block.unwrap_or(0);
         let to_block = filter.to_block.unwrap_or(head).min(head);
+
+        if from_block > to_block {
+            return Err(IndexerError::InvalidBlockRange { from: from_block, to: to_block });
+        }
 
         let mut result = Vec::new();
 
@@ -238,11 +272,14 @@ impl BlockIndex {
                 if !Self::matches_filter(log, filter) {
                     continue;
                 }
+                if result.len() >= Self::MAX_LOG_RESULTS {
+                    return Err(IndexerError::TooManyLogs { limit: Self::MAX_LOG_RESULTS });
+                }
                 result.push(log.clone());
             }
         }
 
-        result
+        Ok(result)
     }
 
     /// Returns the total number of indexed blocks.
@@ -470,17 +507,74 @@ mod tests {
         index.insert_block(create_test_block(1, block_hash), vec![], vec![receipt]);
 
         let filter = LogFilter::new().address(vec![contract_addr]);
-        let logs = index.get_logs(&filter);
+        let logs = index.get_logs(&filter).unwrap();
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].address, contract_addr);
 
         let filter = LogFilter::new().topic(0, vec![topic]);
-        let logs = index.get_logs(&filter);
+        let logs = index.get_logs(&filter).unwrap();
         assert_eq!(logs.len(), 1);
 
         let filter = LogFilter::new().address(vec![Address::repeat_byte(0xFF)]);
-        let logs = index.get_logs(&filter);
+        let logs = index.get_logs(&filter).unwrap();
         assert!(logs.is_empty());
+    }
+
+    #[test]
+    fn test_get_logs_exact_limit_succeeds() {
+        let index = BlockIndex::new();
+        let block_hash = B256::repeat_byte(1);
+        let contract_addr = Address::repeat_byte(0xAB);
+        let tx_hash = B256::repeat_byte(2);
+        let logs = (0..BlockIndex::MAX_LOG_RESULTS)
+            .map(|i| IndexedLog {
+                address: contract_addr,
+                topics: vec![],
+                data: Bytes::new(),
+                log_index: i as u64,
+                block_number: 1,
+                block_hash,
+                transaction_hash: tx_hash,
+                transaction_index: 0,
+            })
+            .collect();
+        let mut receipt = create_test_receipt(tx_hash, block_hash, 1);
+        receipt.logs = logs;
+
+        index.insert_block(create_test_block(1, block_hash), vec![], vec![receipt]);
+
+        let logs = index.get_logs(&LogFilter::new().address(vec![contract_addr])).unwrap();
+        assert_eq!(logs.len(), BlockIndex::MAX_LOG_RESULTS);
+    }
+
+    #[test]
+    fn test_get_logs_over_limit_errors() {
+        let index = BlockIndex::new();
+        let block_hash = B256::repeat_byte(1);
+        let contract_addr = Address::repeat_byte(0xAB);
+        let tx_hash = B256::repeat_byte(2);
+        let logs = (0..=BlockIndex::MAX_LOG_RESULTS)
+            .map(|i| IndexedLog {
+                address: contract_addr,
+                topics: vec![],
+                data: Bytes::new(),
+                log_index: i as u64,
+                block_number: 1,
+                block_hash,
+                transaction_hash: tx_hash,
+                transaction_index: 0,
+            })
+            .collect();
+        let mut receipt = create_test_receipt(tx_hash, block_hash, 1);
+        receipt.logs = logs;
+
+        index.insert_block(create_test_block(1, block_hash), vec![], vec![receipt]);
+
+        let err = index.get_logs(&LogFilter::new().address(vec![contract_addr])).unwrap_err();
+        assert!(matches!(
+            err,
+            IndexerError::TooManyLogs { limit } if limit == BlockIndex::MAX_LOG_RESULTS
+        ));
     }
 
     #[test]

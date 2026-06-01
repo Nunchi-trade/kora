@@ -195,6 +195,11 @@ impl NodeState {
         self.inner.last_verified_height.load(Ordering::Relaxed)
     }
 
+    /// Return the current consensus view number.
+    pub fn current_view(&self) -> u64 {
+        self.inner.current_view.load(Ordering::Relaxed)
+    }
+
     /// Returns `true` when the node is catching up after recovery.
     ///
     /// A node is catching up when it was recovered from an archive

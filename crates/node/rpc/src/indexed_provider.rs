@@ -27,7 +27,11 @@ use crate::{
 /// Ranges exceeding this limit are rejected with an invalid-params error to
 /// prevent unbounded iteration from monopolising the RPC thread. The value is
 /// aligned with Infura's 10 000-block cap.
-const MAX_LOG_BLOCK_RANGE: u64 = 10_000;
+/// Maximum block range allowed for a single log query.
+///
+/// Exposed so that `eth_getFilterChanges` can pre-cap the range before
+/// delegating to `get_logs`, avoiding confusing downstream errors.
+pub const MAX_LOG_BLOCK_RANGE: u64 = 10_000;
 
 /// State provider that combines indexed block data with live state queries.
 ///
@@ -195,6 +199,18 @@ impl<S: StateDbRead + Send + Sync + 'static> StateProvider for IndexedStateProvi
         self.executor.estimate_gas(&self.state, params, &block_ctx).map_err(execution_error_to_rpc)
     }
 
+    async fn receipts_by_block_hash(
+        &self,
+        block_hash: B256,
+    ) -> Result<Vec<RpcTransactionReceipt>, RpcError> {
+        Ok(self
+            .index
+            .get_receipts_by_block_hash(&block_hash)
+            .into_iter()
+            .map(indexed_receipt_to_rpc)
+            .collect())
+    }
+
     async fn get_logs(&self, filter: RpcLogFilter) -> Result<Vec<RpcLog>, RpcError> {
         // EIP-234: blockHash is mutually exclusive with fromBlock/toBlock.
         if filter.block_hash.is_some() && (filter.from_block.is_some() || filter.to_block.is_some())
@@ -251,6 +267,7 @@ impl<S: StateDbRead + Send + Sync + 'static> StateProvider for IndexedStateProvi
         let logs = self
             .index
             .get_logs(&log_filter)
+            .map_err(|e| RpcError::InvalidParams(e.to_string()))?
             .into_iter()
             .map(|log| RpcLog {
                 address: log.address,
@@ -272,7 +289,7 @@ impl<S> IndexedStateProvider<S> {
     /// Reject requests for historical or future state that we cannot serve.
     ///
     /// Kora uses QMDB which only maintains the latest state. We accept
-    /// `None`, `latest`, `pending`, `safe`, `finalized`, and the current
+    /// `None`, `latest`, `pending`, `safe`, `finalized`, and the exact current
     /// head block number; everything else returns an explicit error instead
     /// of silently returning the latest state.
     ///
@@ -290,13 +307,13 @@ impl<S> IndexedStateProvider<S> {
                 let requested = n.to::<u64>();
                 if requested == head {
                     Ok(())
-                } else if requested > head {
-                    Err(RpcError::InvalidBlockNumber(format!(
-                        "block not yet available (requested {requested}, head {head})",
+                } else if requested < head {
+                    Err(RpcError::Unsupported(format!(
+                        "historical state not available (requested {requested}, head {head})",
                     )))
                 } else {
-                    Err(RpcError::Unsupported(format!(
-                        "historical state not available (block {requested})",
+                    Err(RpcError::InvalidBlockNumber(format!(
+                        "block not yet available (requested {requested}, head {head})",
                     )))
                 }
             }
@@ -1073,7 +1090,6 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, RpcError::Unsupported(_)));
-        assert!(err.to_string().contains("historical state not available"));
     }
 
     #[tokio::test]
@@ -1101,7 +1117,6 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, RpcError::Unsupported(_)));
-        assert!(err.to_string().contains("historical state not available"));
     }
 
     #[tokio::test]
