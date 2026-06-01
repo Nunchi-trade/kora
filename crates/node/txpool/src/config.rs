@@ -1,7 +1,9 @@
 //! Transaction pool configuration.
 
+use serde::{Deserialize, Serialize};
+
 /// Configuration for the transaction pool.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PoolConfig {
     /// Maximum number of pending (executable) transactions.
     pub max_pending_txs: usize,
@@ -12,7 +14,7 @@ pub struct PoolConfig {
     /// Maximum transaction size in bytes.
     pub max_tx_size: usize,
     /// Minimum gas price required for transaction acceptance.
-    pub min_gas_price: u128,
+    pub min_gas_price: u64,
     /// Percentage bump required for replacement transactions.
     pub replacement_bump_percent: u8,
     /// Time-to-live for pending transactions, in seconds.
@@ -81,7 +83,7 @@ impl PoolConfig {
 
     /// Sets the minimum gas price required.
     #[must_use]
-    pub const fn with_min_gas_price(mut self, min: u128) -> Self {
+    pub const fn with_min_gas_price(mut self, min: u64) -> Self {
         self.min_gas_price = min;
         self
     }

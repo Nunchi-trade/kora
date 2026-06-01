@@ -27,6 +27,9 @@ rand.workspace = true
 # Misc
 alloy-primitives.workspace = true
 
+# Transaction pool config
+kora-txpool = { path = "../txpool" }
+
 [dev-dependencies]
 rstest = "0.24"
 tempfile.workspace = true

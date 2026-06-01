@@ -2,7 +2,7 @@
 
 use alloy_consensus::{Transaction, TxEnvelope};
 use alloy_eips::eip2718::Decodable2718;
-use alloy_primitives::{Address, B256, U256, keccak256};
+use alloy_primitives::{Address, B256, U256};
 use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
 use kora_domain::Tx;
 use kora_traits::StateDbRead;
@@ -56,7 +56,7 @@ impl<S: StateDbRead> TransactionValidator<S> {
     }
 
     /// Attach a transaction pool so the validator can reject same-nonce
-    /// duplicates at ingress time.
+    /// duplicates at ingress time and enforce the pool's dynamic base-fee floor.
     #[must_use]
     pub fn with_pool(mut self, pool: TransactionPool) -> Self {
         self.pool = Some(pool);
@@ -83,10 +83,14 @@ impl<S: StateDbRead> TransactionValidator<S> {
         let (sender, hash) = recover_sender_and_hash(&envelope)?;
 
         let effective_gas_price = effective_gas_price(&envelope);
-        if effective_gas_price < self.config.min_gas_price {
+        let min_gas_price = self
+            .pool
+            .as_ref()
+            .map_or(u128::from(self.config.min_gas_price), TransactionPool::current_min_gas_price);
+        if effective_gas_price < min_gas_price {
             return Err(TxPoolError::GasPriceTooLow {
                 price: effective_gas_price,
-                min: self.config.min_gas_price,
+                min: min_gas_price,
             });
         }
 
@@ -110,13 +114,24 @@ impl<S: StateDbRead> TransactionValidator<S> {
             return Err(TxPoolError::NonceGap { got: nonce, expected: state_nonce });
         }
 
-        // Reject if the pool already contains a transaction from this sender
-        // with the same nonce.  This prevents same-nonce conflicts from
-        // passing validation when only finalized state is checked.
+        // If the pool already contains a transaction from this sender with
+        // the same nonce, allow replacement only when the new tx offers a
+        // sufficient gas-price bump (issue 080).  Without a pool reference
+        // the duplicate check is skipped (stateless validation only).
+        let mut replacement_nonce = None;
         if let Some(pool) = &self.pool
             && pool.has_nonce(&sender, nonce)
         {
-            return Err(TxPoolError::NonceAlreadyInPool { sender, nonce });
+            let bump = u128::from(self.config.replacement_bump_percent);
+            if let Some(existing_price) = pool.gas_price_for_nonce(&sender, nonce) {
+                let min_replacement_price = existing_price + (existing_price * bump / 100);
+                if effective_gas_price < min_replacement_price {
+                    return Err(TxPoolError::ReplacementUnderpriced);
+                }
+                replacement_nonce = Some(nonce);
+            } else {
+                return Err(TxPoolError::NonceAlreadyInPool { sender, nonce });
+            }
         }
 
         let max_cost = max_tx_cost(&envelope);
@@ -127,6 +142,19 @@ impl<S: StateDbRead> TransactionValidator<S> {
             .map_err(|e| TxPoolError::StateError(e.to_string()))?;
         if balance < max_cost {
             return Err(TxPoolError::InsufficientBalance { need: max_cost, have: balance });
+        }
+
+        // Check cumulative pending cost: the sender's balance must cover this
+        // transaction *plus* all already-pending transactions (issue 028).
+        if let Some(pool) = &self.pool {
+            let existing_cost = replacement_nonce.map_or_else(
+                || pool.pending_cost(&sender),
+                |nonce| pool.pending_cost_excluding_nonce(&sender, nonce),
+            );
+            let total = existing_cost + max_cost;
+            if balance < total {
+                return Err(TxPoolError::InsufficientBalance { need: total, have: balance });
+            }
         }
 
         Ok(ValidatedTransaction {
@@ -145,6 +173,8 @@ impl<S: StateDbRead> TransactionValidator<S> {
 impl ValidatedTransaction {
     /// Converts this validated transaction into an ordered transaction for pool insertion.
     pub fn into_ordered(self, timestamp: u64) -> OrderedTransaction {
+        let raw_bytes = self.raw.bytes.clone();
+        let tx_id = self.raw.id();
         OrderedTransaction::new(
             self.hash,
             self.sender,
@@ -152,6 +182,8 @@ impl ValidatedTransaction {
             self.effective_gas_price,
             timestamp,
             self.envelope,
+            tx_id,
+            raw_bytes,
         )
     }
 }
@@ -162,7 +194,8 @@ pub fn recover_sender_from_envelope(envelope: &TxEnvelope) -> Result<Address, Tx
 }
 
 fn recover_sender_and_hash(envelope: &TxEnvelope) -> Result<(Address, B256), TxPoolError> {
-    let hash = keccak256(alloy_rlp::encode(envelope));
+    // Use canonical Ethereum tx hash: keccak256 of 2718-encoded envelope.
+    let hash = *envelope.tx_hash();
 
     let signature = envelope.signature();
     let r_be = B256::from_slice(&signature.r().to_be_bytes::<32>());
@@ -491,6 +524,26 @@ mod tests {
 
         let result = validator.validate(raw_tx).await;
         assert!(matches!(result, Err(TxPoolError::GasPriceTooLow { .. })));
+    }
+
+    #[tokio::test]
+    async fn reject_gas_price_below_pool_dynamic_base_fee() {
+        let chain_id = 1u64;
+        let (sender, _, raw_tx) =
+            sign_eip1559_tx(chain_id, 0, 21000, 1_500_000_000, U256::ZERO, Some(Address::ZERO));
+
+        let state =
+            MockState::new().with_account(sender, 0, U256::from(1_000_000_000_000_000_000u64));
+        let config = PoolConfig::default();
+        let pool = TransactionPool::new(config.clone());
+        pool.update_base_fee(2_000_000_000);
+        let validator = TransactionValidator::new(chain_id, state, config).with_pool(pool);
+
+        let result = validator.validate(raw_tx).await;
+        assert!(matches!(
+            result,
+            Err(TxPoolError::GasPriceTooLow { price: 1_500_000_000, min: 2_000_000_000 })
+        ));
     }
 
     #[tokio::test]
@@ -953,14 +1006,54 @@ mod tests {
         let validated = validator.validate(raw_tx1).await.unwrap();
         pool.add(validated.into_ordered(0)).unwrap();
 
-        // The second tx with the same sender+nonce should be rejected.
+        // The second tx with the same sender+nonce and same gas price should
+        // be rejected as underpriced (needs a bump to replace).
         let validator2 = TransactionValidator::new(chain_id, state, config).with_pool(pool);
         let result = validator2.validate(raw_tx2).await;
         assert!(
-            matches!(result, Err(TxPoolError::NonceAlreadyInPool { nonce: 0, .. })),
-            "expected NonceAlreadyInPool, got: {:?}",
+            matches!(result, Err(TxPoolError::ReplacementUnderpriced)),
+            "expected ReplacementUnderpriced, got: {:?}",
             result,
         );
+    }
+
+    #[tokio::test]
+    async fn replacement_balance_check_excludes_replaced_pending_tx() {
+        let chain_id = 1u64;
+        let key = SigningKey::random(&mut OsRng);
+        let old_price = 1_000_000_000u128;
+        let replacement_price = 1_200_000_000u128;
+        let (sender, _, raw_tx1) = sign_eip1559_tx_with_key(
+            &key,
+            chain_id,
+            0,
+            21000,
+            old_price,
+            U256::ZERO,
+            Some(Address::ZERO),
+        );
+        let (_, _, raw_tx2) = sign_eip1559_tx_with_key(
+            &key,
+            chain_id,
+            0,
+            21000,
+            replacement_price,
+            U256::ZERO,
+            Some(Address::ZERO),
+        );
+
+        let replacement_cost = U256::from(21_000u64) * U256::from(replacement_price);
+        let state = MockState::new().with_account(sender, 0, replacement_cost);
+        let pool = TransactionPool::new(PoolConfig::default());
+        let config = PoolConfig::default();
+        let validator = TransactionValidator::new(chain_id, state.clone(), config.clone())
+            .with_pool(pool.clone());
+        let validated = validator.validate(raw_tx1).await.unwrap();
+        pool.add(validated.into_ordered(0)).unwrap();
+
+        let validator2 = TransactionValidator::new(chain_id, state, config).with_pool(pool);
+        let result = validator2.validate(raw_tx2).await;
+        assert!(result.is_ok(), "replacement should fit balance: {result:?}");
     }
 
     #[tokio::test]

@@ -233,7 +233,8 @@ impl Cli {
         let runner = ProductionRunner::new(scheme, config.chain_id, bootstrap)
             .with_rpc(node_state, rpc_addr)
             .with_metrics_addr(metrics_addr)
-            .with_secondary_peers(secondary_participants);
+            .with_secondary_peers(secondary_participants)
+            .with_pool_config(config.txpool.clone());
 
         runner.run_standalone(config).map_err(|e| eyre::eyre!("Runner failed: {}", e.0))
     }

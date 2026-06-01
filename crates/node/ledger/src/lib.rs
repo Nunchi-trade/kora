@@ -178,6 +178,27 @@ impl LedgerView {
         .await
     }
 
+    /// Initialize a ledger view with explicit transaction pool configuration.
+    pub async fn init_with_genesis_options_and_pool_config(
+        context: tokio::Context,
+        partition_prefix: String,
+        genesis_alloc: Vec<(Address, U256)>,
+        apply_genesis: bool,
+        genesis_timestamp: u64,
+        pool_config: PoolConfig,
+    ) -> LedgerResult<Self> {
+        let config = QmdbConfig::new(partition_prefix);
+        Self::init_with_config_and_genesis_options_and_pool_config(
+            context,
+            config,
+            genesis_alloc,
+            apply_genesis,
+            genesis_timestamp,
+            pool_config,
+        )
+        .await
+    }
+
     /// Initialize a ledger view with an explicit QMDB configuration.
     pub async fn init_with_config(
         context: tokio::Context,
@@ -223,6 +244,26 @@ impl LedgerView {
         apply_genesis: bool,
         genesis_timestamp: u64,
     ) -> LedgerResult<Self> {
+        Self::init_with_config_and_genesis_options_and_pool_config(
+            context,
+            config,
+            genesis_alloc,
+            apply_genesis,
+            genesis_timestamp,
+            PoolConfig::default(),
+        )
+        .await
+    }
+
+    /// Initialize a ledger view with explicit QMDB, genesis, and txpool configuration.
+    pub async fn init_with_config_and_genesis_options_and_pool_config(
+        context: tokio::Context,
+        config: QmdbConfig,
+        genesis_alloc: Vec<(Address, U256)>,
+        apply_genesis: bool,
+        genesis_timestamp: u64,
+        pool_config: PoolConfig,
+    ) -> LedgerResult<Self> {
         let qmdb = QmdbLedger::init_with_genesis(
             context.child("qmdb"),
             config,
@@ -255,7 +296,7 @@ impl LedgerView {
 
         Ok(Self {
             inner: Arc::new(Mutex::new(LedgerState {
-                mempool: LedgerMempool::new(PoolConfig::default()),
+                mempool: LedgerMempool::new(pool_config),
                 snapshots,
                 head: genesis_digest,
                 seeds: InMemorySeedTracker::new(genesis_digest),
@@ -771,6 +812,7 @@ mod tests {
     use kora_executor::{BlockContext, BlockExecutor, RevmExecutor};
     use kora_overlay::OverlayState;
     use kora_traits::StateDbRead;
+    use kora_txpool::PoolConfig;
 
     use super::{LedgerService, LedgerSnapshot, LedgerView};
 
@@ -886,6 +928,29 @@ mod tests {
             .expect("init ledger");
 
             assert_eq!(ledger.genesis_block().timestamp, 1_700_000_000);
+        });
+    }
+
+    #[test]
+    fn init_applies_configured_txpool_to_ledger_pool() {
+        run_ledger_test(|context| async move {
+            let pool_config = PoolConfig::default()
+                .with_max_pending_txs(7)
+                .with_max_queued_txs(3)
+                .with_min_gas_price(42);
+            let ledger = LedgerView::init_with_genesis_options_and_pool_config(
+                context,
+                next_partition("revm-ledger-txpool-config"),
+                Vec::new(),
+                true,
+                0,
+                pool_config.clone(),
+            )
+            .await
+            .expect("init ledger");
+
+            let txpool = ledger.txpool().await;
+            assert_eq!(txpool.config(), &pool_config);
         });
     }
 

@@ -843,6 +843,10 @@ pub struct ProductionRunner {
     pub metrics_addr: Option<std::net::SocketAddr>,
     /// Secondary peers authorized to follow validator traffic without participating in consensus.
     pub secondary_peers: Vec<Peer>,
+    /// Optional transaction pool configuration override for legacy callers.
+    ///
+    /// Service-driven runs use `NodeConfig.txpool` when this remains the default.
+    pub pool_config: PoolConfig,
 }
 
 impl ProductionRunner {
@@ -859,6 +863,7 @@ impl ProductionRunner {
             rpc_config: None,
             metrics_addr: None,
             secondary_peers: Vec::new(),
+            pool_config: PoolConfig::default(),
         }
     }
 
@@ -881,6 +886,21 @@ impl ProductionRunner {
     pub fn with_secondary_peers(mut self, peers: Vec<Peer>) -> Self {
         self.secondary_peers = peers;
         self
+    }
+
+    /// Configure an explicit transaction pool override.
+    #[must_use]
+    pub const fn with_pool_config(mut self, pool_config: PoolConfig) -> Self {
+        self.pool_config = pool_config;
+        self
+    }
+
+    fn effective_pool_config(&self, config: &kora_config::NodeConfig) -> PoolConfig {
+        if self.pool_config == PoolConfig::default() {
+            config.txpool.clone()
+        } else {
+            self.pool_config.clone()
+        }
     }
 }
 
@@ -945,6 +965,7 @@ impl NodeRunner for ProductionRunner {
     async fn run(&self, ctx: NodeRunContext<Self::Transport>) -> Result<Self::Handle, Self::Error> {
         let (context, config, mut transport) = ctx.into_parts();
         let gas_limit = config.execution.gas_limit;
+        let pool_config = self.effective_pool_config(config.as_ref());
         let simplex_config = config.consensus.simplex;
 
         info!(chain_id = self.chain_id, "Starting production validator");
@@ -1006,12 +1027,13 @@ impl NodeRunner for ProductionRunner {
             .context("init blocks archive")?;
 
         let has_finalized_history = finalized_blocks.last_index().is_some();
-        let state = LedgerView::init_with_genesis_options(
+        let state = LedgerView::init_with_genesis_options_and_pool_config(
             context.child("state"),
             format!("{}-qmdb", self.partition_prefix),
             self.bootstrap.genesis_alloc.clone(),
             !has_finalized_history,
             self.bootstrap.genesis_timestamp,
+            pool_config.clone(),
         )
         .await
         .context("init qmdb")?;
@@ -1029,6 +1051,7 @@ impl NodeRunner for ProductionRunner {
             config.data_dir.clone(),
         );
         let txpool = ledger.txpool().await;
+        txpool.update_base_fee(u128::from(kora_config::INITIAL_BASE_FEE));
         spawn_txpool_cleanup(txpool.clone(), context.child("txpool"));
 
         // Initialize application-level Prometheus metrics and register them
@@ -1079,6 +1102,7 @@ impl NodeRunner for ProductionRunner {
             // Inbound: read from P2P, validate, insert into local pool.
             {
                 let seen = seen.clone();
+                let gossip_pool_config = pool_config.clone();
                 let gossip_ledger = ledger.clone();
                 let gossip_chain_id = self.chain_id;
                 let gossip_pool = txpool.clone();
@@ -1113,7 +1137,7 @@ impl NodeRunner for ProductionRunner {
                         let validator = TransactionValidator::new(
                             gossip_chain_id,
                             current_state,
-                            PoolConfig::default(),
+                            gossip_pool_config.clone(),
                         )
                         .with_pool(gossip_pool.clone());
                         if let Err(e) = validator.validate(tx.clone()).await {
@@ -1197,6 +1221,7 @@ impl NodeRunner for ProductionRunner {
             );
             let tx_ledger = ledger.clone();
             let chain_id = self.chain_id;
+            let rpc_pool_config = pool_config.clone();
             let tx_pool = txpool.clone();
             let gossip_tx = gossip_outbound_tx.clone();
             let gossip_seen_rpc = gossip_seen.clone();
@@ -1205,13 +1230,13 @@ impl NodeRunner for ProductionRunner {
                 let pool = tx_pool.clone();
                 let gossip = gossip_tx.clone();
                 let seen = gossip_seen_rpc.clone();
+                let pool_cfg = rpc_pool_config.clone();
                 Box::pin(async move {
                     let tx = Tx::new(data.clone());
                     let tx_id = tx.id();
                     let state = ledger.latest_state().await;
                     let validator =
-                        TransactionValidator::new(chain_id, state, PoolConfig::default())
-                            .with_pool(pool);
+                        TransactionValidator::new(chain_id, state, pool_cfg).with_pool(pool);
                     validator.validate(tx.clone()).await.map_err(|err| {
                         warn!(?tx_id, error = %err, "rpc submit: validator rejected tx");
                         kora_rpc::RpcError::InvalidTransaction(err.to_string())
