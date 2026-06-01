@@ -9,7 +9,7 @@
 //! `block_in_place` is a no-op (tokio 1.28+) and `Handle::block_on` drives
 //! the state DB futures without starving any async workers.
 
-use std::collections::HashMap;
+use std::{cell::RefCell, collections::HashMap};
 
 use alloy_primitives::{Address, B256, KECCAK256_EMPTY, U256};
 use kora_traits::{StateDbError, StateDbRead};
@@ -40,18 +40,31 @@ fn block_on<F: std::future::Future>(f: F) -> F::Output {
 }
 
 /// Adapts a [`StateDbRead`] to REVM's [`DatabaseRef`] interface.
+///
+/// Includes a per-block prefetch cache for account info and storage
+/// slots, reducing redundant async-to-sync bridge crossings when the
+/// EVM re-reads the same accounts/slots within a single block execution.
 #[derive(Clone, Debug)]
 pub struct StateDbAdapter<S> {
     state: S,
     /// Recent block hashes keyed by block number, used by the BLOCKHASH opcode.
     block_hashes: HashMap<u64, B256>,
+    /// Per-block cache for account info lookups.
+    account_cache: RefCell<HashMap<Address, Option<AccountInfo>>>,
+    /// Per-block cache for storage slot lookups.
+    storage_cache: RefCell<HashMap<(Address, U256), U256>>,
 }
 
 impl<S> StateDbAdapter<S> {
     /// Create a new adapter wrapping the given state and recent block hashes.
     #[must_use]
-    pub const fn new(state: S, block_hashes: HashMap<u64, B256>) -> Self {
-        Self { state, block_hashes }
+    pub fn new(state: S, block_hashes: HashMap<u64, B256>) -> Self {
+        Self {
+            state,
+            block_hashes,
+            account_cache: RefCell::new(HashMap::new()),
+            storage_cache: RefCell::new(HashMap::new()),
+        }
     }
 
     /// Get the underlying state reference.
@@ -65,9 +78,13 @@ impl<S: StateDbRead> DatabaseRef for StateDbAdapter<S> {
     type Error = ExecutionError;
 
     fn basic_ref(&self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
+        // Return cached result if available.
+        if let Some(cached) = self.account_cache.borrow().get(&address) {
+            return Ok(cached.clone());
+        }
         // Batch all three reads into a single block_on call to reduce the
         // overhead of the async-to-sync bridge (block_in_place + handle.block_on).
-        match block_on(async {
+        let result = match block_on(async {
             let nonce = self.state.nonce(&address).await?;
             let balance = self.state.balance(&address).await?;
             let code_hash = self.state.code_hash(&address).await?;
@@ -78,7 +95,11 @@ impl<S: StateDbRead> DatabaseRef for StateDbAdapter<S> {
             }
             Err(StateDbError::AccountNotFound(_)) => Ok(None),
             Err(e) => Err(e.into()),
+        };
+        if let Ok(ref info) = result {
+            self.account_cache.borrow_mut().insert(address, info.clone());
         }
+        result
     }
 
     fn code_by_hash_ref(&self, code_hash: B256) -> Result<Bytecode, Self::Error> {
@@ -90,11 +111,19 @@ impl<S: StateDbRead> DatabaseRef for StateDbAdapter<S> {
     }
 
     fn storage_ref(&self, address: Address, index: U256) -> Result<U256, Self::Error> {
-        match block_on(self.state.storage(&address, &index)) {
+        let key = (address, index);
+        if let Some(&cached) = self.storage_cache.borrow().get(&key) {
+            return Ok(cached);
+        }
+        let result = match block_on(self.state.storage(&address, &index)) {
             Ok(value) => Ok(value),
             Err(StateDbError::AccountNotFound(_)) => Ok(U256::ZERO),
             Err(e) => Err(e.into()),
+        };
+        if let Ok(value) = result {
+            self.storage_cache.borrow_mut().insert(key, value);
         }
+        result
     }
 
     fn block_hash_ref(&self, number: u64) -> Result<B256, Self::Error> {

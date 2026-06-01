@@ -1,6 +1,6 @@
 //! Mempool trait for transaction pool compatibility.
 
-use std::collections::BTreeSet;
+use std::collections::HashSet;
 
 use kora_domain::{Tx, TxId};
 
@@ -17,7 +17,7 @@ pub trait Mempool: Clone + Send + Sync + 'static {
     ///
     /// `excluded` contains transaction IDs already included in pending ancestor blocks.
     /// `max_txs` limits the number of transactions returned.
-    fn build(&self, max_txs: usize, excluded: &BTreeSet<TxId>) -> Vec<Tx>;
+    fn build(&self, max_txs: usize, excluded: &HashSet<TxId>) -> Vec<Tx>;
 
     /// Remove finalized transactions from the mempool.
     fn prune(&self, tx_ids: &[TxId]);

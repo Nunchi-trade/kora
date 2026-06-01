@@ -1,7 +1,7 @@
 //! Transaction pool implementation.
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -31,7 +31,7 @@ struct BuildSenderState {
 }
 
 impl BuildSenderState {
-    fn next_candidate(&mut self, excluded: &BTreeSet<TxId>) -> Option<OrderedTransaction> {
+    fn next_candidate(&mut self, excluded: &HashSet<TxId>) -> Option<OrderedTransaction> {
         while let Some(tx) = self.txs.get(self.index) {
             if tx.nonce < self.expected_nonce {
                 self.index += 1;
@@ -674,7 +674,7 @@ impl Mempool for TransactionPool {
         }
     }
 
-    fn build(&self, max_txs: usize, excluded: &BTreeSet<TxId>) -> Vec<Tx> {
+    fn build(&self, max_txs: usize, excluded: &HashSet<TxId>) -> Vec<Tx> {
         let inner = self.inner.read();
         let mut senders: HashMap<Address, BuildSenderState> = inner
             .by_sender
@@ -1007,14 +1007,14 @@ mod tests {
         assert_eq!(pool.pending_count(), 1);
         assert_eq!(pool.queued_count(), 1);
 
-        let built = pool.build(10, &BTreeSet::new());
+        let built = pool.build(10, &HashSet::new());
         assert_eq!(built.len(), 1);
         assert_eq!(tx_nonce(&built[0]), other.nonce);
 
         let tx0_replacement = make_ordered_tx(sender, 0, 200);
         pool.add(tx0_replacement.clone()).unwrap();
 
-        let built = pool.build(10, &BTreeSet::new());
+        let built = pool.build(10, &HashSet::new());
         assert_eq!(built.len(), 2);
         assert_eq!(tx_nonce(&built[0]), tx0_replacement.nonce);
         assert_eq!(tx_nonce(&built[1]), tx1_high.nonce);
@@ -1089,12 +1089,12 @@ mod tests {
 
         assert_eq!(pool.len(), 1);
         assert!(pool.contains(&tx2.hash));
-        assert!(pool.build(10, &BTreeSet::new()).is_empty());
+        assert!(pool.build(10, &HashSet::new()).is_empty());
 
         let tx1 = make_ordered_tx(sender, 1, 100);
         pool.add(tx1.clone()).unwrap();
 
-        let txs = pool.build(10, &BTreeSet::new());
+        let txs = pool.build(10, &HashSet::new());
         assert_eq!(txs.len(), 2);
         assert_eq!(tx_nonce(&txs[0]), tx1.nonce);
         assert_eq!(tx_nonce(&txs[1]), tx2.nonce);
@@ -1129,7 +1129,7 @@ mod tests {
 
         pool.prune(&[ordered_tx_id(&tx0), ordered_tx_id(&tx1)]);
 
-        let txs = pool.build(10, &BTreeSet::new());
+        let txs = pool.build(10, &HashSet::new());
         assert_eq!(txs.len(), 2);
         assert_eq!(tx_nonce(&txs[0]), tx2.nonce);
         assert_eq!(tx_nonce(&txs[1]), tx3.nonce);
@@ -1145,7 +1145,7 @@ mod tests {
         pool.add(tx0.clone()).unwrap();
         pool.add(tx1.clone()).unwrap();
 
-        let built = pool.build(10, &BTreeSet::new());
+        let built = pool.build(10, &HashSet::new());
         assert_eq!(built.len(), 2);
 
         let ids: Vec<TxId> = built.iter().map(Tx::id).collect();
@@ -1153,7 +1153,7 @@ mod tests {
 
         assert!(!pool.contains(&tx0.hash));
         assert!(pool.contains(&tx1.hash));
-        let rebuilt = pool.build(10, &BTreeSet::new());
+        let rebuilt = pool.build(10, &HashSet::new());
         assert_eq!(rebuilt.len(), 1);
         assert_eq!(tx_nonce(&rebuilt[0]), tx1.nonce);
     }
@@ -1170,7 +1170,7 @@ mod tests {
         pool.add(tx1.clone()).unwrap();
         pool.add(tx2.clone()).unwrap();
 
-        let excluded = BTreeSet::from([ordered_tx_id(&tx0)]);
+        let excluded = HashSet::from([ordered_tx_id(&tx0)]);
         let txs = pool.build(10, &excluded);
 
         assert_eq!(txs.len(), 2);
@@ -1263,12 +1263,12 @@ mod tests {
         pool.add(tx2.clone()).unwrap();
         pool.prune(&[ordered_tx_id(&tx0)]);
 
-        assert!(pool.build(10, &BTreeSet::new()).is_empty());
+        assert!(pool.build(10, &HashSet::new()).is_empty());
 
         let tx1 = make_ordered_tx(sender, 1, 100);
         pool.add(tx1.clone()).unwrap();
 
-        let txs = pool.build(10, &BTreeSet::new());
+        let txs = pool.build(10, &HashSet::new());
         assert_eq!(txs.len(), 2);
         assert_eq!(tx_nonce(&txs[0]), tx1.nonce);
         assert_eq!(tx_nonce(&txs[1]), tx2.nonce);
@@ -1287,7 +1287,7 @@ mod tests {
         pool.add(a1).unwrap();
         pool.add(b0).unwrap();
 
-        let txs = pool.build(10, &BTreeSet::new());
+        let txs = pool.build(10, &HashSet::new());
         let order: Vec<_> = txs.iter().map(tx_nonce_and_gas_price).collect();
 
         assert_eq!(order, vec![(0, 500), (0, 10), (1, 1_000)]);

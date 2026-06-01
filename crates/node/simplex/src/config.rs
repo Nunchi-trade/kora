@@ -28,8 +28,12 @@ pub const DEFAULT_LEADER_TIMEOUT: Duration = Duration::from_secs(1);
 /// Default notarization timeout (2 seconds).
 pub const DEFAULT_NOTARIZATION_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Default nullify retry interval (5 seconds).
-pub const DEFAULT_NULLIFY_RETRY: Duration = Duration::from_secs(5);
+/// Default nullify retry interval (1 second).
+///
+/// Healthy views complete in ~7 ms. A 1-second retry allows faster
+/// recovery from transient snapshot misses under CPU contention without
+/// risking excessive retry traffic on a 3-validator devnet.
+pub const DEFAULT_NULLIFY_RETRY: Duration = Duration::from_secs(1);
 
 /// Default fetch timeout (1 second).
 pub const DEFAULT_FETCH_TIMEOUT: Duration = Duration::from_secs(1);
@@ -140,8 +144,8 @@ mod tests {
     }
 
     #[test]
-    fn default_nullify_retry_is_5_seconds() {
-        assert_eq!(DEFAULT_NULLIFY_RETRY, Duration::from_secs(5));
+    fn default_nullify_retry_is_1_second() {
+        assert_eq!(DEFAULT_NULLIFY_RETRY, Duration::from_secs(1));
     }
 
     #[test]

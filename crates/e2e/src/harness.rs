@@ -676,7 +676,7 @@ async fn verify_expected_balances(
 }
 
 // Import the test application from the revm example pattern
-use std::collections::BTreeSet;
+use std::collections::HashSet;
 
 use alloy_primitives::Bytes;
 use commonware_consensus::{
@@ -826,8 +826,8 @@ impl<S> TestApplication<S> {
         &self,
         snapshots: &InMemorySnapshotStore<OverlayState<QmdbState>>,
         from: ConsensusDigest,
-    ) -> BTreeSet<kora_consensus::TxId> {
-        let mut excluded = BTreeSet::new();
+    ) -> HashSet<kora_consensus::TxId> {
+        let mut excluded = HashSet::new();
         let mut current = Some(from);
 
         while let Some(digest) = current {

@@ -7,13 +7,18 @@
 
 mod live_state;
 
-use std::{collections::BTreeSet, fmt, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeSet, HashSet},
+    fmt,
+    sync::Arc,
+    time::Duration,
+};
 
 use alloy_primitives::{Address, B256, U256};
 use commonware_consensus::Block as _;
 use commonware_cryptography::Committable as _;
 use commonware_runtime::{Supervisor as _, tokio};
-use futures::{channel::mpsc::UnboundedReceiver, lock::Mutex};
+use futures::channel::mpsc::UnboundedReceiver;
 use kora_consensus::{
     ConsensusError, Mempool as _, SeedTracker as _, Snapshot, SnapshotStore as _,
     components::{InMemorySeedTracker, InMemorySnapshotStore},
@@ -55,7 +60,7 @@ impl kora_consensus::Mempool for LedgerMempool {
         kora_txpool::Mempool::insert(&self.pool, tx)
     }
 
-    fn build(&self, max_txs: usize, excluded: &BTreeSet<TxId>) -> Vec<Tx> {
+    fn build(&self, max_txs: usize, excluded: &HashSet<TxId>) -> Vec<Tx> {
         kora_txpool::Mempool::build(&self.pool, max_txs, excluded)
     }
 
@@ -89,11 +94,15 @@ pub enum LedgerError {
 /// Result alias for ledger operations.
 pub type LedgerResult<T> = Result<T, LedgerError>;
 
-/// Ledger view that owns the mutexed execution state.
+/// Ledger view that owns the read-write locked execution state.
+///
+/// Uses `tokio::sync::RwLock` instead of a single `futures::lock::Mutex`
+/// to allow concurrent reads (snapshot lookups, seed queries, state root
+/// queries) while only requiring exclusive access for mutations.
 #[derive(Clone)]
 pub struct LedgerView {
-    /// Mutex-protected running state.
-    inner: Arc<Mutex<LedgerState>>,
+    /// RwLock-protected running state.
+    inner: Arc<::tokio::sync::RwLock<LedgerState>>,
     /// Genesis block stored so the automaton can replay from height 0.
     genesis_block: Block,
     /// Notifier signalled whenever a new snapshot is inserted, allowing
@@ -254,7 +263,7 @@ impl LedgerView {
         snapshots.mark_persisted(&[genesis_digest]);
 
         Ok(Self {
-            inner: Arc::new(Mutex::new(LedgerState {
+            inner: Arc::new(::tokio::sync::RwLock::new(LedgerState {
                 mempool: LedgerMempool::new(PoolConfig::default()),
                 snapshots,
                 head: genesis_digest,
@@ -277,25 +286,25 @@ impl LedgerView {
     /// for read-only queries (balance, nonce, code, storage) without
     /// acquiring the ledger mutex.
     pub async fn qmdb_state(&self) -> QmdbState {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.read().await;
         inner.qmdb.state()
     }
 
     /// Submit a transaction into the mempool.
     pub async fn submit_tx(&self, tx: Tx) -> bool {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.read().await;
         inner.mempool.insert(tx)
     }
 
     /// Return a handle to the transaction pool.
     pub async fn txpool(&self) -> TransactionPool {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.read().await;
         inner.mempool.txpool()
     }
 
     /// Return an overlay for the latest executed state known to the ledger.
     pub async fn latest_state(&self) -> OverlayState<QmdbState> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.read().await;
         inner
             .snapshots
             .get(&inner.head)
@@ -306,7 +315,7 @@ impl LedgerView {
     /// Query a balance at the given digest.
     pub async fn query_balance(&self, digest: ConsensusDigest, address: Address) -> Option<U256> {
         let snapshot = {
-            let inner = self.inner.lock().await;
+            let inner = self.inner.read().await;
             inner.snapshots.get(&digest)
         }?;
         snapshot.state.balance(&address).await.ok()
@@ -314,31 +323,31 @@ impl LedgerView {
 
     /// Query a state root at the given digest.
     pub async fn query_state_root(&self, digest: ConsensusDigest) -> Option<StateRoot> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.read().await;
         inner.snapshots.get(&digest).map(|snapshot| snapshot.state_root)
     }
 
     /// Query the cached seed at the given digest.
     pub async fn query_seed(&self, digest: ConsensusDigest) -> Option<B256> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.read().await;
         inner.seeds.get(&digest)
     }
 
     /// Return the seed associated with a parent digest.
     pub async fn seed_for_parent(&self, parent: ConsensusDigest) -> Option<B256> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.read().await;
         inner.seeds.get(&parent)
     }
 
     /// Store the seed hash for a digest.
     pub async fn set_seed(&self, digest: ConsensusDigest, seed_hash: B256) {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.read().await;
         inner.seeds.insert(digest, seed_hash);
     }
 
     /// Fetch the parent snapshot for a given digest.
     pub async fn parent_snapshot(&self, parent: ConsensusDigest) -> Option<LedgerSnapshot> {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.read().await;
         inner.snapshots.get(&parent)
     }
 
@@ -352,7 +361,7 @@ impl LedgerView {
         qmdb_changes: QmdbChangeSet,
         txs: &[Tx],
     ) {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.write().await;
         let ids = tx_ids(txs);
         inner.snapshots.insert(digest, Snapshot::new(Some(parent), state, root, qmdb_changes, ids));
         inner.head = digest;
@@ -362,7 +371,7 @@ impl LedgerView {
 
     /// Cache a snapshot that has already been constructed.
     pub async fn cache_snapshot(&self, digest: ConsensusDigest, snapshot: LedgerSnapshot) {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.write().await;
         inner.snapshots.insert(digest, snapshot);
         inner.head = digest;
         drop(inner);
@@ -371,7 +380,7 @@ impl LedgerView {
 
     /// Restore a finalized block as an already-persisted snapshot over the current QMDB state.
     pub async fn restore_persisted_snapshot(&self, block: &Block) {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.inner.write().await;
         let digest = block.commitment();
         let state = OverlayState::new(inner.qmdb.state(), QmdbChangeSet::default());
         let snapshot = Snapshot::new(
@@ -424,7 +433,7 @@ impl LedgerView {
         &self,
     ) -> (OverlayState<QmdbState>, LedgerMempool, InMemorySnapshotStore<OverlayState<QmdbState>>)
     {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.read().await;
         let root_state = OverlayState::new(inner.qmdb.state(), QmdbChangeSet::default());
         (root_state, inner.mempool.clone(), inner.snapshots.clone())
     }
@@ -451,10 +460,18 @@ impl LedgerView {
         changes: &QmdbChangeSet,
     ) -> LedgerResult<StateRoot> {
         let parent_root = {
-            let inner = self.inner.lock().await;
+            let inner = self.inner.read().await;
             inner.snapshots.get(&parent).ok_or(ConsensusError::SnapshotNotFound(parent))?.state_root
         };
         Ok(StateRoot(QmdbStateRoot::transition(parent_root.0, changes)))
+    }
+
+    /// Compute the state root given a known parent root and changeset.
+    ///
+    /// This avoids re-acquiring the inner mutex when the caller already
+    /// has the parent snapshot's state root.
+    pub fn compute_root_with_parent(parent_root: StateRoot, changes: &QmdbChangeSet) -> StateRoot {
+        StateRoot(QmdbStateRoot::transition(parent_root.0, changes))
     }
 
     /// Persist `digest` and any missing ancestors to QMDB.
@@ -463,21 +480,20 @@ impl LedgerView {
     /// persisted or currently being persisted by another task.
     pub async fn persist_snapshot(&self, digest: ConsensusDigest) -> LedgerResult<bool> {
         let (changes, qmdb, chain) = {
-            let inner = self.inner.lock().await;
+            let inner = self.inner.read().await;
             let (chain, changes) = inner.snapshots.changes_for_persist(digest)?;
             if chain.is_empty() {
                 return Ok(false);
             }
-            if !inner.snapshots.can_persist_chain(&chain) {
+            if !inner.snapshots.try_mark_persisting_chain(&chain) {
                 return Ok(false);
             }
-            inner.snapshots.mark_persisting_chain(&chain);
             (changes, inner.qmdb.clone(), chain)
         };
 
         let result = qmdb.commit_changes(changes).await;
         {
-            let inner = self.inner.lock().await;
+            let inner = self.inner.read().await;
             inner.snapshots.clear_persisting_chain(&chain);
             match result {
                 Ok(_) => {
@@ -488,16 +504,14 @@ impl LedgerView {
                             .ok_or(ConsensusError::SnapshotNotFound(*digest))?;
                         let compact_state =
                             OverlayState::new(inner.qmdb.state(), QmdbChangeSet::default());
-                        inner.snapshots.insert(
-                            *digest,
-                            Snapshot::new(
-                                snapshot.parent,
-                                compact_state,
-                                snapshot.state_root,
-                                QmdbChangeSet::default(),
-                                snapshot.tx_ids,
-                            ),
-                        );
+                        let compact = Snapshot {
+                            parent: snapshot.parent,
+                            state: compact_state,
+                            state_root: snapshot.state_root,
+                            changes: Arc::new(QmdbChangeSet::default()),
+                            tx_ids: Arc::clone(&snapshot.tx_ids),
+                        };
+                        inner.snapshots.insert(*digest, compact);
                     }
                     inner.snapshots.mark_persisted(&chain);
                     // Evict oldest persisted snapshots to bound memory usage.
@@ -515,7 +529,7 @@ impl LedgerView {
 
     /// Remove transactions that are included in a block from the mempool.
     pub async fn prune_mempool(&self, txs: &[Tx]) {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.read().await;
         let tx_ids: Vec<TxId> = txs.iter().map(Tx::id).collect();
         inner.mempool.prune(&tx_ids);
     }
@@ -529,7 +543,7 @@ impl LedgerView {
     /// have been consumed by other transactions in earlier blocks.
     pub async fn prune_stale_nonces(&self) {
         let (pool, qmdb_state) = {
-            let inner = self.inner.lock().await;
+            let inner = self.inner.read().await;
             (inner.mempool.txpool(), inner.qmdb.state())
         };
 
@@ -558,7 +572,7 @@ impl LedgerView {
     /// Returns `true` if the snapshot for `digest` has been persisted to QMDB
     /// (even if the in-memory snapshot data has since been evicted).
     pub async fn is_snapshot_persisted(&self, digest: &ConsensusDigest) -> bool {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.read().await;
         inner.snapshots.is_persisted(digest)
     }
 
@@ -567,7 +581,7 @@ impl LedgerView {
     /// - `total`: number of snapshots currently held in memory.
     /// - `unpersisted`: number of snapshots not yet persisted to QMDB.
     pub async fn snapshot_store_stats(&self) -> (usize, usize) {
-        let inner = self.inner.lock().await;
+        let inner = self.inner.read().await;
         (inner.snapshots.len(), inner.snapshots.unpersisted_count())
     }
 }
@@ -716,6 +730,14 @@ impl LedgerService {
         changes: &QmdbChangeSet,
     ) -> LedgerResult<StateRoot> {
         self.view.compute_root_from_store(parent, changes).await
+    }
+
+    /// Compute the state root given a known parent root and changeset.
+    ///
+    /// This avoids re-acquiring the inner lock when the caller already
+    /// has the parent snapshot's state root.
+    pub fn compute_root_with_parent(parent_root: StateRoot, changes: &QmdbChangeSet) -> StateRoot {
+        LedgerView::compute_root_with_parent(parent_root, changes)
     }
 
     /// Persist a snapshot and publish an event if a new commit occurs.
@@ -962,7 +984,7 @@ mod tests {
             assert!(persisted);
             let state_root =
                 setup.ledger.query_state_root(block2.digest).await.expect("state root");
-            let qmdb = setup.ledger.inner.lock().await.qmdb.clone();
+            let qmdb = setup.ledger.inner.read().await.qmdb.clone();
             let result = qmdb.state().balance(&to).await.expect("balance");
             assert_eq!(result, U256::from(TRANSFER_ONE + TRANSFER_TWO));
             assert_eq!(state_root, block2.block.state_root);
@@ -1183,7 +1205,7 @@ mod tests {
             assert!(persisted);
 
             // Assert
-            let qmdb = setup.ledger.inner.lock().await.qmdb.clone();
+            let qmdb = setup.ledger.inner.read().await.qmdb.clone();
             for recipient in recipients {
                 let result = qmdb.state().balance(&recipient).await.expect("balance");
                 assert_eq!(result, U256::from(TRANSFER_DUPLICATE));
@@ -1251,7 +1273,7 @@ mod tests {
             // Assert
             assert!(persisted_1);
             assert!(persisted_2);
-            let qmdb = setup.ledger.inner.lock().await.qmdb.clone();
+            let qmdb = setup.ledger.inner.read().await.qmdb.clone();
             assert_eq!(
                 qmdb.state().balance(&to_a).await.expect("balance"),
                 U256::from(TRANSFER_ONE)

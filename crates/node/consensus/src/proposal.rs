@@ -1,6 +1,6 @@
 //! Block proposal building logic.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 use alloy_consensus::Header;
 use alloy_primitives::{Address, B256, Bytes};
@@ -208,8 +208,8 @@ where
         block.txs.iter().map(Tx::id).collect()
     }
 
-    fn collect_pending_tx_ids(&self, from: Digest) -> Result<BTreeSet<TxId>, ConsensusError> {
-        let mut excluded = BTreeSet::new();
+    fn collect_pending_tx_ids(&self, from: Digest) -> Result<HashSet<TxId>, ConsensusError> {
+        let mut excluded = HashSet::new();
         let mut current = Some(from);
 
         while let Some(digest) = current {
@@ -236,7 +236,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, sync::Arc};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        sync::Arc,
+    };
 
     use alloy_primitives::{Address, Bytes, U256};
     use kora_executor::ExecutionOutcome;
@@ -330,7 +333,7 @@ mod tests {
             self.txs.write().insert(id, tx).is_none()
         }
 
-        fn build(&self, max_txs: usize, excluded: &BTreeSet<TxId>) -> Vec<Tx> {
+        fn build(&self, max_txs: usize, excluded: &HashSet<TxId>) -> Vec<Tx> {
             self.txs
                 .read()
                 .iter()
@@ -405,7 +408,7 @@ mod tests {
                 .get(&digest)
                 .cloned()
                 .ok_or(ConsensusError::SnapshotNotFound(digest))?;
-            Ok((vec![digest], snapshot.changes))
+            Ok((vec![digest], (*snapshot.changes).clone()))
         }
     }
 
