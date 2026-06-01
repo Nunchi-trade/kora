@@ -1,6 +1,6 @@
 //! Block execution context.
 
-use std::collections::HashMap;
+use std::{cmp::Reverse, collections::HashMap};
 
 use alloy_consensus::Header;
 use alloy_primitives::B256;
@@ -49,10 +49,17 @@ impl BlockContext {
     /// Set the recent block hashes for BLOCKHASH opcode support.
     ///
     /// Retains at most 256 entries (the EVM BLOCKHASH depth limit).
+    /// When more than 256 entries are provided, the 256 entries with the
+    /// highest block numbers (most recent blocks) are retained.  This
+    /// ensures deterministic truncation regardless of `HashMap` iteration
+    /// order, which is randomized per-process.
     #[must_use]
     pub fn with_recent_block_hashes(mut self, hashes: HashMap<u64, B256>) -> Self {
         if hashes.len() > MAX_BLOCK_HASHES {
-            self.recent_block_hashes = hashes.into_iter().take(MAX_BLOCK_HASHES).collect();
+            let mut entries: Vec<_> = hashes.into_iter().collect();
+            entries.sort_unstable_by_key(|(number, _)| Reverse(*number));
+            entries.truncate(MAX_BLOCK_HASHES);
+            self.recent_block_hashes = entries.into_iter().collect();
         } else {
             self.recent_block_hashes = hashes;
         }
@@ -127,7 +134,7 @@ mod tests {
     }
 
     #[test]
-    fn block_context_with_recent_block_hashes_truncates() {
+    fn block_context_with_recent_block_hashes_truncates_to_most_recent() {
         let header = Header::default();
         let hashes: HashMap<u64, B256> =
             (0..300).map(|i| (i, B256::repeat_byte(i as u8))).collect();
@@ -135,6 +142,32 @@ mod tests {
         let context =
             BlockContext::new(header, B256::ZERO, B256::ZERO).with_recent_block_hashes(hashes);
         assert_eq!(context.recent_block_hashes.len(), MAX_BLOCK_HASHES);
+        // Must retain block numbers 44..=299 (the 256 highest)
+        for i in 44..300u64 {
+            assert!(context.recent_block_hashes.contains_key(&i), "missing block {i}");
+        }
+        for i in 0..44u64 {
+            assert!(!context.recent_block_hashes.contains_key(&i), "should not contain block {i}");
+        }
+    }
+
+    #[test]
+    fn block_context_with_recent_block_hashes_truncates_sparse_inputs_to_top_256() {
+        let header = Header::default();
+        let mut hashes: HashMap<u64, B256> =
+            (0..300).map(|i| (i, B256::repeat_byte(i as u8))).collect();
+        hashes.insert(10_000, B256::repeat_byte(0xff));
+        assert_eq!(hashes.len(), 301);
+
+        let context =
+            BlockContext::new(header, B256::ZERO, B256::ZERO).with_recent_block_hashes(hashes);
+
+        assert_eq!(context.recent_block_hashes.len(), MAX_BLOCK_HASHES);
+        assert_eq!(context.recent_block_hashes[&10_000], B256::repeat_byte(0xff));
+        for i in 45..300u64 {
+            assert!(context.recent_block_hashes.contains_key(&i), "missing block {i}");
+        }
+        assert!(!context.recent_block_hashes.contains_key(&44));
     }
 
     #[test]

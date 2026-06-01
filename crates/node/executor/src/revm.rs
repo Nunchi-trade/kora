@@ -745,6 +745,8 @@ fn extract_changes(state: &EvmState) -> ChangeSet {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use alloy_consensus::{SignableTransaction as _, TxEip1559, TxEnvelope};
     use alloy_eips::eip2718::Encodable2718;
     use alloy_primitives::{Address, Bytes, KECCAK256_EMPTY, Signature, TxKind as AlTxKind, U256};
@@ -830,6 +832,46 @@ mod tests {
         let header =
             Header { number: 1, timestamp: 1000, gas_limit: 30_000_000, ..Header::default() };
         BlockContext::new(header, B256::ZERO, B256::ZERO)
+    }
+
+    fn blockhash_initcode(block_number: u64) -> Bytes {
+        let number_bytes = block_number.to_be_bytes();
+        let first_non_zero =
+            number_bytes.iter().position(|byte| *byte != 0).unwrap_or(number_bytes.len() - 1);
+        let number_bytes = &number_bytes[first_non_zero..];
+
+        let mut code = Vec::with_capacity(number_bytes.len() + 9);
+        code.push(0x5f + number_bytes.len() as u8);
+        code.extend_from_slice(number_bytes);
+        code.extend_from_slice(&[
+            0x40, // BLOCKHASH
+            0x60, 0x00, // PUSH1 0
+            0x52, // MSTORE
+            0x60, 0x20, // PUSH1 32
+            0x60, 0x00, // PUSH1 0
+            0xf3, // RETURN
+        ]);
+        Bytes::from(code)
+    }
+
+    fn simulate_blockhash(
+        executor: &RevmExecutor,
+        context: &BlockContext,
+        block_number: u64,
+    ) -> B256 {
+        let output = executor
+            .simulate_call(
+                &MockStateDb,
+                CallParams {
+                    data: blockhash_initcode(block_number),
+                    gas_limit: Some(100_000),
+                    ..CallParams::default()
+                },
+                context,
+            )
+            .expect("BLOCKHASH initcode should execute");
+        assert_eq!(output.len(), 32);
+        B256::from_slice(&output)
     }
 
     #[test]
@@ -974,6 +1016,29 @@ mod tests {
         let params = crate::BaseFeeParams::default();
         let base_fee = calculate_base_fee(1000, 10_000_000, 30_000_000, &params);
         assert!(base_fee < 1000);
+    }
+
+    #[test]
+    fn simulate_call_blockhash_enforces_evm_visible_window() {
+        let executor = RevmExecutor::new(1);
+        let mut hashes = HashMap::new();
+        let oldest_visible_hash = B256::repeat_byte(0x44);
+        let parent_hash = B256::repeat_byte(0x99);
+        hashes.insert(43, B256::repeat_byte(0x43));
+        hashes.insert(44, oldest_visible_hash);
+        hashes.insert(299, parent_hash);
+        hashes.insert(300, B256::repeat_byte(0xaa));
+
+        let header =
+            Header { number: 300, timestamp: 1000, gas_limit: 30_000_000, ..Header::default() };
+        let context =
+            BlockContext::new(header, B256::ZERO, B256::ZERO).with_recent_block_hashes(hashes);
+
+        assert_eq!(simulate_blockhash(&executor, &context, 299), parent_hash);
+        assert_eq!(simulate_blockhash(&executor, &context, 44), oldest_visible_hash);
+        assert_eq!(simulate_blockhash(&executor, &context, 43), B256::ZERO);
+        assert_eq!(simulate_blockhash(&executor, &context, 300), B256::ZERO);
+        assert_eq!(simulate_blockhash(&executor, &context, 301), B256::ZERO);
     }
 
     #[test]

@@ -1385,6 +1385,7 @@ impl NodeRunner for ProductionRunner {
         let mut app = RevmApplication::<ThresholdScheme, _>::new(
             ledger.clone(),
             executor,
+            block_index.clone(),
             block_cfg.max_txs,
             gas_limit,
             fee_recipient,

@@ -20,6 +20,7 @@ use futures::StreamExt;
 use kora_consensus::{BlockExecution, SnapshotStore, components::InMemorySnapshotStore};
 use kora_domain::{Block, ConsensusDigest};
 use kora_executor::{BaseFeeParams, BlockContext, BlockExecutor, calculate_base_fee};
+use kora_indexer::BlockIndex;
 use kora_ledger::LedgerService;
 use kora_metrics::AppMetrics;
 use kora_overlay::OverlayState;
@@ -85,11 +86,54 @@ fn unix_timestamp_secs<Env: Clock>(env: &Env) -> u64 {
 /// execution, NOT by certificate trust) reaches `recovered_height + 64`.
 const CATCH_UP_THRESHOLD: u64 = 64;
 
+const BLOCK_HASH_HISTORY: usize = 256;
+
+#[derive(Clone, Copy, Debug)]
+struct CachedBlockHash {
+    height: u64,
+    hash: B256,
+    parent: ConsensusDigest,
+}
+
+fn collect_recent_block_hashes(
+    block_index: &BlockIndex,
+    block_hashes: &RwLock<HashMap<ConsensusDigest, CachedBlockHash>>,
+    head: u64,
+    parent_digest: ConsensusDigest,
+) -> HashMap<u64, B256> {
+    let mut hashes = block_index.recent_block_hashes(head);
+    if head == 0 {
+        return hashes;
+    }
+
+    let min_height = head.saturating_sub(BLOCK_HASH_HISTORY as u64);
+    let cache = block_hashes.read();
+    let mut current = parent_digest;
+
+    for _ in 0..BLOCK_HASH_HISTORY {
+        let Some(entry) = cache.get(&current) else {
+            break;
+        };
+        if entry.height >= head || entry.height < min_height {
+            break;
+        }
+
+        hashes.insert(entry.height, entry.hash);
+        if entry.height == 0 {
+            break;
+        }
+        current = entry.parent;
+    }
+
+    hashes
+}
+
 /// REVM-based consensus application.
 #[derive(Clone)]
 pub struct RevmApplication<S, E> {
     ledger: LedgerService,
     executor: E,
+    block_index: Arc<BlockIndex>,
     max_txs: usize,
     gas_limit: u64,
     fee_recipient: Address,
@@ -117,6 +161,10 @@ pub struct RevmApplication<S, E> {
     /// gas usage.  Entries are small (32 + 16 bytes) and the map is bounded
     /// by the number of unfinalized blocks.
     block_fees: Arc<RwLock<HashMap<ConsensusDigest, (u64, u64)>>>,
+    /// Recent block identifiers keyed by consensus digest.  This supplies
+    /// fork-local `BLOCKHASH` values for unfinalized ancestors before they
+    /// reach the finalized block index.
+    block_hashes: Arc<RwLock<HashMap<ConsensusDigest, CachedBlockHash>>>,
     _scheme: std::marker::PhantomData<S>,
 }
 
@@ -130,6 +178,7 @@ impl<S, E> std::fmt::Debug for RevmApplication<S, E> {
             .field("recovered_height", &self.recovered_height.load(Ordering::Relaxed))
             .field("last_verified_height", &self.last_verified_height.load(Ordering::Relaxed))
             .field("block_fees_cached", &self.block_fees.read().len())
+            .field("block_hashes_cached", &self.block_hashes.read().len())
             .finish_non_exhaustive()
     }
 }
@@ -142,16 +191,29 @@ where
     pub fn new(
         ledger: LedgerService,
         executor: E,
+        block_index: Arc<BlockIndex>,
         max_txs: usize,
         gas_limit: u64,
         fee_recipient: Address,
     ) -> Self {
+        let genesis = ledger.genesis_block();
+        let genesis_digest = genesis.commitment();
         let mut block_fees = HashMap::new();
-        block_fees.insert(ledger.genesis_block().commitment(), (0, kora_config::INITIAL_BASE_FEE));
+        block_fees.insert(genesis_digest, (0, kora_config::INITIAL_BASE_FEE));
+        let mut block_hashes = HashMap::new();
+        block_hashes.insert(
+            genesis_digest,
+            CachedBlockHash {
+                height: genesis.height,
+                hash: genesis.id().0,
+                parent: genesis.parent(),
+            },
+        );
 
         Self {
             ledger,
             executor,
+            block_index,
             max_txs,
             gas_limit,
             fee_recipient,
@@ -160,6 +222,7 @@ where
             recovered_height: Arc::new(AtomicU64::new(0)),
             last_verified_height: Arc::new(AtomicU64::new(0)),
             block_fees: Arc::new(RwLock::new(block_fees)),
+            block_hashes: Arc::new(RwLock::new(block_hashes)),
             _scheme: std::marker::PhantomData,
         }
     }
@@ -231,6 +294,20 @@ where
         self.block_fees.write().insert(digest, (gas_used, base_fee));
     }
 
+    fn remember_block_hash(&self, block: &Block) {
+        let min_height = block.height.saturating_sub(BLOCK_HASH_HISTORY as u64);
+        let mut hashes = self.block_hashes.write();
+        hashes.insert(
+            block.commitment(),
+            CachedBlockHash { height: block.height, hash: block.id().0, parent: block.parent() },
+        );
+        hashes.retain(|_, entry| entry.height >= min_height);
+    }
+
+    fn recent_block_hashes(&self, head: u64, parent_digest: ConsensusDigest) -> HashMap<u64, B256> {
+        collect_recent_block_hashes(&self.block_index, &self.block_hashes, head, parent_digest)
+    }
+
     fn block_context(
         &self,
         height: u64,
@@ -247,7 +324,8 @@ where
             base_fee_per_gas: Some(base_fee),
             ..Default::default()
         };
-        BlockContext::new(header, B256::ZERO, prevrandao)
+        let recent_hashes = self.recent_block_hashes(height, parent_digest);
+        BlockContext::new(header, B256::ZERO, prevrandao).with_recent_block_hashes(recent_hashes)
     }
 
     async fn get_prevrandao(&self, parent_digest: ConsensusDigest) -> B256 {
@@ -408,6 +486,7 @@ where
 
         // Cache gas usage so that the next block can derive its base fee.
         self.record_block_fees(block_digest, outcome.gas_used, base_fee);
+        self.remember_block_hash(&block);
 
         let total_elapsed = start.elapsed();
 
@@ -491,6 +570,7 @@ where
             if let Some(ref state) = self.node_state {
                 state.set_last_verified_height(block.height);
             }
+            self.remember_block_hash(block);
             trace!(?digest, height = block.height, "block already verified");
             return true;
         }
@@ -570,6 +650,7 @@ where
                     // verify_block WILL advance last_verified_height when
                     // this block is encountered again in a future ancestry
                     // walk, ensuring the catch-up window eventually closes.
+                    self.remember_block_hash(block);
                     return true;
                 }
 
@@ -609,6 +690,7 @@ where
                              falling back to certificate trust"
                         );
                         self.ledger.restore_persisted_snapshot(block).await;
+                        self.remember_block_hash(block);
                         return true;
                     }
                     warn!(?digest, error = ?err, "execution failed");
@@ -634,6 +716,7 @@ where
                          falling back to certificate trust"
                     );
                     self.ledger.restore_persisted_snapshot(block).await;
+                    self.remember_block_hash(block);
                     return true;
                 }
                 warn!(?digest, error = ?err, "compute root failed");
@@ -661,6 +744,7 @@ where
                      (parent snapshot likely has empty changeset from prior trust)"
                 );
                 self.ledger.restore_persisted_snapshot(block).await;
+                self.remember_block_hash(block);
                 return true;
             }
             warn!(
@@ -674,6 +758,7 @@ where
 
         // Cache gas usage so the next block can derive its base fee.
         self.record_block_fees(digest, execution.outcome.gas_used, base_fee);
+        self.remember_block_hash(block);
 
         let merged_changes = parent_snapshot.state.merge_changes(execution.outcome.changes.clone());
         let next_state = OverlayState::new(parent_snapshot.state.base(), merged_changes);
@@ -911,5 +996,95 @@ where
 
             true
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy_primitives::Bloom;
+    use kora_domain::{BlockId, StateRoot};
+    use kora_indexer::{EMPTY_ROOT_HASH, IndexedBlock};
+
+    use super::*;
+
+    fn test_block(parent: BlockId, height: u64, marker: u8) -> Block {
+        Block::new(
+            parent,
+            height,
+            u64::from(marker),
+            B256::repeat_byte(marker),
+            StateRoot(B256::repeat_byte(marker.wrapping_add(0x40))),
+            Vec::new(),
+        )
+    }
+
+    fn indexed_block(number: u64, hash: B256) -> IndexedBlock {
+        IndexedBlock {
+            hash,
+            number,
+            parent_hash: B256::ZERO,
+            state_root: B256::ZERO,
+            transactions_root: EMPTY_ROOT_HASH,
+            receipts_root: EMPTY_ROOT_HASH,
+            timestamp: number,
+            gas_limit: 30_000_000,
+            gas_used: 0,
+            base_fee_per_gas: Some(kora_config::INITIAL_BASE_FEE),
+            mix_hash: B256::ZERO,
+            logs_bloom: Bloom::ZERO,
+            size: 0,
+            transaction_hashes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn recent_block_hashes_prefers_cached_fork_ancestry_over_index() {
+        let index = BlockIndex::new();
+        let indexed_hash = B256::repeat_byte(0xc1);
+        index.insert_block(indexed_block(1, indexed_hash), Vec::new(), Vec::new());
+
+        let genesis = test_block(BlockId(B256::repeat_byte(0x01)), 0, 0x10);
+        let fork_parent = test_block(genesis.id(), 1, 0x20);
+        let mut cache = HashMap::new();
+        cache.insert(
+            genesis.commitment(),
+            CachedBlockHash {
+                height: genesis.height,
+                hash: genesis.id().0,
+                parent: genesis.parent(),
+            },
+        );
+        cache.insert(
+            fork_parent.commitment(),
+            CachedBlockHash {
+                height: fork_parent.height,
+                hash: fork_parent.id().0,
+                parent: fork_parent.parent(),
+            },
+        );
+        let cache = RwLock::new(cache);
+
+        let hashes = collect_recent_block_hashes(&index, &cache, 2, fork_parent.commitment());
+
+        assert_eq!(hashes[&1], fork_parent.id().0);
+        assert_ne!(hashes[&1], indexed_hash);
+        assert_eq!(hashes[&0], genesis.id().0);
+    }
+
+    #[test]
+    fn recent_block_hashes_falls_back_to_index_when_cache_has_gap() {
+        let index = BlockIndex::new();
+        let indexed_hash = B256::repeat_byte(0xc1);
+        index.insert_block(indexed_block(1, indexed_hash), Vec::new(), Vec::new());
+        let cache = RwLock::new(HashMap::new());
+
+        let hashes = collect_recent_block_hashes(
+            &index,
+            &cache,
+            2,
+            test_block(BlockId(B256::repeat_byte(0x01)), 1, 0x20).commitment(),
+        );
+
+        assert_eq!(hashes[&1], indexed_hash);
     }
 }
