@@ -14,7 +14,10 @@ use commonware_codec::Write as CodecWrite;
 use commonware_cryptography::ed25519;
 use tracing::{debug, error, info, warn};
 
-use crate::{DkgConfig, DkgError, protocol::ProtocolMessage};
+use crate::{
+    DkgConfig, DkgError,
+    protocol::{MAX_DKG_MESSAGE_BYTES, ProtocolMessage},
+};
 
 /// Simple message envelope with sender info.
 #[derive(Debug, Clone)]
@@ -139,6 +142,10 @@ impl DkgNetwork {
                             continue;
                         }
                     };
+                    if !self.config.participants.contains(&from) {
+                        warn!(%addr, ?from, "Ignoring message from non-participant");
+                        continue;
+                    }
 
                     // Read payload length
                     let mut len_bytes = [0u8; 4];
@@ -148,7 +155,7 @@ impl DkgNetwork {
                     }
                     let len = u32::from_le_bytes(len_bytes) as usize;
 
-                    if len > 1024 * 1024 {
+                    if len == 0 || len > MAX_DKG_MESSAGE_BYTES {
                         warn!(%addr, len, "Message too large");
                         continue;
                     }

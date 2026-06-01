@@ -118,11 +118,19 @@ impl PersistedDkgState {
         self.session = session.into();
     }
 
-    /// Save state to disk.
+    /// Save state to disk with restrictive permissions (mode 0600).
     pub fn save(&self, data_dir: &Path) -> Result<(), DkgError> {
+        use std::{io::Write as _, os::unix::fs::OpenOptionsExt};
+
         let path = data_dir.join(Self::STATE_FILE);
         let content = serde_json::to_string_pretty(self)?;
-        std::fs::write(&path, content)?;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)?;
+        f.write_all(content.as_bytes())?;
         Ok(())
     }
 

@@ -167,7 +167,25 @@ impl Cli {
         }
 
         let dkg_output = kora_dkg::DkgOutput::load(&config.data_dir)?;
-        tracing::info!(share_index = dkg_output.share_index, "Loaded DKG output");
+
+        // Log DKG integrity fingerprint so operators can cross-verify across nodes.
+        // If group_key differs between validators, consensus will silently fail.
+        {
+            use commonware_cryptography::{Hasher as _, Sha256};
+            let mut hasher = Sha256::default();
+            hasher.update(&dkg_output.group_public_key);
+            hasher.update(&dkg_output.public_polynomial);
+            let digest = hasher.finalize();
+            let checksum = hex::encode(&digest.as_ref()[..8]);
+            tracing::info!(
+                share_index = dkg_output.share_index,
+                group_key = %hex::encode(&dkg_output.group_public_key),
+                participants = dkg_output.participants,
+                threshold = dkg_output.threshold,
+                dkg_checksum = %checksum,
+                "Loaded DKG output -- verify group_key and dkg_checksum match across all validators"
+            );
+        }
 
         let scheme = load_threshold_scheme(&config.data_dir)
             .map_err(|e| eyre::eyre!("Failed to load threshold scheme: {}", e))?;

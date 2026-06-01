@@ -15,7 +15,7 @@ use commonware_runtime::{BufferPooler, Clock, Handle, Metrics, Network, Quota, R
 use commonware_utils::ordered::Set;
 use rand_core::CryptoRngCore;
 
-use crate::{DkgConfig, DkgError};
+use crate::{DkgConfig, DkgError, protocol::MAX_DKG_MESSAGE_BYTES};
 
 /// Channel ID for DKG ceremony messages.
 pub const CHANNEL_DKG: u64 = 10;
@@ -24,7 +24,7 @@ pub const CHANNEL_DKG: u64 = 10;
 pub const DKG_NAMESPACE: &[u8] = b"_KORA_DKG_CEREMONY";
 
 /// Default maximum message size for DKG (256 KB).
-pub const DEFAULT_MAX_MESSAGE_SIZE: u32 = 256 * 1024;
+pub const DEFAULT_MAX_MESSAGE_SIZE: u32 = MAX_DKG_MESSAGE_BYTES as u32;
 
 /// Default channel backlog size.
 pub const DEFAULT_BACKLOG: usize = 256;

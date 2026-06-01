@@ -4,7 +4,10 @@ use std::{path::PathBuf, time::Duration};
 
 use commonware_cryptography::{Signer as _, ed25519};
 
-use crate::{DkgConfig, DkgParticipant, ProtocolMessage, ProtocolMessageKind};
+use crate::{
+    DkgConfig, DkgError, DkgParticipant, DkgPhase, ProtocolMessage, ProtocolMessageKind,
+    protocol::MAX_DKG_MESSAGE_BYTES,
+};
 
 const TEST_TIMESTAMP: u64 = 1_234_567_890_000_000_000;
 
@@ -127,16 +130,26 @@ fn test_protocol_message_serialization() {
 }
 
 #[test]
-fn test_legacy_message_serialization() {
-    // Test that legacy messages (without session_id) can be serialized and deserialized
-    let legacy_msg = ProtocolMessage::legacy(ProtocolMessageKind::RequestLogs);
+fn test_legacy_message_rejected() {
+    // Legacy messages (without session_id) can still be deserialized at the wire level,
+    // but handle_message_bytes must reject them to prevent replay attacks.
+    let legacy_msg = ProtocolMessage { session_id: None, kind: ProtocolMessageKind::RequestLogs };
     let bytes = legacy_msg.to_bytes();
 
     let max_degree = 3;
     let decoded = ProtocolMessage::from_bytes(&bytes, max_degree).expect("should decode legacy");
-
     assert!(decoded.session_id.is_none(), "legacy message should have no session_id");
-    assert!(matches!(decoded.kind, ProtocolMessageKind::RequestLogs));
+
+    // Verify that a participant rejects the legacy message
+    let keys = generate_test_keys(4, 42);
+    let config = make_test_config(&keys, 0, 40250);
+    let mut participant =
+        DkgParticipant::new(config, TEST_TIMESTAMP).expect("should create participant");
+
+    let from_pk = keys[1].public_key();
+    let result = participant.handle_message_bytes(&from_pk, &bytes);
+    assert!(result.is_err(), "legacy messages should be rejected");
+    assert!(matches!(result.unwrap_err(), crate::DkgError::SessionMismatch { .. }));
 }
 
 #[test]
@@ -370,4 +383,113 @@ fn test_duplicate_message_rejection() {
     // Second delivery of same message should be silently ignored (not error)
     let result2 = participant1.handle_message_bytes(&from_pk, &bytes);
     assert!(result2.is_ok(), "duplicate should be silently ignored");
+}
+
+#[test]
+fn test_oversized_message_rejected_before_decode() {
+    let keys = generate_test_keys(4, 42);
+    let config = make_test_config(&keys, 0, 40600);
+    let mut participant = DkgParticipant::new(config, TEST_TIMESTAMP).expect("create participant");
+
+    let from_pk = keys[1].public_key();
+    let oversized = vec![0u8; MAX_DKG_MESSAGE_BYTES + 1];
+
+    let result = participant.handle_message_bytes(&from_pk, &oversized);
+
+    assert!(matches!(result, Err(DkgError::InvalidMessage(_))));
+    assert_eq!(participant.seen_message_count(), 0);
+}
+
+#[test]
+fn test_trailing_bytes_do_not_grow_seen_messages() {
+    let keys = generate_test_keys(4, 42);
+    let config = make_test_config(&keys, 0, 40650);
+    let mut participant = DkgParticipant::new(config, TEST_TIMESTAMP).expect("create participant");
+    participant.set_phase(DkgPhase::CollectingLogs);
+
+    let from_pk = keys[1].public_key();
+
+    for i in 0..64u8 {
+        let mut bytes =
+            ProtocolMessage::new(participant.ceremony_id(), ProtocolMessageKind::RequestLogs)
+                .to_bytes();
+        bytes.push(i);
+
+        let result = participant.handle_message_bytes(&from_pk, &bytes);
+        assert!(matches!(result, Err(DkgError::InvalidMessage(_))));
+    }
+
+    assert_eq!(participant.seen_message_count(), 0);
+    assert!(participant.take_outgoing().is_empty());
+}
+
+#[test]
+fn test_all_logs_count_limit_checked_before_allocation() {
+    let session_id = [7u8; 32];
+    let mut bytes = vec![0xFF, 2];
+    bytes.extend_from_slice(&session_id);
+    bytes.push(5);
+    bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+
+    let result = ProtocolMessage::from_bytes(&bytes, 3);
+
+    assert!(matches!(result, Err(commonware_codec::Error::InvalidLength(_))));
+}
+
+#[test]
+fn test_rewritten_session_dealer_log_rejected() {
+    let keys = generate_test_keys(4, 42);
+    let old_timestamp = TEST_TIMESTAMP;
+    let new_timestamp = TEST_TIMESTAMP + 1_000_000_000;
+
+    let config_old_dealer = make_test_config(&keys, 0, 40700);
+    let mut old_dealer =
+        DkgParticipant::new(config_old_dealer, old_timestamp).expect("create old dealer");
+    old_dealer.start_dealer().expect("start old dealer");
+    old_dealer.finalize_dealer().expect("finalize old dealer");
+
+    let old_log = old_dealer
+        .take_outgoing()
+        .into_iter()
+        .find_map(|(_, msg)| {
+            if matches!(&msg.kind, ProtocolMessageKind::DealerLog { .. }) {
+                Some(msg)
+            } else {
+                None
+            }
+        })
+        .expect("old dealer log");
+
+    let config_new_dealer = make_test_config(&keys, 0, 40800);
+    let config_receiver = make_test_config(&keys, 1, 40800);
+    let mut new_dealer =
+        DkgParticipant::new(config_new_dealer, new_timestamp).expect("create new dealer");
+    let mut receiver =
+        DkgParticipant::new(config_receiver, new_timestamp).expect("create receiver");
+
+    receiver.set_phase(DkgPhase::CollectingMessages);
+    new_dealer.start_dealer().expect("start new dealer");
+
+    let dealer_pk = keys[0].public_key();
+    let receiver_pk = keys[1].public_key();
+    for (target, msg) in new_dealer.take_outgoing() {
+        match target {
+            None => receiver.handle_message(&dealer_pk, msg).expect("deliver public"),
+            Some(ref to_pk) if to_pk == &receiver_pk => {
+                receiver.handle_message(&dealer_pk, msg).expect("deliver private");
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(receiver.acks_sent_count(), 1);
+
+    receiver.set_phase(DkgPhase::CollectingLogs);
+    let mut replay = old_log;
+    replay.session_id = Some(receiver.ceremony_id());
+    let bytes = replay.to_bytes();
+
+    let result = receiver.handle_message_bytes(&dealer_pk, &bytes);
+
+    assert!(matches!(result, Err(DkgError::InvalidDealerLog { .. })));
+    assert_eq!(receiver.dealer_log_count(), 0);
 }

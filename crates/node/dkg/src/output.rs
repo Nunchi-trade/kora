@@ -57,8 +57,20 @@ impl DkgOutput {
             participant_keys: self.participant_keys.iter().map(hex::encode).collect(),
         };
 
+        // Write output.json with explicit 0640 permissions for defense-in-depth.
+        // The file contains only public data (group key, polynomial, participant keys),
+        // but we restrict access to be consistent with the DKG data directory.
         let output_path = data_dir.join("output.json");
-        std::fs::write(&output_path, serde_json::to_string_pretty(&output_json)?)?;
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o640)
+                .open(&output_path)?;
+            f.write_all(serde_json::to_string_pretty(&output_json)?.as_bytes())?;
+        }
 
         let share_json =
             ShareJson { index: self.share_index, secret: hex::encode(&self.share_secret) };
