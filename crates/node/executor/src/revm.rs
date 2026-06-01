@@ -68,11 +68,17 @@ impl RevmExecutor {
         header: &Header,
         parent: &ParentBlock,
     ) -> Result<(), ExecutionError> {
-        if header.number != parent.number + 1 {
+        let expected_number = parent.number.checked_add(1).ok_or_else(|| {
+            ExecutionError::BlockValidation(format!(
+                "parent block number {} overflow when computing expected child number",
+                parent.number
+            ))
+        })?;
+
+        if header.number != expected_number {
             return Err(ExecutionError::BlockValidation(format!(
                 "block number not sequential: expected {}, got {}",
-                parent.number + 1,
-                header.number
+                expected_number, header.number
             )));
         }
 
@@ -83,9 +89,9 @@ impl RevmExecutor {
             )));
         }
 
-        if header.timestamp < parent.timestamp {
+        if header.timestamp <= parent.timestamp {
             return Err(ExecutionError::BlockValidation(format!(
-                "timestamp moved backwards: parent {}, current {}",
+                "timestamp must be strictly greater than parent: parent {}, current {}",
                 parent.timestamp, header.timestamp
             )));
         }
@@ -105,6 +111,11 @@ impl RevmExecutor {
         parent_gas_limit: u64,
     ) -> Result<(), ExecutionError> {
         let bounds = &self.config.gas_limit_bounds;
+        if bounds.max_delta_divisor == 0 {
+            return Err(ExecutionError::BlockValidation(
+                "gas limit max_delta_divisor must be non-zero".to_string(),
+            ));
+        }
 
         if gas_limit < bounds.min {
             return Err(ExecutionError::BlockValidation(format!(
@@ -140,6 +151,23 @@ impl RevmExecutor {
         parent_gas_used: u64,
         parent_gas_limit: u64,
     ) -> Result<(), ExecutionError> {
+        if self.config.base_fee_params.elasticity_multiplier == 0 {
+            return Err(ExecutionError::BlockValidation(
+                "base fee elasticity_multiplier must be non-zero".to_string(),
+            ));
+        }
+        if self.config.base_fee_params.max_change_denominator == 0 {
+            return Err(ExecutionError::BlockValidation(
+                "base fee max_change_denominator must be non-zero".to_string(),
+            ));
+        }
+        if parent_gas_limit / self.config.base_fee_params.elasticity_multiplier == 0 {
+            return Err(ExecutionError::BlockValidation(format!(
+                "parent gas target is zero for parent gas limit {} and elasticity multiplier {}",
+                parent_gas_limit, self.config.base_fee_params.elasticity_multiplier
+            )));
+        }
+
         let expected = calculate_base_fee(
             parent_base_fee,
             parent_gas_used,
@@ -502,13 +530,24 @@ impl<S: StateDb> BlockExecutor<S> for RevmExecutor {
 /// Decode transaction bytes into a REVM TxEnv.
 ///
 /// Currently supports basic transaction decoding for all Ethereum transaction types.
-fn decode_tx_env(tx_bytes: &Bytes, _chain_id: u64) -> Result<revm::context::TxEnv, ExecutionError> {
-    use alloy_consensus::TxEnvelope;
+/// Validates that the transaction's chain ID matches the executor's configured chain ID.
+fn decode_tx_env(tx_bytes: &Bytes, chain_id: u64) -> Result<revm::context::TxEnv, ExecutionError> {
+    use alloy_consensus::{Transaction as _, TxEnvelope};
     use alloy_eips::eip2718::Decodable2718 as _;
 
-    // Decode both legacy RLP transactions and typed EIP-2718 envelopes.
-    let envelope = TxEnvelope::decode_2718(&mut tx_bytes.as_ref())
+    // Decode exactly one legacy RLP transaction or typed EIP-2718 envelope.
+    let envelope = TxEnvelope::decode_2718_exact(tx_bytes.as_ref())
         .map_err(|e| ExecutionError::TxDecode(format!("{}", e)))?;
+
+    let tx_chain_id = envelope.chain_id().ok_or_else(|| {
+        ExecutionError::InvalidTx(format!("missing chain ID: expected {}", chain_id))
+    })?;
+    if tx_chain_id != chain_id {
+        return Err(ExecutionError::InvalidTx(format!(
+            "chain ID mismatch: expected {}, got {}",
+            chain_id, tx_chain_id
+        )));
+    }
 
     // Build TxEnv using the builder pattern
     let mut builder = revm::context::TxEnv::builder();
@@ -745,7 +784,7 @@ fn extract_changes(state: &EvmState) -> ChangeSet {
 
 #[cfg(test)]
 mod tests {
-    use alloy_consensus::{SignableTransaction as _, TxEip1559, TxEnvelope};
+    use alloy_consensus::{SignableTransaction as _, TxEip1559, TxEnvelope, TxLegacy};
     use alloy_eips::eip2718::Encodable2718;
     use alloy_primitives::{Address, Bytes, KECCAK256_EMPTY, Signature, TxKind as AlTxKind, U256};
     use k256::ecdsa::SigningKey;
@@ -812,6 +851,32 @@ mod tests {
             to: AlTxKind::Call(to),
             value: U256::ZERO,
             access_list: Default::default(),
+            input: Bytes::new(),
+        };
+
+        let digest = Keccak256::new_with_prefix(tx.encoded_for_signing());
+        let (sig, recid) = key.sign_digest_recoverable(digest).expect("sign tx");
+        let signature = Signature::from((sig, recid));
+        let signed = tx.into_signed(signature);
+        let envelope = TxEnvelope::from(signed);
+        let mut raw = Vec::new();
+        envelope.encode_2718(&mut raw);
+        Bytes::from(raw)
+    }
+
+    /// Helper: build a signed legacy transfer and return its raw encoded bytes.
+    fn build_legacy_tx(chain_id: Option<u64>, nonce: u64) -> Bytes {
+        let mut secret = [0u8; 32];
+        secret[31] = 1; // deterministic key
+        let key = SigningKey::from_bytes((&secret).into()).expect("valid key");
+
+        let tx = TxLegacy {
+            chain_id,
+            nonce,
+            gas_price: 0,
+            gas_limit: 21_000,
+            to: AlTxKind::Call(Address::repeat_byte(0xab)),
+            value: U256::ZERO,
             input: Bytes::new(),
         };
 
@@ -925,9 +990,15 @@ mod tests {
             ..Header::default()
         };
 
+        // Timestamp before parent must be rejected.
         assert!(executor.validate_header_against_parent(&header, &parent).is_err());
 
+        // Timestamp equal to parent must be rejected (strict greater-than).
         header.timestamp = 1000;
+        assert!(executor.validate_header_against_parent(&header, &parent).is_err());
+
+        // Timestamp strictly after parent must be accepted.
+        header.timestamp = 1001;
         assert!(executor.validate_header_against_parent(&header, &parent).is_ok());
     }
 
@@ -953,6 +1024,63 @@ mod tests {
         };
 
         assert!(executor.validate_header_against_parent(&header, &parent).is_err());
+    }
+
+    #[test]
+    fn validate_header_against_parent_zero_gas_delta_divisor_returns_error() {
+        let executor = RevmExecutor::with_config(ExecutionConfig::new(1).with_gas_limit_bounds(
+            GasLimitBounds { min: 5000, max: 30_000_000, max_delta_divisor: 0 },
+        ));
+
+        let parent = ParentBlock {
+            hash: B256::repeat_byte(1),
+            number: 100,
+            timestamp: 1000,
+            gas_limit: 30_000_000,
+            gas_used: 15_000_000,
+            base_fee_per_gas: None,
+        };
+
+        let header = Header {
+            parent_hash: B256::repeat_byte(1),
+            number: 101,
+            timestamp: 1001,
+            gas_limit: 30_000_000,
+            ..Header::default()
+        };
+
+        let result = executor.validate_header_against_parent(&header, &parent);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("max_delta_divisor"));
+    }
+
+    #[test]
+    fn validate_header_against_parent_invalid_base_fee_params_return_error() {
+        let mut config = ExecutionConfig::new(1);
+        config.base_fee_params.max_change_denominator = 0;
+        let executor = RevmExecutor::with_config(config);
+
+        let parent = ParentBlock {
+            hash: B256::repeat_byte(1),
+            number: 100,
+            timestamp: 1000,
+            gas_limit: 30_000_000,
+            gas_used: 20_000_000,
+            base_fee_per_gas: Some(1_000),
+        };
+
+        let header = Header {
+            parent_hash: B256::repeat_byte(1),
+            number: 101,
+            timestamp: 1001,
+            gas_limit: 30_000_000,
+            base_fee_per_gas: Some(1_000),
+            ..Header::default()
+        };
+
+        let result = executor.validate_header_against_parent(&header, &parent);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("max_change_denominator"));
     }
 
     #[test]
@@ -1192,5 +1320,131 @@ mod tests {
         let outcome = executor.execute(&state, &context, &[]).expect("empty block should succeed");
         assert!(outcome.receipts.is_empty());
         assert_eq!(outcome.gas_used, 0);
+    }
+
+    // --- Issue #118: validate_header_against_parent must not panic on u64::MAX ---
+
+    #[test]
+    fn validate_header_against_parent_max_block_number() {
+        // When parent.number == u64::MAX, computing parent.number + 1 would
+        // overflow and panic.  The fix uses checked_add and returns an error.
+        let executor = RevmExecutor::new(1);
+
+        let parent = ParentBlock {
+            hash: B256::repeat_byte(1),
+            number: u64::MAX,
+            timestamp: 1000,
+            gas_limit: 30_000_000,
+            gas_used: 15_000_000,
+            base_fee_per_gas: None,
+        };
+
+        let header = Header {
+            parent_hash: B256::repeat_byte(1),
+            number: 0, // wrapping would give 0
+            timestamp: 1001,
+            gas_limit: 30_000_000,
+            ..Header::default()
+        };
+
+        let result = executor.validate_header_against_parent(&header, &parent);
+        assert!(result.is_err(), "should return error on parent.number overflow");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("overflow"), "error should mention overflow: {}", msg);
+    }
+
+    // --- Issue #119: timestamp must be strictly greater than parent ---
+
+    #[test]
+    fn validate_header_rejects_equal_timestamp() {
+        let executor = RevmExecutor::new(1);
+
+        let parent = ParentBlock {
+            hash: B256::repeat_byte(1),
+            number: 100,
+            timestamp: 1000,
+            gas_limit: 30_000_000,
+            gas_used: 15_000_000,
+            base_fee_per_gas: None,
+        };
+
+        let header = Header {
+            parent_hash: B256::repeat_byte(1),
+            number: 101,
+            timestamp: 1000, // equal to parent
+            gas_limit: 30_000_000,
+            ..Header::default()
+        };
+
+        let result = executor.validate_header_against_parent(&header, &parent);
+        assert!(result.is_err(), "equal timestamp must be rejected");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("strictly greater"),
+            "error should mention 'strictly greater': {}",
+            msg
+        );
+    }
+
+    // --- Issue #121: decode_tx_env must validate chain_id ---
+
+    #[test]
+    fn decode_tx_env_rejects_wrong_chain_id() {
+        // Build a valid transaction for chain_id=1, then decode with chain_id=42.
+        let tx_bytes = build_valid_tx(1, 0);
+        let result = decode_tx_env(&tx_bytes, 42);
+        assert!(result.is_err(), "wrong chain_id should be rejected");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("chain ID mismatch"), "error should mention chain ID: {}", msg);
+    }
+
+    #[test]
+    fn decode_tx_env_accepts_matching_chain_id() {
+        // Build a valid transaction for chain_id=1, decode with chain_id=1.
+        let tx_bytes = build_valid_tx(1, 0);
+        let result = decode_tx_env(&tx_bytes, 1);
+        assert!(result.is_ok(), "matching chain_id should be accepted");
+    }
+
+    #[test]
+    fn decode_tx_env_rejects_legacy_tx_without_chain_id() {
+        let tx_bytes = build_legacy_tx(None, 0);
+        let result = decode_tx_env(&tx_bytes, 1);
+        assert!(result.is_err(), "legacy tx without chain_id should be rejected");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("missing chain ID"), "error should mention missing chain ID: {}", msg);
+    }
+
+    #[test]
+    fn decode_tx_env_accepts_legacy_tx_with_matching_chain_id() {
+        let tx_bytes = build_legacy_tx(Some(1), 0);
+        let result = decode_tx_env(&tx_bytes, 1);
+        assert!(result.is_ok(), "legacy tx with matching chain_id should be accepted");
+    }
+
+    #[test]
+    fn decode_tx_env_rejects_trailing_bytes() {
+        let mut tx_bytes = build_valid_tx(1, 0).to_vec();
+        tx_bytes.push(0);
+        let result = decode_tx_env(&Bytes::from(tx_bytes), 1);
+        assert!(matches!(result, Err(ExecutionError::TxDecode(_))));
+    }
+
+    #[test]
+    fn execute_skips_wrong_chain_id_tx() {
+        // A transaction with the wrong chain_id should be skipped (not crash the block).
+        let executor = RevmExecutor::new(42); // executor expects chain_id=42
+        let state = MockStateDb;
+        let header =
+            Header { number: 1, timestamp: 1000, gas_limit: 30_000_000, ..Header::default() };
+        let context = BlockContext::new(header, B256::ZERO, B256::ZERO);
+
+        let wrong_chain_tx = build_valid_tx(1, 0); // tx has chain_id=1
+        let txs = vec![wrong_chain_tx];
+
+        let outcome = executor.execute(&state, &context, &txs).expect("block should not fail");
+        assert_eq!(outcome.receipts.len(), 1, "should have a placeholder receipt");
+        assert!(!outcome.receipts[0].success(), "wrong chain_id tx should be failed");
+        assert_eq!(outcome.gas_used, 0, "no gas should be consumed");
     }
 }
