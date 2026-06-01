@@ -126,6 +126,11 @@ impl NodeState {
         }
     }
 
+    /// Return the current consensus view number.
+    pub fn view(&self) -> u64 {
+        self.inner.current_view.load(Ordering::Relaxed)
+    }
+
     /// Update the current view.
     pub fn set_view(&self, view: u64) {
         self.inner.current_view.store(view, Ordering::Relaxed);

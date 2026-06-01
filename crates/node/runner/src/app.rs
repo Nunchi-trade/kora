@@ -29,6 +29,8 @@ use parking_lot::RwLock;
 use rand::Rng;
 use tracing::{debug, error, info, trace, warn};
 
+use crate::error::BuildBlockError;
+
 /// Maximum time to wait for a parent snapshot to become available before
 /// giving up and nullifying the view.  Uses event-driven notification
 /// (via [`LedgerService::wait_for_snapshot`]) so the wake-up is immediate
@@ -254,7 +256,7 @@ where
         self.ledger.seed_for_parent(parent_digest).await.unwrap_or(B256::ZERO)
     }
 
-    async fn build_block(&self, parent: &Block, timestamp: u64) -> Option<Block> {
+    async fn build_block(&self, parent: &Block, timestamp: u64) -> Result<Block, BuildBlockError> {
         use kora_consensus::Mempool as _;
 
         let start = Instant::now();
@@ -297,7 +299,10 @@ where
                         "build_block: parent snapshot not found after waiting \
                          -- node has not yet processed this parent block"
                     );
-                    return None;
+                    return Err(BuildBlockError::CatchingUp {
+                        parent_digest,
+                        parent_height: parent.height,
+                    });
                 }
             }
         };
@@ -311,7 +316,10 @@ where
                 // transactions were already included in recent blocks.
                 // Building with an incomplete excluded set risks duplicate
                 // transactions, so we nullify this round instead.
-                return None;
+                return Err(BuildBlockError::CatchingUp {
+                    parent_digest,
+                    parent_height: parent.height,
+                });
             }
         };
         let mempool_len = mempool.len();
@@ -369,7 +377,12 @@ where
                         "build_block: block execution failed -- \
                          this may indicate a bad transaction, OOM, or state corruption"
                     );
-                    return None;
+                    return Err(BuildBlockError::ExecutionFailed {
+                        source: err,
+                        parent_digest,
+                        height,
+                        tx_count: txs.len(),
+                    });
                 }
                 Err(join_err) => {
                     error!(
@@ -378,7 +391,11 @@ where
                         error = %join_err,
                         "build_block: spawn_blocking join error"
                     );
-                    return None;
+                    return Err(BuildBlockError::ExecutionJoinError {
+                        message: join_err.to_string(),
+                        parent_digest,
+                        height,
+                    });
                 }
             }
         };
@@ -397,7 +414,11 @@ where
                         "build_block: QMDB state root computation failed -- \
                          this may indicate a storage I/O error or inconsistent state"
                     );
-                    return None;
+                    return Err(BuildBlockError::RootComputationFailed {
+                        source: err,
+                        parent_digest,
+                        height,
+                    });
                 }
             };
         let root_elapsed = root_start.elapsed();
@@ -414,7 +435,13 @@ where
         if let Some(ref m) = self.metrics {
             m.block_build_time.observe(total_elapsed.as_secs_f64());
             m.evm_execution_seconds.observe(exec_elapsed.as_secs_f64());
-            m.block_txs_included.set(block.txs.len() as i64);
+            let txs_included = block.txs.len();
+            m.block_txs_included.set(txs_included as i64);
+            m.block_txs_included_distribution.observe(txs_included as f64);
+            m.block_gas_used.observe(outcome.gas_used as f64);
+            if block.txs.is_empty() && mempool_len > excluded_len {
+                m.block_empty_with_pending.inc();
+            }
         }
 
         debug!(
@@ -428,7 +455,7 @@ where
             total_ms = total_elapsed.as_millis(),
             "built block"
         );
-        Some(block)
+        Ok(block)
     }
 
     /// Check whether the node is in catch-up mode.
@@ -611,6 +638,9 @@ where
                         self.ledger.restore_persisted_snapshot(block).await;
                         return true;
                     }
+                    if let Some(ref m) = self.metrics {
+                        m.verify_failure.inc();
+                    }
                     warn!(?digest, error = ?err, "execution failed");
                     return false;
                 }
@@ -635,6 +665,9 @@ where
                     );
                     self.ledger.restore_persisted_snapshot(block).await;
                     return true;
+                }
+                if let Some(ref m) = self.metrics {
+                    m.verify_failure.inc();
                 }
                 warn!(?digest, error = ?err, "compute root failed");
                 return false;
@@ -662,6 +695,9 @@ where
                 );
                 self.ledger.restore_persisted_snapshot(block).await;
                 return true;
+            }
+            if let Some(ref m) = self.metrics {
+                m.state_root_mismatch.inc();
             }
             warn!(
                 ?digest,
@@ -706,11 +742,12 @@ where
             );
         }
 
+        let total_elapsed = start.elapsed();
+
         if let Some(ref m) = self.metrics {
             m.evm_execution_seconds.observe(exec_elapsed.as_secs_f64());
+            m.block_verify_time.observe(total_elapsed.as_secs_f64());
         }
-
-        let total_elapsed = start.elapsed();
         debug!(
             ?digest,
             height = block.height,
@@ -816,11 +853,11 @@ where
             };
 
             let build_start = Instant::now();
-            let block = self.build_block(&parent, timestamp).await;
+            let build_result = self.build_block(&parent, timestamp).await;
             let build_elapsed = build_start.elapsed();
 
-            match block {
-                Some(ref b) => {
+            match build_result {
+                Ok(ref b) => {
                     if let Some(ref state) = node_state {
                         state.inc_proposed();
                     }
@@ -833,18 +870,28 @@ where
                         "propose complete"
                     );
                 }
-                None => {
+                Err(ref e) if e.is_catching_up() => {
+                    debug!(
+                        parent_height = parent.height,
+                        parent_digest = ?parent.commitment(),
+                        build_ms = build_elapsed.as_millis(),
+                        error = %e,
+                        "propose skipped: still catching up (parent snapshot not available)"
+                    );
+                }
+                Err(ref e) => {
                     warn!(
                         parent_height = parent.height,
                         parent_digest = ?parent.commitment(),
                         build_ms = build_elapsed.as_millis(),
-                        "propose failed: build_block returned None \
-                         (likely missing parent snapshot -- node may still be catching up)"
+                        error = %e,
+                        error_kind = e.metric_label(),
+                        "propose failed: build_block error"
                     );
                 }
             }
 
-            block
+            build_result.ok()
         }
     }
 

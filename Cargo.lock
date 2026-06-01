@@ -3630,6 +3630,7 @@ dependencies = [
  "prometheus-client",
  "rand 0.8.6",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]

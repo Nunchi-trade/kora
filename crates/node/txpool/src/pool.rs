@@ -182,10 +182,10 @@ impl TransactionPool {
     }
 
     /// Record a rejected transaction metric.
-    fn record_rejection(&self, reason: &str) {
+    fn record_rejection(&self, reason: &'static str) {
         let metrics_guard = self.metrics.read();
         if let Some(ref m) = *metrics_guard {
-            m.txpool_rejected.get_or_create(&ReasonLabel { reason: reason.to_string() }).inc();
+            m.txpool_rejected.get_or_create(&ReasonLabel { reason }).inc();
         }
     }
 
@@ -297,6 +297,16 @@ impl TransactionPool {
             for hash in &evicted_hashes {
                 let _ = events
                     .send(MempoolEvent::TxEvicted { hash: *hash, reason: "evicted".to_string() });
+            }
+        }
+
+        let evicted_count = evicted_hashes.len();
+        if evicted_count > 0 {
+            let metrics_guard = self.metrics.read();
+            if let Some(ref m) = *metrics_guard {
+                for _ in 0..evicted_count {
+                    m.txpool_evicted.inc();
+                }
             }
         }
 
@@ -552,6 +562,14 @@ impl TransactionPool {
         inner.update_counts();
         drop(inner);
         if removed > 0 {
+            {
+                let metrics_guard = self.metrics.read();
+                if let Some(ref m) = *metrics_guard {
+                    for _ in 0..removed {
+                        m.txpool_expired.inc();
+                    }
+                }
+            }
             self.sync_metrics();
         }
         removed
@@ -613,23 +631,23 @@ fn ordered_tx_id(tx: &OrderedTransaction) -> TxId {
 
 /// Map a [`TxPoolError`] to a short label suitable for the `reason`
 /// dimension of the `kora_txpool_rejected_total` metric.
-fn rejection_reason(err: &TxPoolError) -> String {
+const fn rejection_reason(err: &TxPoolError) -> &'static str {
     match err {
-        TxPoolError::PoolFull => "pool_full".to_string(),
-        TxPoolError::SenderFull(_) => "sender_full".to_string(),
-        TxPoolError::TxTooLarge { .. } => "tx_too_large".to_string(),
-        TxPoolError::GasPriceTooLow { .. } => "gas_price_too_low".to_string(),
-        TxPoolError::NonceTooLow { .. } => "nonce_too_low".to_string(),
-        TxPoolError::NonceGap { .. } => "nonce_gap".to_string(),
-        TxPoolError::InsufficientBalance { .. } => "insufficient_balance".to_string(),
-        TxPoolError::InvalidChainId { .. } => "invalid_chain_id".to_string(),
-        TxPoolError::InvalidSignature => "invalid_signature".to_string(),
-        TxPoolError::DecodeError(_) => "decode_error".to_string(),
-        TxPoolError::IntrinsicGasTooLow { .. } => "intrinsic_gas_too_low".to_string(),
-        TxPoolError::AlreadyExists => "already_exists".to_string(),
-        TxPoolError::NonceAlreadyInPool { .. } => "nonce_already_in_pool".to_string(),
-        TxPoolError::StateError(_) => "state_error".to_string(),
-        TxPoolError::ReplacementUnderpriced => "replacement_underpriced".to_string(),
+        TxPoolError::PoolFull => "pool_full",
+        TxPoolError::SenderFull(_) => "sender_full",
+        TxPoolError::TxTooLarge { .. } => "tx_too_large",
+        TxPoolError::GasPriceTooLow { .. } => "gas_price_too_low",
+        TxPoolError::NonceTooLow { .. } => "nonce_too_low",
+        TxPoolError::NonceGap { .. } => "nonce_gap",
+        TxPoolError::InsufficientBalance { .. } => "insufficient_balance",
+        TxPoolError::InvalidChainId { .. } => "invalid_chain_id",
+        TxPoolError::InvalidSignature => "invalid_signature",
+        TxPoolError::DecodeError(_) => "decode_error",
+        TxPoolError::IntrinsicGasTooLow { .. } => "intrinsic_gas_too_low",
+        TxPoolError::AlreadyExists => "already_exists",
+        TxPoolError::NonceAlreadyInPool { .. } => "nonce_already_in_pool",
+        TxPoolError::StateError(_) => "state_error",
+        TxPoolError::ReplacementUnderpriced => "replacement_underpriced",
     }
 }
 
@@ -668,7 +686,7 @@ impl Mempool for TransactionPool {
             Ok(()) => true,
             Err(e) => {
                 trace!(?e, "failed to insert transaction");
-                self.record_rejection(&rejection_reason(&e));
+                self.record_rejection(rejection_reason(&e));
                 false
             }
         }

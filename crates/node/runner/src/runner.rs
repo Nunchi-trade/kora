@@ -766,6 +766,24 @@ fn spawn_partition_monitor(node_state: kora_rpc::NodeState, context: cw_tokio::C
     });
 }
 
+/// Periodically updates the `catchup_blocks_behind` gauge by comparing the
+/// current consensus view to the finalized block height.
+fn spawn_catchup_monitor(
+    node_state: kora_rpc::NodeState,
+    metrics: kora_metrics::AppMetrics,
+    context: cw_tokio::Context,
+) {
+    context.child("catchup_monitor").shared(false).spawn(move |ctx| async move {
+        loop {
+            ctx.sleep(PARTITION_CHECK_INTERVAL).await;
+            let view = node_state.view();
+            let finalized = node_state.finalized_height();
+            let behind = view.saturating_sub(finalized);
+            metrics.catchup_blocks_behind.set(behind as i64);
+        }
+    });
+}
+
 /// Monitor critical consensus infrastructure tasks for unexpected termination.
 ///
 /// Each of the three handles (`engine`, `marshal`, `broadcast`) wraps a
@@ -1247,7 +1265,8 @@ impl NodeRunner for ProductionRunner {
             .with_tx_submit(tx_submit)
             .with_txpool(txpool.clone())
             .with_peer_count(peer_count)
-            .with_rpc_requests_counter(app_metrics.rpc_requests_total.clone());
+            .with_rpc_requests_counter(app_metrics.rpc_requests_total.clone())
+            .with_rpc_rate_limited_counter(app_metrics.rpc_rate_limited.clone());
             if let Some(sender) = pending_tx_broadcast.clone() {
                 rpc = rpc.with_pending_tx_broadcast(sender);
             }
@@ -1262,6 +1281,11 @@ impl NodeRunner for ProductionRunner {
             info!(addr = %addr, "RPC server started with live state provider");
 
             spawn_partition_monitor(node_state.clone(), context.child("partition"));
+            spawn_catchup_monitor(
+                node_state.clone(),
+                app_metrics.clone(),
+                context.child("catchup"),
+            );
         }
 
         if let Some(metrics_addr) = self.metrics_addr {
