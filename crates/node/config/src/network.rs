@@ -26,6 +26,15 @@ pub struct NetworkConfig {
     /// and transactions from peers are validated and inserted into the local mempool.
     #[serde(default)]
     pub tx_gossip: bool,
+
+    /// Allow connections from/to private IP addresses (RFC 1918).
+    ///
+    /// Set to `true` for local development and Docker-based devnets where all
+    /// nodes share a private network. Defaults to `false` for production
+    /// deployments on the public internet to prevent peers from advertising
+    /// unreachable private addresses.
+    #[serde(default)]
+    pub allow_private_ips: bool,
 }
 
 impl Default for NetworkConfig {
@@ -35,6 +44,7 @@ impl Default for NetworkConfig {
             dialable_addr: None,
             bootstrap_peers: Vec::new(),
             tx_gossip: false,
+            allow_private_ips: false,
         }
     }
 }
@@ -61,7 +71,7 @@ mod tests {
             listen_addr: "127.0.0.1:9000".to_string(),
             dialable_addr: Some("1.2.3.4:9000".to_string()),
             bootstrap_peers: vec!["peer1:30303".to_string()],
-            tx_gossip: false,
+            ..Default::default()
         };
         let serialized = serde_json::to_string(&config).expect("serialize");
         let deserialized: NetworkConfig = serde_json::from_str(&serialized).expect("deserialize");
@@ -74,7 +84,7 @@ mod tests {
             listen_addr: "0.0.0.0:8080".to_string(),
             dialable_addr: None,
             bootstrap_peers: vec!["node1.example.com:30303".to_string()],
-            tx_gossip: false,
+            ..Default::default()
         };
         let serialized = toml::to_string(&config).expect("serialize toml");
         let deserialized: NetworkConfig = toml::from_str(&serialized).expect("deserialize toml");
@@ -112,7 +122,7 @@ mod tests {
             listen_addr: "10.0.0.1:5555".to_string(),
             dialable_addr: Some("external.host:5555".to_string()),
             bootstrap_peers: vec!["a".to_string()],
-            tx_gossip: false,
+            ..Default::default()
         };
         assert_eq!(config, config.clone());
         assert_ne!(config, NetworkConfig::default());

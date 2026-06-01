@@ -108,11 +108,12 @@ impl LegacyNodeService {
         let validator = validator_key.public_key();
         tracing::info!(?validator, "loaded validator key");
 
-        let mut transport = self
-            .config
-            .network
-            .build_local_transport(validator_key, context)
-            .map_err(|e| eyre::eyre!("failed to build transport: {}", e))?;
+        let mut transport = if self.config.network.allow_private_ips {
+            self.config.network.build_local_transport(validator_key, context)
+        } else {
+            self.config.network.build_transport(validator_key, context)
+        }
+        .map_err(|e| eyre::eyre!("failed to build transport: {}", e))?;
         tracing::info!("network transport started");
 
         let validators = self.config.consensus.build_validator_set()?;
