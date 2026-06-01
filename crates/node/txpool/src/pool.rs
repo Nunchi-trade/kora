@@ -630,6 +630,7 @@ fn rejection_reason(err: &TxPoolError) -> String {
         TxPoolError::NonceAlreadyInPool { .. } => "nonce_already_in_pool".to_string(),
         TxPoolError::StateError(_) => "state_error".to_string(),
         TxPoolError::ReplacementUnderpriced => "replacement_underpriced".to_string(),
+        TxPoolError::BlobValidation(_) => "blob_validation".to_string(),
     }
 }
 

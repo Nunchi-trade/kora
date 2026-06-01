@@ -464,6 +464,7 @@ impl<S: StateDb> BlockExecutor<S> for RevmExecutor {
             }
 
             outcome.gas_used = cumulative_gas;
+            outcome.included_tx_count = outcome.receipts.len();
         }
 
         // Check the side-channel flag for DatabaseCommit failures.

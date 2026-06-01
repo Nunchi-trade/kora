@@ -83,7 +83,9 @@ print_header() {
     fi
     echo -e "${BOLD}${BLUE}╚════════════════════════════════════════════════════════════╝${NC}"
     echo ""
-    echo -e "  ${DIM}Chain ID:${NC} ${CHAIN_ID:-1337}  ${DIM}│${NC}  ${DIM}Validators:${NC} 4  ${DIM}│${NC}  ${DIM}Threshold:${NC} 3"
+    local n=${VALIDATOR_COUNT:-4}
+    local t=$(( (2 * n) / 3 + 1 ))
+    echo -e "  ${DIM}Chain ID:${NC} ${CHAIN_ID:-1337}  ${DIM}│${NC}  ${DIM}Validators:${NC} ${n}  ${DIM}│${NC}  ${DIM}Threshold:${NC} ${t}"
     echo ""
 }
 
@@ -119,8 +121,9 @@ print_endpoints() {
 
 check_dkg_outputs() {
     local expected_checksum=""
+    local n=${VALIDATOR_COUNT:-4}
 
-    for i in 0 1 2 3; do
+    for i in $(seq 0 $((n - 1))); do
         local volume="kora-devnet_data_node${i}"
 
         if ! docker volume inspect "$volume" >/dev/null 2>&1; then
@@ -151,7 +154,8 @@ check_dkg_outputs() {
 }
 
 clear_dkg_outputs() {
-    for i in 0 1 2 3; do
+    local n=${VALIDATOR_COUNT:-4}
+    for i in $(seq 0 $((n - 1))); do
         local volume="kora-devnet_data_node${i}"
         docker volume inspect "$volume" >/dev/null 2>&1 || continue
         docker run --rm -v "${volume}:/data" alpine \
@@ -160,12 +164,14 @@ clear_dkg_outputs() {
 }
 
 clear_runtime_state() {
-    for volume in \
-        kora-devnet_runtime_node0 \
-        kora-devnet_runtime_node1 \
-        kora-devnet_runtime_node2 \
-        kora-devnet_runtime_node3 \
-        kora-devnet_runtime_secondary0; do
+    local n=${VALIDATOR_COUNT:-4}
+    local volumes=()
+    for i in $(seq 0 $((n - 1))); do
+        volumes+=("kora-devnet_runtime_node${i}")
+    done
+    volumes+=("kora-devnet_runtime_secondary0")
+
+    for volume in "${volumes[@]}"; do
         docker volume inspect "$volume" >/dev/null 2>&1 || continue
         docker run --rm -v "${volume}:/runtime" alpine \
             sh -c 'rm -rf /runtime/* /runtime/.[!.]* /runtime/..?*' >/dev/null 2>&1 || true

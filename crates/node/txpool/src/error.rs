@@ -98,6 +98,10 @@ pub enum TxPoolError {
         nonce: u64,
     },
 
+    /// EIP-4844 blob transaction validation failure.
+    #[error("blob validation: {0}")]
+    BlobValidation(String),
+
     /// An error occurred while accessing state.
     #[error("state error: {0}")]
     StateError(String),

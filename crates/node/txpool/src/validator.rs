@@ -80,6 +80,12 @@ impl<S: StateDbRead> TransactionValidator<S> {
             return Err(TxPoolError::InvalidChainId { got: tx_chain_id, expected: self.chain_id });
         }
 
+        if matches!(envelope, TxEnvelope::Eip4844(_)) {
+            return Err(TxPoolError::BlobValidation(
+                "EIP-4844 blob transactions are not supported until blob sidecars and blob base fee validation are implemented".into(),
+            ));
+        }
+
         let (sender, hash) = recover_sender_and_hash(&envelope)?;
 
         let effective_gas_price = effective_gas_price(&envelope);
@@ -243,14 +249,29 @@ fn max_tx_cost(envelope: &TxEnvelope) -> U256 {
     let max_fee = U256::from(effective_gas_price(envelope));
     let value = envelope.value();
 
-    gas_limit * max_fee + value
+    let mut cost = gas_limit * max_fee + value;
+
+    // EIP-4844: include blob gas cost in the maximum transaction cost.
+    // Each blob consumes DATA_GAS_PER_BLOB (131072) gas units, charged at
+    // the sender's max_fee_per_blob_gas rate.
+    if let TxEnvelope::Eip4844(signed) = envelope {
+        let tx = signed.tx().tx();
+        let blob_count = tx.blob_versioned_hashes.len() as u64;
+        // DATA_GAS_PER_BLOB = 131072 (2^17)
+        const DATA_GAS_PER_BLOB: u64 = 131_072;
+        let blob_gas = U256::from(blob_count * DATA_GAS_PER_BLOB);
+        let max_blob_fee = U256::from(tx.max_fee_per_blob_gas);
+        cost += blob_gas * max_blob_fee;
+    }
+
+    cost
 }
 
 #[cfg(test)]
 mod tests {
     use std::{collections::HashMap, sync::Arc};
 
-    use alloy_consensus::{SignableTransaction as _, TxEip1559, TxLegacy};
+    use alloy_consensus::{SignableTransaction as _, TxEip1559, TxEip4844, TxLegacy};
     use alloy_eips::{
         eip2718::Encodable2718,
         eip2930::{AccessList, AccessListItem},
@@ -388,6 +409,46 @@ mod tests {
         (sender, envelope, Tx::new(raw_bytes.into()))
     }
 
+    fn sign_eip4844_tx(chain_id: u64, nonce: u64) -> (Address, TxEnvelope, Tx) {
+        let signing_key = SigningKey::random(&mut OsRng);
+        let verifying_key = signing_key.verifying_key();
+        let pubkey = verifying_key.to_encoded_point(false);
+        let pubkey_bytes = pubkey.as_bytes();
+        let pubkey_hash = sha3::Keccak256::digest(&pubkey_bytes[1..]);
+        let sender = Address::from_slice(&pubkey_hash[12..]);
+
+        let mut versioned_hash = [0u8; 32];
+        versioned_hash[0] = 0x01;
+
+        let tx = TxEip4844 {
+            chain_id,
+            nonce,
+            gas_limit: 21000,
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+            to: Address::ZERO,
+            value: U256::ZERO,
+            access_list: Default::default(),
+            blob_versioned_hashes: vec![B256::from(versioned_hash)],
+            max_fee_per_blob_gas: 1_000_000_000,
+            input: Bytes::new(),
+        };
+
+        let sig_hash = tx.signature_hash();
+        let (sig, recovery_id) = signing_key.sign_prehash_recoverable(sig_hash.as_slice()).unwrap();
+        let r = U256::from_be_slice(&sig.r().to_bytes());
+        let s = U256::from_be_slice(&sig.s().to_bytes());
+        let v = recovery_id.is_y_odd();
+        let signature = Signature::new(r, s, v);
+
+        let signed = tx.into_signed(signature);
+        let envelope = TxEnvelope::from(signed);
+        let mut raw_bytes = Vec::new();
+        envelope.encode_2718(&mut raw_bytes);
+
+        (sender, envelope, Tx::new(raw_bytes.into()))
+    }
+
     #[tokio::test]
     async fn validate_valid_eip1559_transaction() {
         let chain_id = 1u64;
@@ -433,6 +494,24 @@ mod tests {
 
         let result = validator.validate(raw_tx).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn reject_eip4844_blob_transaction_until_blob_support_exists() {
+        let chain_id = 1u64;
+        let (sender, _, raw_tx) = sign_eip4844_tx(chain_id, 0);
+
+        let state =
+            MockState::new().with_account(sender, 0, U256::from(1_000_000_000_000_000_000u64));
+        let config = PoolConfig::default();
+        let validator = TransactionValidator::new(chain_id, state, config);
+
+        let result = validator.validate(raw_tx).await;
+        assert!(
+            matches!(result, Err(TxPoolError::BlobValidation(ref message)) if message.contains("not supported")),
+            "expected unsupported blob validation error, got: {:?}",
+            result,
+        );
     }
 
     #[tokio::test]

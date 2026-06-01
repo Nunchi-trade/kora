@@ -23,8 +23,9 @@ echo ""
 
 # --- Cluster Status ---
 echo "## Cluster Status"
+VALIDATOR_COUNT="${VALIDATOR_COUNT:-4}"
 up=$(query 'count(up{job="kora-validators"}==1)')
-echo "  Validators up: $(val "$up") / 4"
+echo "  Validators up: $(val "$up") / ${VALIDATOR_COUNT}"
 
 height=$(query 'max(finalized_height)')
 echo "  Finalized height: $(val "$height")"
