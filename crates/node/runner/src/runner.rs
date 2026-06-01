@@ -111,9 +111,9 @@ type NodeStateRptr = NodeStateReporter<ThresholdScheme>;
 ///
 /// The `catching_up` flag is set to `true` when the node is recovering from a
 /// restart (i.e., `recovered_head_height` is `Some`) and cleared to `false`
-/// for fresh genesis starts. A future improvement should wire a "backfill
-/// complete" signal from the resolver to clear this flag once historical block
-/// sync finishes.
+/// for fresh genesis starts.  The same `Arc<AtomicBool>` is shared with the
+/// [`RevmApplication`], which clears it when full-execution verification
+/// advances past the recovery point, re-enabling peer bans.
 #[derive(Clone, Debug)]
 struct GraduatedBlocker<P: commonware_cryptography::PublicKey> {
     oracle: commonware_p2p::authenticated::discovery::Oracle<P>,
@@ -1347,7 +1347,7 @@ impl NodeRunner for ProductionRunner {
         // blocker unconditionally since it only bans for genuine equivocation.
         let resolver_catching_up = Arc::new(AtomicBool::new(recovered_head_height.is_some()));
         let resolver_blocker =
-            GraduatedBlocker::new(transport.oracle.clone(), resolver_catching_up);
+            GraduatedBlocker::new(transport.oracle.clone(), resolver_catching_up.clone());
 
         let resolver = PeerInitializer::init::<_, _, _, Block, _, _, _>(
             context.child("resolver"),
@@ -1390,6 +1390,7 @@ impl NodeRunner for ProductionRunner {
             fee_recipient,
         );
         app = app.with_metrics(app_metrics.clone());
+        app = app.with_resolver_catching_up(resolver_catching_up);
         if let Some((height, _)) = recovered_head_height {
             app = app.with_recovered_height(height);
             // Seed the block-fee cache from the block index so that the

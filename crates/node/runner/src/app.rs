@@ -1,10 +1,10 @@
 //! REVM-based consensus application implementation.
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, VecDeque},
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant, UNIX_EPOCH},
 };
@@ -85,6 +85,57 @@ fn unix_timestamp_secs<Env: Clock>(env: &Env) -> u64 {
 /// execution, NOT by certificate trust) reaches `recovered_height + 64`.
 const CATCH_UP_THRESHOLD: u64 = 64;
 
+/// Maximum number of entries retained in the `block_fees` cache.
+///
+/// Only the parent block's fee data is needed for EIP-1559 base fee
+/// computation, so `2 * MAX_PROPOSAL_LAG` entries is more than sufficient.
+/// Older entries are evicted in FIFO order; if the parent is not found the
+/// base fee falls back to [`kora_config::INITIAL_BASE_FEE`].
+const MAX_BLOCK_FEES_CACHED: usize = 128;
+
+const fn catch_up_complete(recovered_height: u64, verified_height: u64) -> bool {
+    recovered_height > 0 && verified_height >= recovered_height.saturating_add(CATCH_UP_THRESHOLD)
+}
+
+fn clear_resolver_catching_up_flag(
+    flag: Option<&AtomicBool>,
+    recovered_height: u64,
+    verified_height: u64,
+) -> bool {
+    if !catch_up_complete(recovered_height, verified_height) {
+        return false;
+    }
+
+    flag.is_some_and(|flag| flag.swap(false, Ordering::AcqRel))
+}
+
+fn collect_pending_tx_ids(
+    snapshots: &InMemorySnapshotStore<OverlayState<QmdbState>>,
+    from: ConsensusDigest,
+) -> Option<BTreeSet<kora_consensus::TxId>> {
+    let mut excluded = BTreeSet::new();
+    let mut current = Some(from);
+
+    while let Some(digest) = current {
+        if snapshots.is_persisted(&digest) {
+            break;
+        }
+        let Some(snapshot) = snapshots.get(&digest) else {
+            warn!(
+                ?digest,
+                collected_so_far = excluded.len(),
+                "snapshot chain gap during tx exclusion collection -- \
+                 refusing to build block to prevent duplicate transactions"
+            );
+            return None;
+        };
+        excluded.extend(snapshot.tx_ids.iter().copied());
+        current = snapshot.parent;
+    }
+
+    Some(excluded)
+}
+
 /// REVM-based consensus application.
 #[derive(Clone)]
 pub struct RevmApplication<S, E> {
@@ -114,9 +165,16 @@ pub struct RevmApplication<S, E> {
     /// Per-block `(gas_used, base_fee_per_gas)` cache, keyed by consensus
     /// digest.  Populated when a block is built or verified so that the
     /// *next* block can compute its EIP-1559 base fee from the parent's
-    /// gas usage.  Entries are small (32 + 16 bytes) and the map is bounded
-    /// by the number of unfinalized blocks.
+    /// gas usage.  Bounded to [`MAX_BLOCK_FEES_CACHED`] entries via FIFO
+    /// eviction tracked by `block_fees_order`.
     block_fees: Arc<RwLock<HashMap<ConsensusDigest, (u64, u64)>>>,
+    /// FIFO insertion order for `block_fees`, used to evict the oldest
+    /// entries when the cache exceeds [`MAX_BLOCK_FEES_CACHED`].
+    block_fees_order: Arc<RwLock<VecDeque<ConsensusDigest>>>,
+    /// Shared flag with the [`GraduatedBlocker`] that suppresses peer bans
+    /// during catch-up.  Cleared to `false` when catch-up completes so
+    /// that Byzantine peers can be banned again.
+    resolver_catching_up: Option<Arc<AtomicBool>>,
     _scheme: std::marker::PhantomData<S>,
 }
 
@@ -146,8 +204,11 @@ where
         gas_limit: u64,
         fee_recipient: Address,
     ) -> Self {
+        let genesis_digest = ledger.genesis_block().commitment();
         let mut block_fees = HashMap::new();
-        block_fees.insert(ledger.genesis_block().commitment(), (0, kora_config::INITIAL_BASE_FEE));
+        block_fees.insert(genesis_digest, (0, kora_config::INITIAL_BASE_FEE));
+        let mut block_fees_order = VecDeque::new();
+        block_fees_order.push_back(genesis_digest);
 
         Self {
             ledger,
@@ -160,6 +221,8 @@ where
             recovered_height: Arc::new(AtomicU64::new(0)),
             last_verified_height: Arc::new(AtomicU64::new(0)),
             block_fees: Arc::new(RwLock::new(block_fees)),
+            block_fees_order: Arc::new(RwLock::new(block_fees_order)),
+            resolver_catching_up: None,
             _scheme: std::marker::PhantomData,
         }
     }
@@ -194,6 +257,14 @@ where
         self
     }
 
+    /// Share the resolver's catch-up flag so that the application can clear
+    /// it when catch-up completes, re-enabling peer banning.
+    #[must_use]
+    pub fn with_resolver_catching_up(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.resolver_catching_up = Some(flag);
+        self
+    }
+
     /// Seed the block-fee cache with entries from the block index so that
     /// the first blocks after a restart can derive a correct EIP-1559 base
     /// fee.  Without this, `compute_base_fee` would fall back to
@@ -204,8 +275,11 @@ where
     /// recent blocks (at minimum the HEAD block).
     pub fn seed_block_fees(&self, entries: &[(ConsensusDigest, u64, u64)]) {
         let mut fees = self.block_fees.write();
+        let mut order = self.block_fees_order.write();
         for &(digest, gas_used, base_fee) in entries {
-            fees.insert(digest, (gas_used, base_fee));
+            if fees.insert(digest, (gas_used, base_fee)).is_none() {
+                order.push_back(digest);
+            }
         }
     }
 
@@ -227,8 +301,20 @@ where
 
     /// Record a block's gas usage and base fee so that the next block can
     /// derive its own base fee via [`Self::compute_base_fee`].
+    ///
+    /// Evicts the oldest entries when the cache exceeds
+    /// [`MAX_BLOCK_FEES_CACHED`].
     fn record_block_fees(&self, digest: ConsensusDigest, gas_used: u64, base_fee: u64) {
-        self.block_fees.write().insert(digest, (gas_used, base_fee));
+        let mut fees = self.block_fees.write();
+        let mut order = self.block_fees_order.write();
+        if fees.insert(digest, (gas_used, base_fee)).is_none() {
+            order.push_back(digest);
+        }
+        while order.len() > MAX_BLOCK_FEES_CACHED {
+            if let Some(oldest) = order.pop_front() {
+                fees.remove(&oldest);
+            }
+        }
     }
 
     fn block_context(
@@ -304,7 +390,7 @@ where
         let snapshot_elapsed = start.elapsed();
 
         let (_, mempool, snapshots) = self.ledger.proposal_components().await;
-        let excluded = match self.collect_pending_tx_ids(&snapshots, parent_digest) {
+        let excluded = match collect_pending_tx_ids(&snapshots, parent_digest) {
             Some(ids) => ids,
             None => {
                 // The snapshot chain has a gap -- we cannot determine which
@@ -463,7 +549,24 @@ where
         // Check whether full-execution verification has advanced far enough
         // past the recovery point.  If it has, catch-up is over.
         let verified = self.last_verified_height.load(Ordering::Relaxed);
-        verified < recovered.saturating_add(CATCH_UP_THRESHOLD)
+        !catch_up_complete(recovered, verified)
+    }
+
+    fn maybe_clear_resolver_catching_up(&self) {
+        let recovered = self.recovered_height.load(Ordering::Relaxed);
+        let verified = self.last_verified_height.load(Ordering::Relaxed);
+        if clear_resolver_catching_up_flag(
+            self.resolver_catching_up.as_deref(),
+            recovered,
+            verified,
+        ) {
+            info!(
+                recovered_height = recovered,
+                verified_height = verified,
+                threshold = CATCH_UP_THRESHOLD,
+                "catch-up: verification threshold reached, enabling peer banning"
+            );
+        }
     }
 
     async fn verify_block(
@@ -491,6 +594,7 @@ where
             if let Some(ref state) = self.node_state {
                 state.set_last_verified_height(block.height);
             }
+            self.maybe_clear_resolver_catching_up();
             trace!(?digest, height = block.height, "block already verified");
             return true;
         }
@@ -705,6 +809,7 @@ where
                 "catch-up: first full-execution verification past recovery point"
             );
         }
+        self.maybe_clear_resolver_catching_up();
 
         if let Some(ref m) = self.metrics {
             m.evm_execution_seconds.observe(exec_elapsed.as_secs_f64());
@@ -722,40 +827,6 @@ where
             "verified block"
         );
         true
-    }
-
-    /// Collect transaction IDs from unpersisted ancestor snapshots.
-    ///
-    /// Returns `None` if the snapshot chain has a gap (a snapshot was evicted
-    /// before we could read it). In that case the caller **must not** build a
-    /// block, because we cannot guarantee the excluded set is complete and
-    /// would risk including duplicate transactions.
-    fn collect_pending_tx_ids(
-        &self,
-        snapshots: &InMemorySnapshotStore<OverlayState<QmdbState>>,
-        from: ConsensusDigest,
-    ) -> Option<BTreeSet<kora_consensus::TxId>> {
-        let mut excluded = BTreeSet::new();
-        let mut current = Some(from);
-
-        while let Some(digest) = current {
-            if snapshots.is_persisted(&digest) {
-                break;
-            }
-            let Some(snapshot) = snapshots.get(&digest) else {
-                warn!(
-                    ?digest,
-                    collected_so_far = excluded.len(),
-                    "snapshot chain gap during tx exclusion collection -- \
-                     refusing to build block to prevent duplicate transactions"
-                );
-                return None;
-            };
-            excluded.extend(snapshot.tx_ids.iter().copied());
-            current = snapshot.parent;
-        }
-
-        Some(excluded)
     }
 }
 
@@ -911,5 +982,55 @@ where
 
             true
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn digest(byte: u8) -> ConsensusDigest {
+        ConsensusDigest::from([byte; 32])
+    }
+
+    #[test]
+    fn collect_pending_tx_ids_returns_none_on_missing_snapshot() {
+        let snapshots = InMemorySnapshotStore::<OverlayState<QmdbState>>::new();
+        let missing = digest(0x02);
+
+        assert!(
+            collect_pending_tx_ids(&snapshots, missing).is_none(),
+            "missing snapshot must nullify proposal instead of using a partial excluded set"
+        );
+    }
+
+    #[test]
+    fn collect_pending_tx_ids_stops_at_persisted_boundary() {
+        let snapshots = InMemorySnapshotStore::<OverlayState<QmdbState>>::new();
+        let persisted = digest(0x01);
+        snapshots.mark_persisted(&[persisted]);
+
+        let excluded = collect_pending_tx_ids(&snapshots, persisted).expect("complete chain");
+        assert!(excluded.is_empty());
+    }
+
+    #[test]
+    fn resolver_catching_up_flag_clears_at_verification_threshold() {
+        let recovered = 100;
+        let flag = AtomicBool::new(true);
+
+        assert!(!clear_resolver_catching_up_flag(
+            Some(&flag),
+            recovered,
+            recovered + CATCH_UP_THRESHOLD - 1
+        ));
+        assert!(flag.load(Ordering::Relaxed));
+
+        assert!(clear_resolver_catching_up_flag(
+            Some(&flag),
+            recovered,
+            recovered + CATCH_UP_THRESHOLD
+        ));
+        assert!(!flag.load(Ordering::Relaxed));
     }
 }
